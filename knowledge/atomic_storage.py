@@ -5,9 +5,17 @@ Replaces vector databases (ChromaDB, FAISS) with JSON-based storage
 to minimize memory footprint on resource-constrained systems.
 
 Features sharding for improved scalability and memory efficiency.
+
+.. deprecated::
+    knowledge.atomic_storage is DEPRECATED. Use knowledge.duckdb_store instead.
 """
 
 from __future__ import annotations
+
+import warnings
+warnings.warn(
+    "knowledge.atomic_storage is DEPRECATED. Use knowledge.duckdb_store instead.",
+    DeprecationWarning, stacklevel=2)
 
 import json
 import hashlib

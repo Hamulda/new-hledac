@@ -39,6 +39,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Sprint 8UF B.1: xgrammar grammar cache — compile ONCE per schema lifetime
+# ---------------------------------------------------------------------------
+import hashlib
+import threading as _threading
+
+_GRAMMAR_CACHE: dict[str, object] = {}
+_GRAMMAR_CACHE_LOCK = _threading.RLock()
+
+
+def _get_cached_grammar(schema_json_str: str, tokenizer):
+    """Compile JSON Schema grammar ONLY on first call per schema.
+    Key = SHA-256 of first 256 chars of schema (schema is constant)."""
+    key = hashlib.sha256(schema_json_str[:256].encode()).hexdigest()[:16]
+    with _GRAMMAR_CACHE_LOCK:
+        if key not in _GRAMMAR_CACHE:
+            import xgrammar as xgr
+            tokenizer_info = xgr.tokenizer_info.TokenizerInfo.from_tokenizer(tokenizer)
+            compiler = xgr.GrammarCompiler(tokenizer_info)
+            _GRAMMAR_CACHE[key] = compiler.compile_json_schema(schema_json_str)
+        return _GRAMMAR_CACHE[key]
+
 
 # ---------------------------------------------------------------------------
 # Sprint 8UC B.1: JSON Schema for OSINTReport — xgrammar + Outlines compatible
@@ -428,11 +450,10 @@ class SynthesisRunner:
                 import xgrammar as xgr
                 import mlx_lm
 
-                # Compile JSON schema grammar
-                tokenizer_info = xgr.tokenizer_info.TokenizerInfo.from_tokenizer(tokenizer)
-                compiler = xgr.GrammarCompiler(tokenizer_info)
+                # Use cached grammar compilation (Sprint 8UF B.1)
                 schema = _build_osint_json_schema()
-                grammar = compiler.compile_json_schema(_json.dumps(schema))
+                schema_str = _json.dumps(schema, sort_keys=True)
+                grammar = _get_cached_grammar(schema_str, tokenizer)
 
                 # Build logits processor via contrib.hf
                 try:
@@ -458,22 +479,32 @@ class SynthesisRunner:
                     formatted = prompt
 
                 # Generate with xgrammar logits processor
+                output = None
                 try:
-                    output = mlx_lm.generate(
-                        model, tokenizer,
-                        prompt=formatted,
-                        max_tokens=512,
-                        logits_processors=[processor],
-                        verbose=False,
-                    )
-                except TypeError:
-                    # Old mlx_lm without logits_processors
-                    output = mlx_lm.generate(
-                        model, tokenizer,
-                        prompt=formatted,
-                        max_tokens=512,
-                        verbose=False,
-                    )
+                    try:
+                        output = mlx_lm.generate(
+                            model, tokenizer,
+                            prompt=formatted,
+                            max_tokens=512,
+                            logits_processors=[processor],
+                            verbose=False,
+                        )
+                    except TypeError:
+                        # Old mlx_lm without logits_processors
+                        output = mlx_lm.generate(
+                            model, tokenizer,
+                            prompt=formatted,
+                            max_tokens=512,
+                            verbose=False,
+                        )
+                finally:
+                    # Sprint 8UD B.2: Clear MLX Metal cache after inference
+                    try:
+                        import mlx.core as _mx
+                        if _mx.metal.is_available():
+                            _mx.metal.clear_cache()
+                    except Exception:
+                        pass  # Non-fatal
 
                 result = _json.loads(output)
                 if "title" in result and "summary" in result:
@@ -718,6 +749,14 @@ class SynthesisRunner:
                         return [str(s) for s in parsed[:5]]
             except Exception as e:
                 logger.warning(f"decompose_query generate: {e}")
+            finally:
+                # Sprint 8UD B.2: Clear MLX Metal cache after inference
+                try:
+                    import mlx.core as _mx
+                    if _mx.metal.is_available():
+                        _mx.metal.clear_cache()
+                except Exception:
+                    pass  # Non-fatal
             return [query]
 
         loop = asyncio.get_running_loop()

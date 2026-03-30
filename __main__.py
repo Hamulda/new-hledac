@@ -1996,14 +1996,14 @@ async def _run_benchmark_probe() -> Dict[str, Any]:
 
 class AsyncSessionFactory:
     """
-    Singleton-ish async session factory for consistent event loop handling.
+    Singleton-ish async session factory for aiohttp.ClientSession management.
 
-    Sprint 0B: Ensures single event loop policy across the application.
-    Uses module-level singleton pattern with lazy initialization.
+    Sprint 8UD B.8: Refactored from AbstractEventLoop to ClientSession.
+    Thread-safe lazy initialization with lock.
     """
 
     _instance: Optional["AsyncSessionFactory"] = None
-    _loop: Optional[asyncio.AbstractEventLoop] = None
+    _session: Optional["aiohttp.ClientSession"] = None
     _session_count: int = 0
     _lock: Optional["asyncio.Lock"] = None
 
@@ -2019,30 +2019,40 @@ class AsyncSessionFactory:
             cls._lock = asyncio.Lock()
         return cls._lock
 
-    async def get_session(self) -> asyncio.AbstractEventLoop:
+    async def get_session(self) -> "aiohttp.ClientSession":
         """
-        Get or create an async session (event loop).
+        Get or create a shared aiohttp.ClientSession.
 
         Returns:
-            The current event loop or a new one.
+            Shared ClientSession instance.
 
         Thread-safe: Uses lock to prevent race conditions during initialization.
         """
+        import aiohttp
+
         async with self.get_lock():
-            if self._loop is None or self._loop.is_closed():
-                self._loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(self._loop)
-                logger.info("[SESSION] New event loop created")
+            if self._session is None or self._session.closed:
+                connector = aiohttp.TCPConnector(
+                    limit=20,
+                    ttl_dns_cache=300,
+                    use_dns_cache=True,
+                )
+                timeout = aiohttp.ClientTimeout(total=30)
+                self._session = aiohttp.ClientSession(
+                    connector=connector,
+                    timeout=timeout,
+                )
+                logger.info("[SESSION] New aiohttp.ClientSession created")
             self._session_count += 1
-            return self._loop
+            return self._session
 
     async def close_session(self) -> None:
         """Close the current session if exists."""
         async with self.get_lock():
-            if self._loop is not None and not self._loop.is_closed():
-                self._loop.close()
-                self._loop = None
-                logger.info("[SESSION] Event loop closed")
+            if self._session is not None and not self._session.closed:
+                await self._session.close()
+                self._session = None
+                logger.info("[SESSION] ClientSession closed")
 
     @property
     def session_count(self) -> int:
@@ -2372,17 +2382,29 @@ async def _run_sprint_mode(
         # ---- ACTIVE: start UMA monitoring ----
         dispatcher = UMAAlarmDispatcher()
 
-        # CRITICAL callback: reduce concurrency to 1
+        # CRITICAL callback: reduce concurrency to 1 + clear Metal cache (Sprint 8UF B.2)
         async def _on_critical():
             global _sprint_frontier_stopped
             logger.warning("[SPRINT] UMA CRITICAL — reducing concurrency to 1")
             _sprint_frontier_stopped = True
+            try:
+                import mlx.core as mx
+                mx.metal.clear_cache()
+            except Exception:
+                pass
 
-        # EMERGENCY callback: stop new frontier work
+        # EMERGENCY callback: stop new frontier work + clear Metal cache + gc.collect() (Sprint 8UF B.2)
         async def _on_emergency():
             global _sprint_frontier_stopped
             logger.critical("[SPRINT] UMA EMERGENCY — stopping new frontier work")
             _sprint_frontier_stopped = True
+            try:
+                import mlx.core as mx
+                mx.metal.clear_cache()
+            except Exception:
+                pass
+            import gc
+            gc.collect()
 
         dispatcher.register_callback(UMA_STATE_CRITICAL, _on_critical)
         dispatcher.register_callback(UMA_STATE_EMERGENCY, _on_emergency)
@@ -2411,6 +2433,11 @@ async def _run_sprint_mode(
             if lifecycle.remaining_time <= 180.0:
                 lifecycle.request_windup()
                 break
+
+            # Sprint 8UF B.2: Skip pipeline if UMA emergency stopped frontier
+            if _sprint_frontier_stopped:
+                await asyncio.sleep(5)
+                continue
 
             # Run pipeline every 60s
             now = time.monotonic()
@@ -2465,7 +2492,7 @@ async def _run_sprint_mode(
 
         # Sprint 8TA B.3 + 8TC B.4: Compute and persist sprint scorecard + Markdown export
         _mark_phase("DONE")
-        _print_scorecard_report(target, store_instance, sprint_report=windup_report)
+        await _print_scorecard_report(target, store_instance, sprint_report=windup_report)
 
         # ---- TEARDOWN ----
         _boot_record("sprint_mode", "TEARDOWN")

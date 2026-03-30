@@ -1179,6 +1179,27 @@ def get_default_feed_seeds() -> tuple[FeedSeed, ...]:
             source="curated_seed",
             priority=3,
         ),
+        # CISA Known Exploited Vulnerabilities JSON feed (Sprint 8UF B.3)
+        FeedSeed(
+            feed_url="https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+            label="CISA KEV",
+            source="curated_seed",
+            priority=10,
+        ),
+        # NVD CVE JSON feed — recent vulnerabilities (Sprint 8UF B.3)
+        FeedSeed(
+            feed_url="https://services.nvd.nist.gov/rest/json/cves/2.0?pubStartDate=2025-01-01T00:00:00.000&pubEndDate=2025-12-31T23:59:59.999",
+            label="NVD CVE JSON",
+            source="curated_seed",
+            priority=8,
+        ),
+        # BleepingComputer — security news (Sprint 8UF B.3)
+        FeedSeed(
+            feed_url="https://www.bleepingcomputer.com/feed/",
+            label="BleepingComputer",
+            source="curated_seed",
+            priority=4,
+        ),
     )
 
 

@@ -10,7 +10,15 @@ Key Features:
     - On-demand Model2Vec loading (tiny model ~30MB)
     - Semantic similarity search with cosine similarity
     - Graph structure for knowledge relationships
+
+.. deprecated::
+    knowledge.persistent_layer is DEPRECATED. Use knowledge.duckdb_store instead.
 """
+
+import warnings
+warnings.warn(
+    "knowledge.persistent_layer is DEPRECATED. Use knowledge.duckdb_store instead.",
+    DeprecationWarning, stacklevel=2)
 
 import logging
 from collections import OrderedDict, deque

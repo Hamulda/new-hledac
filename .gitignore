@@ -30,3 +30,8 @@ htmlcov/
 # Local config
 *.local
 .env
+
+# Sprint 8UF B.7: Artifact cleanup patterns
+*.py.new
+*.py.new2
+*.py.bak
