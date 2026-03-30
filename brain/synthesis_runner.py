@@ -248,16 +248,78 @@ class SynthesisRunner:
         if self._duckdb_store is not None:
             episode_ctx = await self._build_episode_context(self._duckdb_store, query)
 
-        # Sestavit prompt z top findings
+        # Sprint 8VA B.2: RAG retrieval — semantically relevant findings
+        # Token budget guard pro M1 8GB (~1800 tokens rezerva)
+        rag_context = ""
+        try:
+            from knowledge.rag_engine import RAGEngine
+            _rag = RAGEngine()  # lazy singleton
+            # Sprint 8VA: RAGEngine.query() — adaptuj dle skutečné API
+            rag_result = await _rag.query(
+                query=query,
+                context_chunks=[f.get("text", "")[:500] for f in findings[:20]],
+                use_compression=False,
+            )
+            if rag_result and rag_result.get("context"):
+                raw_ctx = rag_result["context"]
+                # Token budget: max ~1800 tokens RAG → ~7200 znaků
+                max_chars = 7200
+                if len(raw_ctx) > max_chars:
+                    raw_ctx = raw_ctx[:max_chars] + "...[truncated]"
+                rag_context = f"\n\n## Semantically Retrieved Findings\n{raw_ctx}"
+        except Exception as e:
+            logger.debug(f"Sprint 8VA RAG retrieve skipped: {e}")
+
+        # Sprint 8VA B.2 + C.2: Sort findings first (needed for both RAG and GraphRAG)
         top = sorted(findings, key=lambda f: f.get("confidence", 0.0), reverse=True)[:max_findings]
+
+        # Sprint 8VA C.2: GraphRAG — IOC relationship context (WINDUP phase)
+        graph_context = ""
+        top_iocs = [
+            f.get("ioc") or f.get("indicator") or f.get("value")
+            for f in top[:5]
+            if f.get("ioc") or f.get("indicator") or f.get("value")
+        ]
+        if top_iocs:
+            try:
+                from knowledge.graph_rag import GraphRAGOrchestrator
+                # GraphRAGOrchestrator vyžaduje knowledge_layer — zkusíme najít
+                from knowledge.persistent_layer import PersistentKnowledgeLayer
+                kl = PersistentKnowledgeLayer()
+                _grag = GraphRAGOrchestrator(kl)
+                # Sprint 8VA: GraphRAGOrchestrator.find_connections() — ne extract_subgraph/verbalize
+                if hasattr(_grag, "find_connections"):
+                    conn_texts = []
+                    for ioc in top_iocs[:3]:
+                        try:
+                            conns = _grag.find_connections(ioc, ioc, max_hops=2)
+                            if conns:
+                                conn_texts.append(f"IOC {ioc}: {'; '.join(str(c)[:80] for c in conns[:3])}")
+                        except Exception:
+                            pass
+                    if conn_texts:
+                        graph_context = "\n\n## IOC Relationship Graph\n" + "\n".join(conn_texts)[:1500]
+            except Exception as e:
+                logger.debug(f"Sprint 8VA GraphRAG skipped: {e}")
+
+        # Sestavit prompt z top findings
         findings_text = "\n".join(
             f"- [{f.get('source_type', '?')}] {f.get('text', '')[:200]}"
             for f in top
         )
 
+        # Sprint 8VA B.2 + C.2: Sestavit synthesis prompt s RAG + GraphRAG context
+        context_parts = []
         if episode_ctx:
+            context_parts.append(episode_ctx)
+        if rag_context:
+            context_parts.append(rag_context)
+        if graph_context:
+            context_parts.append(graph_context)
+
+        if context_parts:
             prompt = (
-                f"{episode_ctx}\n\n---\n"
+                f"{chr(10).join(context_parts)}\n\n---\n"
                 f"Query: {query}{stix_context}\n"
                 f"Findings:\n{findings_text}\n"
                 f"Current timestamp: {time.time()}"

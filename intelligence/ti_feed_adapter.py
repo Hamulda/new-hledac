@@ -12,6 +12,13 @@ Struktura:
 
 from __future__ import annotations
 
+import warnings
+warnings.warn(
+    "intelligence.ti_feed_adapter je deprecated. "
+    "Používej discovery.ti_feed_adapter.",
+    DeprecationWarning, stacklevel=2
+)
+
 import asyncio
 import csv
 import json

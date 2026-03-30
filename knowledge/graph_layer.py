@@ -37,7 +37,7 @@ class KnowledgeGraphLayer:
         logger.info("Initializing KnowledgeGraphLayer...")
         
         try:
-            from hledac.universal.knowledge.persistent_layer import PersistentKnowledgeLayer
+            from hledac.universal.legacy.persistent_layer import PersistentKnowledgeLayer
             self._kg = PersistentKnowledgeLayer(db_path=self.db_path)
             self._kg.initialize()
             logger.info("✓ Knowledge Graph initialized")

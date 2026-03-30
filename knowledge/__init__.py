@@ -12,12 +12,25 @@ Obsahuje:
 """
 
 from .graph_layer import KnowledgeGraphLayer
-from .atomic_storage import AtomicJSONKnowledgeGraph, KnowledgeEntry, get_atomic_storage
 from .context_graph import ContextGraph
 from .rag_engine import RAGEngine, RAGConfig, Document, RetrievedChunk, BM25Index, HNSWVectorIndex
 
-# Nové komponenty ze supreme
-from .persistent_layer import (
+# Sprint 8VC: atomic_storage and persistent_layer moved to legacy/
+# These imports now proxy to legacy/ with deprecation warnings
+import warnings as _warnings
+_warnings.warn(
+    "knowledge.atomic_storage is DEPRECATED. Use knowledge.duckdb_store instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+from ..legacy.atomic_storage import AtomicJSONKnowledgeGraph, KnowledgeEntry, get_atomic_storage
+
+_warnings.warn(
+    "knowledge.persistent_layer is DEPRECATED. Use knowledge.duckdb_store instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+from ..legacy.persistent_layer import (
     PersistentKnowledgeLayer,
     KnowledgeNode,
     KnowledgeEdge,

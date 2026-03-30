@@ -1200,6 +1200,20 @@ def get_default_feed_seeds() -> tuple[FeedSeed, ...]:
             source="curated_seed",
             priority=4,
         ),
+        # Sprint 8VB: Wayback CDX — historical web archive
+        FeedSeed(
+            feed_url="https://web.archive.org/cdx/search/cdx?url=*.com&output=json&limit=20",
+            label="Wayback CDX",
+            source="curated_seed",
+            priority=1,
+        ),
+        # Sprint 8VB: CommonCrawl CDX — petabyte crawl index
+        FeedSeed(
+            feed_url="https://index.commoncrawl.org/CC-MAIN-2024-51-index",
+            label="CommonCrawl CDX",
+            source="curated_seed",
+            priority=1,
+        ),
     )
 
 

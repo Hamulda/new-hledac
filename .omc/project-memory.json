@@ -623,6 +623,91 @@
       "keyFiles": []
     }
   },
-  "hotPaths": [],
+  "hotPaths": [
+    {
+      "path": "__init__.py",
+      "accessCount": 14,
+      "lastAccessed": 1774908540291,
+      "type": "file"
+    },
+    {
+      "path": "autonomous_orchestrator.py",
+      "accessCount": 8,
+      "lastAccessed": 1774908102015,
+      "type": "file"
+    },
+    {
+      "path": "__main__.py",
+      "accessCount": 4,
+      "lastAccessed": 1774908164126,
+      "type": "file"
+    },
+    {
+      "path": "legacy/__init__.py",
+      "accessCount": 3,
+      "lastAccessed": 1774908345187,
+      "type": "file"
+    },
+    {
+      "path": "SPRINT_8VC_REPORT.md",
+      "accessCount": 3,
+      "lastAccessed": 1774908622327,
+      "type": "file"
+    },
+    {
+      "path": "knowledge/__init__.py",
+      "accessCount": 2,
+      "lastAccessed": 1774908235030,
+      "type": "file"
+    },
+    {
+      "path": "knowledge/graph_rag.py",
+      "accessCount": 2,
+      "lastAccessed": 1774908397808,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vc/test_legacy_burial.py",
+      "accessCount": 2,
+      "lastAccessed": 1774908739747,
+      "type": "file"
+    },
+    {
+      "path": "legacy/atomic_storage.py",
+      "accessCount": 1,
+      "lastAccessed": 1774908316926,
+      "type": "file"
+    },
+    {
+      "path": "knowledge/graph_layer.py",
+      "accessCount": 1,
+      "lastAccessed": 1774908438680,
+      "type": "file"
+    },
+    {
+      "path": "legacy/autonomous_orchestrator.py",
+      "accessCount": 1,
+      "lastAccessed": 1774908480345,
+      "type": "file"
+    },
+    {
+      "path": "brain/_lazy.py",
+      "accessCount": 1,
+      "lastAccessed": 1774908640576,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vc/test_duckdb_compat.py",
+      "accessCount": 1,
+      "lastAccessed": 1774908704990,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vc/test_brain_lazy.py",
+      "accessCount": 1,
+      "lastAccessed": 1774908712568,
+      "type": "file"
+    }
+  ],
   "userDirectives": []
 }

@@ -16,7 +16,7 @@ import logging
 import re
 from typing import Any, Dict, List
 
-from hledac.universal.knowledge.persistent_layer import (
+from hledac.universal.legacy.persistent_layer import (
     EdgeType,
     KnowledgeEdge,
     KnowledgeNode,

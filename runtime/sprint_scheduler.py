@@ -350,6 +350,12 @@ class SprintScheduler:
         # Sprint 8UC B.5: OODA loop
         self._ooda_interval: float = 60.0
         self._last_ooda: float = 0.0
+        # Sprint 8VB: Adaptive timeout EMA
+        self._fetch_latency_ema: dict[str, float] = {}
+        _EMA_ALPHA: float = 0.3
+        _TIMEOUT_MIN: float = 5.0
+        _TIMEOUT_MAX: float = 30.0
+        _TIMEOUT_MULT: float = 3.0
 
     # ── Public API ─────────────────────────────────────────────────────────
 
@@ -854,6 +860,20 @@ class SprintScheduler:
         """Set novelty bonus: 1.5 if source added new IOC types this sprint."""
         self._novelty_bonuses[source_type] = 1.5 if has_bonus else 1.0
 
+    # ── Sprint 8VB: Adaptive Timeout ───────────────────────────────────
+
+    def _update_latency_ema(self, domain: str, latency: float) -> None:
+        """Update EMA for domain fetch latency."""
+        prev = self._fetch_latency_ema.get(domain, latency)
+        self._fetch_latency_ema[domain] = (
+            0.3 * latency + 0.7 * prev
+        )
+
+    def get_adaptive_timeout(self, domain: str) -> float:
+        """Get adaptive timeout based on EMA latency. Clamped to [5, 30]s."""
+        ema = self._fetch_latency_ema.get(domain, 10.0)
+        return max(5.0, min(30.0, ema * 3.0))
+
     async def log_source_hit(
         self,
         store: Any,
@@ -893,13 +913,18 @@ class SprintScheduler:
             return
         # Multi-pivot: enqueue ALL applicable task types per IOC
         task_types = {
+            # Sprint 8TB original
             "cve": ["cve_to_github", "cve_to_academic"],
-            "ipv4": ["ip_to_ct", "ip_to_greynoise"],
+            "ipv4": ["ip_to_ct", "ip_to_greynoise", "shodan_enrich"],
             "ipv6": ["ip_to_ct"],
-            "domain": ["domain_to_dns", "domain_to_wayback"],
+            "domain": ["domain_to_dns", "domain_to_wayback", "domain_to_pdns",
+                       "domain_to_ct", "ahmia_search", "rdap_lookup"],
             "md5": ["hash_to_mb"],
             "sha256": ["hash_to_mb"],
             "sha1": ["hash_to_mb"],
+            # Sprint 8VB: Maximum OSINT Coverage
+            "url": ["wayback_search", "commoncrawl_search", "paste_keyword_search",
+                    "github_dork", "multi_engine_search"],
         }.get(ioc_type, [])
         if not task_types:
             return
@@ -1029,6 +1054,91 @@ class SprintScheduler:
                         f"GreyNoise: {task.ioc_value} = MALICIOUS "
                         f"({result.get('name', '')})"
                     )
+
+            # Sprint 8VB: Maximum OSINT Coverage dispatch
+            elif task.task_type == "domain_to_pdns":
+                from hledac.universal.discovery.ti_feed_adapter import query_circl_pdns
+                for r in await query_circl_pdns(task.ioc_value):
+                    await self._buffer_ioc_pivot(
+                        r.get("ioc_type", "domain"), r.get("ioc", ""), 0.75
+                    )
+
+            elif task.task_type == "domain_to_ct":
+                from hledac.universal.discovery.ti_feed_adapter import search_crtsh
+                for r in await search_crtsh(task.ioc_value):
+                    await self._buffer_ioc_pivot("domain", r.get("ioc", ""), 0.70)
+
+            elif task.task_type == "ct_live_monitor":
+                from hledac.universal.discovery.ti_feed_adapter import certstream_monitor
+                for r in await certstream_monitor(task.ioc_value, duration_s=120):
+                    await self._buffer_ioc_pivot("domain", r.get("ioc", ""), 0.65)
+
+            elif task.task_type == "paste_keyword_search":
+                from hledac.universal.discovery.ti_feed_adapter import scrape_pastebin_for_keyword
+                for r in await scrape_pastebin_for_keyword(task.ioc_value):
+                    await self._buffer_ioc_pivot("url", r.get("url", ""), 0.60)
+
+            elif task.task_type == "github_dork":
+                from hledac.universal.discovery.ti_feed_adapter import github_dork
+                for r in await github_dork(task.ioc_value):
+                    await self._buffer_ioc_pivot("url", r.get("url", ""), 0.70)
+                await asyncio.sleep(2.0)
+
+            elif task.task_type == "ahmia_search":
+                from hledac.universal.discovery.ti_feed_adapter import search_ahmia
+                for r in await search_ahmia(task.ioc_value, use_onion=False):
+                    await self._buffer_ioc_pivot("url", r.get("url", ""), 0.65)
+
+            elif task.task_type == "shodan_enrich":
+                from hledac.universal.discovery.ti_feed_adapter import enrich_ip_internetdb
+                r = await enrich_ip_internetdb(task.ioc_value)
+                if r:
+                    await self._buffer_ioc_pivot("ipv4", task.ioc_value, 0.80)
+
+            elif task.task_type == "rdap_lookup":
+                from hledac.universal.discovery.ti_feed_adapter import query_rdap
+                r = await query_rdap(task.ioc_value)
+                if r:
+                    await self._buffer_ioc_pivot("domain", task.ioc_value, 0.75)
+
+            elif task.task_type == "multi_engine_search":
+                from hledac.universal.discovery.duckduckgo_adapter import search_multi_engine
+                for r in await search_multi_engine(task.ioc_value):
+                    await self._buffer_ioc_pivot("url", r.get("url", ""), 0.70)
+
+            elif task.task_type == "wayback_search":
+                from hledac.universal.discovery.duckduckgo_adapter import _search_wayback_cdx
+                for r in await _search_wayback_cdx(task.ioc_value):
+                    await self._buffer_ioc_pivot("url", r.get("url", ""), 0.65)
+
+            elif task.task_type == "commoncrawl_search":
+                from hledac.universal.discovery.duckduckgo_adapter import _search_commoncrawl_cdx
+                for r in await _search_commoncrawl_cdx(task.ioc_value):
+                    await self._buffer_ioc_pivot("url", r.get("url", ""), 0.65)
+
+            elif task.task_type == "dht_lookup":
+                # Sprint 8VB D.10: DHT integration via KademliaNode
+                try:
+                    from dht.kademlia_node import KademliaNode
+                    from hledac.universal.core.resource_governor import ResourceGovernor
+                    node = KademliaNode(
+                        node_id=f"hledac-{task.ioc_value[:8]}",
+                        governor=ResourceGovernor(),
+                    )
+                    result = await node.find_value(task.ioc_value)
+                    if result:
+                        await self._buffer_ioc_pivot("domain", task.ioc_value, 0.75)
+                except Exception as e:
+                    log.debug(f"[DHT lookup] {e}")
+
+            elif task.task_type == "taxii_fetch":
+                # TAXII 2.1 fetch via discovery.ti_feed_adapter
+                try:
+                    from hledac.universal.discovery.ti_feed_adapter import fetch_taxii
+                    for entry in await fetch_taxii(task.ioc_value):
+                        await self._buffer_ioc_pivot("url", entry.get("url", ""), 0.70)
+                except ImportError:
+                    pass  # TAXII not available
         finally:
             await session.close()
 

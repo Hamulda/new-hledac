@@ -17,10 +17,12 @@ INVARIANTS (Sprint 8AC):
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import urllib.parse as urlparse
 from typing import TYPE_CHECKING
 
+import aiohttp
 import msgspec
 
 if TYPE_CHECKING:
@@ -303,3 +305,207 @@ async def async_search_public_web(
     )
 
     return DiscoveryBatchResult(hits=final_hits, error=None)
+
+
+# ── Sprint 8VB: Multi-Engine Search ───────────────────────────────────────────
+
+logger = logging.getLogger(__name__)
+
+
+async def _scrape_mojeek(
+    query: str, n: int = 10
+) -> list[dict]:
+    """Mojeek independent crawler, no CAPTCHA policy."""
+    from bs4 import BeautifulSoup
+    _UA = (
+        "Mozilla/5.0 (Macintosh; ARM Mac OS X 14_0) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+        "Version/17.0 Safari/605.1.15"
+    )
+    results = []
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://www.mojeek.com/search",
+                params={"q": query},
+                headers={"User-Agent": _UA,
+                         "Accept-Language": "en-US,en;q=0.9"},
+                timeout=aiohttp.ClientTimeout(total=12)
+            ) as r:
+                if r.status != 200:
+                    return []
+                soup = BeautifulSoup(await r.text(), "html.parser")
+                for li in soup.select("ul.results-standard li")[:n]:
+                    a = li.select_one("a.ob")
+                    p = li.select_one("p.s")
+                    if a and a.get("href"):
+                        results.append({
+                            "title":   a.get_text(strip=True),
+                            "url":     a["href"],
+                            "snippet": p.get_text(strip=True) if p else "",
+                            "source":  "mojeek_scrape"
+                        })
+    except Exception as e:
+        logger.debug(f"[Mojeek] {e}")
+    return results
+
+
+async def _search_wayback_cdx(
+    url_pattern: str, max_results: int = 20
+) -> list[dict]:
+    """Wayback CDX API — historical snapshots of URL."""
+    import json as _json
+    results = []
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "http://web.archive.org/cdx/search/cdx",
+                params={
+                    "url":      url_pattern,
+                    "output":   "json",
+                    "limit":    max_results,
+                    "fl":       "timestamp,original,statuscode,mimetype",
+                    "collapse": "urlkey",
+                    "filter":   "statuscode:200"
+                },
+                timeout=aiohttp.ClientTimeout(total=20)
+            ) as r:
+                if r.status != 200:
+                    return []
+                rows = await r.json(content_type=None)
+                if not rows or len(rows) < 2:
+                    return []
+                keys = rows[0]
+                for row in rows[1:max_results + 1]:
+                    rec = dict(zip(keys, row))
+                    ts  = rec.get("timestamp", "")
+                    url = rec.get("original", "")
+                    results.append({
+                        "title":     f"Wayback: {url}",
+                        "url":       f"https://web.archive.org/web/{ts}/{url}",
+                        "snapshot_url": url,
+                        "timestamp": ts,
+                        "mimetype":  rec.get("mimetype", ""),
+                        "source":    "wayback_cdx"
+                    })
+    except Exception as e:
+        logger.warning(f"[Wayback CDX] {e}")
+    return results
+
+
+async def _search_commoncrawl_cdx(
+    url_pattern: str, max_results: int = 20
+) -> list[dict]:
+    """CommonCrawl CDX index — petabytes of crawl data, free."""
+    import json as _json
+    results = []
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://index.commoncrawl.org/CC-MAIN-2024-51-index",
+                params={
+                    "url":    url_pattern,
+                    "output": "json",
+                    "limit":  max_results,
+                    "fl":     "url,timestamp,filename,offset,length"
+                },
+                timeout=aiohttp.ClientTimeout(total=25)
+            ) as r:
+                if r.status != 200:
+                    return []
+                for line in (await r.text()).strip().split("\n")[:max_results]:
+                    try:
+                        rec = _json.loads(line)
+                        results.append({
+                            "title":        f"CommonCrawl: {rec.get('url','')}",
+                            "url":          rec.get("url", ""),
+                            "timestamp":    rec.get("timestamp", ""),
+                            "warc_filename":rec.get("filename", ""),
+                            "warc_offset":  rec.get("offset", 0),
+                            "warc_length":  rec.get("length", 0),
+                            "source":       "commoncrawl_cdx"
+                        })
+                    except Exception:
+                        continue
+    except Exception as e:
+        logger.warning(f"[CommonCrawl CDX] {e}")
+    return results
+
+
+async def _query_shodan_internetdb(ip: str) -> dict:
+    """Shodan InternetDB — open ports, CVEs, hostnames. Free, no API key."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://internetdb.shodan.io/{ip}",
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    return {
+                        "ip":        ip,
+                        "ports":     data.get("ports", []),
+                        "cves":      data.get("cves", []),
+                        "hostnames": data.get("hostnames", []),
+                        "tags":      data.get("tags", []),
+                        "source":    "shodan_internetdb"
+                    }
+    except Exception as e:
+        logger.debug(f"[ShodanInternetDB] {e}")
+    return {}
+
+
+async def _query_rdap(target: str) -> dict:
+    """RDAP — structured WHOIS successor, free without key."""
+    is_ip = target.replace(".", "").isdigit() or ":" in target
+    base  = "https://rdap.org"
+    endpoint = f"{base}/ip/{target}" if is_ip else f"{base}/domain/{target}"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                endpoint,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    return {
+                        "target": target,
+                        "rdap":   data,
+                        "source": "rdap_org"
+                    }
+    except Exception as e:
+        logger.debug(f"[RDAP] {e}")
+    return {}
+
+
+async def search_multi_engine(
+    query: str, max_results: int = 30
+) -> list[dict]:
+    """
+    Parallel search: DDG + Mojeek with URL deduplication.
+    Bing excluded — actively blocks + CAPTCHA.
+    """
+    ddg_task    = async_search_public_web(query, max_results=max_results // 2)
+    mojeek_task = _scrape_mojeek(query, max_results // 2)
+
+    all_results: list[dict] = []
+    for batch in await asyncio.gather(
+        ddg_task, mojeek_task,
+        return_exceptions=True
+    ):
+        if isinstance(batch, DiscoveryBatchResult) and batch.hits:
+            all_results.extend([
+                {"title": h.title, "url": h.url, "snippet": h.snippet, "source": h.source}
+                for h in batch.hits
+            ])
+        elif isinstance(batch, list):
+            all_results.extend(batch)
+
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for r in all_results:
+        u = r.get("url", "")
+        if u and u not in seen:
+            seen.add(u)
+            deduped.append(r)
+    return deduped[:max_results]

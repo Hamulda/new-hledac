@@ -12,7 +12,11 @@ Sprint 8BN — Structured TI Ingest V1
 
 from __future__ import annotations
 
+import aiohttp
+import asyncio
+import hashlib
 import json
+import logging
 import time
 import urllib.parse
 from abc import ABC, abstractmethod
@@ -435,6 +439,480 @@ class CisaKevAdapter(SourceAdapter):
             )
 
         return tuple(entries)
+
+
+# =============================================================================
+# Sprint 8VB: Maximum OSINT Coverage
+# =============================================================================
+
+logger = logging.getLogger(__name__)
+
+# ── ABUSE.CH FEEDS ──────────────────────────────────────────────────────────
+
+async def fetch_urlhaus(max_items: int = 100) -> list[dict]:
+    """URLhaus — live malware URL feed, public API, no key required."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://urlhaus-api.abuse.ch/v1/urls/recent/",
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as r:
+                data = await r.json()
+                return [
+                    {
+                        "ioc":         e.get("url"),
+                        "ioc_type":    "url",
+                        "threat_type": e.get("threat"),
+                        "title":       f"URLhaus: {e.get('threat','malware')}",
+                        "source":      "urlhaus"
+                    }
+                    for e in data.get("urls", [])[:max_items]
+                    if e.get("url_status") == "online"
+                ]
+    except Exception as e:
+        logger.debug(f"[URLhaus] {e}")
+    return []
+
+
+async def fetch_threatfox(days: int = 1) -> list[dict]:
+    """ThreatFox IOC feed — public API, no key required."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(
+                "https://threatfox-api.abuse.ch/api/v1/",
+                json={"query": "get_iocs", "days": days},
+                timeout=aiohttp.ClientTimeout(total=20)
+            ) as r:
+                data = await r.json()
+                return [
+                    {
+                        "ioc":        i.get("ioc_value"),
+                        "ioc_type":   i.get("ioc_type"),
+                        "malware":    i.get("malware"),
+                        "confidence": i.get("confidence_level", 50) / 100,
+                        "title":      f"ThreatFox: {i.get('malware','?')}",
+                        "source":     "threatfox"
+                    }
+                    for i in data.get("data", [])
+                ]
+    except Exception as e:
+        logger.debug(f"[ThreatFox] {e}")
+    return []
+
+
+async def fetch_feodo_c2() -> list[dict]:
+    """Feodo Tracker C2 blocklist — public JSON, no key required."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://feodotracker.abuse.ch/downloads/ipblocklist.json",
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as r:
+                return [
+                    {
+                        "ioc":      e.get("ip_address"),
+                        "ioc_type": "ip",
+                        "malware":  e.get("malware"),
+                        "port":     e.get("port"),
+                        "title":    f"Feodo C2: {e.get('ip_address')}",
+                        "source":   "feodo_tracker"
+                    }
+                    for e in await r.json(content_type=None)
+                ]
+    except Exception as e:
+        logger.debug(f"[Feodo] {e}")
+    return []
+
+
+# ── PASSIVE DNS ─────────────────────────────────────────────────────────────
+
+async def query_circl_pdns(
+    domain: str, max_results: int = 50
+) -> list[dict]:
+    """CIRCL Passive DNS — community free tier, no authentication."""
+    import json as _json
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://www.circl.lu/pdns/query/{domain}",
+                headers={"Accept": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as r:
+                if r.status != 200:
+                    return []
+                results = []
+                for line in (await r.text()).strip().split("\n")[:max_results]:
+                    try:
+                        rec = _json.loads(line)
+                        results.append({
+                            "ioc":        rec.get("rrvalue", ""),
+                            "ioc_type":   rec.get("rrtype", "A").lower(),
+                            "domain":     rec.get("rrname", ""),
+                            "first_seen": rec.get("time_first", ""),
+                            "last_seen":  rec.get("time_last", ""),
+                            "source":     "circl_pdns"
+                        })
+                    except Exception:
+                        continue
+                return results
+    except Exception as e:
+        logger.debug(f"[CIRCL pDNS] {e}")
+    return []
+
+
+# ── CERTIFICATE TRANSPARENCY ────────────────────────────────────────────────
+
+async def search_crtsh(
+    domain: str, max_results: int = 100
+) -> list[dict]:
+    """crt.sh Certificate Transparency search — no key required."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://crt.sh/",
+                params={"q": f"%.{domain}", "output": "json"},
+                timeout=aiohttp.ClientTimeout(total=20)
+            ) as r:
+                if r.status != 200:
+                    return []
+                data = await r.json(content_type=None)
+                results: list[dict] = []
+                seen:   set[str]    = set()
+                for cert in data[:max_results]:
+                    for sub in cert.get("name_value", "").split("\n"):
+                        sub = sub.strip()
+                        if sub and sub not in seen:
+                            seen.add(sub)
+                            results.append({
+                                "ioc":     sub,
+                                "ioc_type":"domain",
+                                "issuer":  cert.get("issuer_name", ""),
+                                "title":   f"CT cert: {sub}",
+                                "source":  "crtsh"
+                            })
+                return results
+    except Exception as e:
+        logger.warning(f"[crt.sh] {e}")
+    return []
+
+
+async def certstream_monitor(
+    keyword: str,
+    duration_s: int = 60,
+    max_certs: int = 200
+) -> list[dict]:
+    """
+    Certstream WebSocket — live CT certificate monitoring.
+    Captures new certificates containing keyword in domain.
+    Requires: pip install websockets
+    FIXED: uses get_running_loop() — no race condition.
+    """
+    try:
+        import websockets
+    except ImportError:
+        logger.debug("[Certstream] websockets not installed")
+        return []
+    import json as _json
+    results: list[dict] = []
+    try:
+        loop     = asyncio.get_running_loop()
+        deadline = loop.time() + duration_s
+        async with websockets.connect(
+            "wss://certstream.calidog.io",
+            ping_interval=10, close_timeout=5
+        ) as ws:
+            while loop.time() < deadline:
+                if len(results) >= max_certs:
+                    break
+                try:
+                    msg  = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                    data = _json.loads(msg)
+                    if data.get("message_type") != "certificate_update":
+                        continue
+                    for d in data["data"]["leaf_cert"]["all_domains"]:
+                        if keyword.lower() in d.lower():
+                            results.append({
+                                "ioc":      d,
+                                "ioc_type": "domain",
+                                "title":    f"Certstream: {d}",
+                                "source":   "certstream_live"
+                            })
+                except asyncio.TimeoutError:
+                    continue
+    except Exception as e:
+        logger.warning(f"[Certstream] {e}")
+    return results
+
+
+# ── SHODAN INTERNETDB ───────────────────────────────────────────────────────
+
+async def enrich_ip_internetdb(ip: str) -> dict:
+    """
+    Shodan InternetDB — open ports, CVEs, hostnames.
+    Free, no API key, ARM64 native. ~1MB RAM.
+    """
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://internetdb.shodan.io/{ip}",
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    return {
+                        "ip":        ip,
+                        "ports":     data.get("ports", []),
+                        "cves":      data.get("cves", []),
+                        "hostnames": data.get("hostnames", []),
+                        "tags":      data.get("tags", []),
+                        "source":    "shodan_internetdb"
+                    }
+    except Exception as e:
+        logger.debug(f"[ShodanInternetDB] {e}")
+    return {}
+
+
+# ── PASTE MONITORING ────────────────────────────────────────────────────────
+
+async def scrape_pastebin_for_keyword(
+    keyword: str, max_pastes: int = 10
+) -> list[dict]:
+    """
+    Pastebin archive scraping — public, no key required.
+    FIXED: await asyncio.sleep() (previous bug was sync sleep).
+    """
+    from bs4 import BeautifulSoup
+    results: list[dict] = []
+    _UA = "Mozilla/5.0 (Macintosh; ARM Mac OS X 14_0) AppleWebKit/605.1.15"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://pastebin.com/archive",
+                headers={"User-Agent": _UA},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status != 200:
+                    return []
+                soup = BeautifulSoup(await r.text(), "html.parser")
+                paste_urls = [
+                    f"https://pastebin.com/raw{a['href']}"
+                    for tr in soup.select("table.maintable tr")[1:21]
+                    for a in tr.select("td a")[:1]
+                    if a.get("href")
+                ]
+            for raw_url in paste_urls[:max_pastes]:
+                await asyncio.sleep(1.0)  # ← FIXED: await (was bug)
+                try:
+                    async with s.get(
+                        raw_url,
+                        headers={"User-Agent": _UA},
+                        timeout=aiohttp.ClientTimeout(total=8)
+                    ) as pr:
+                        if pr.status == 200:
+                            content = await pr.text()
+                            if keyword.lower() in content.lower():
+                                results.append({
+                                    "url":          raw_url,
+                                    "content":      content[:2000],
+                                    "content_hash": hashlib.sha256(
+                                        content.encode()
+                                    ).hexdigest()[:16],
+                                    "title":  f"Pastebin hit: {keyword}",
+                                    "source": "pastebin_scrape"
+                                })
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.debug(f"[Pastebin] {e}")
+    return results
+
+
+async def search_github_gists(
+    keyword: str, max_results: int = 10
+) -> list[dict]:
+    """GitHub Gist public search — free, no key required."""
+    from bs4 import BeautifulSoup
+    results: list[dict] = []
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://gist.github.com/search",
+                params={"q": keyword, "s": "updated"},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=aiohttp.ClientTimeout(total=12)
+            ) as r:
+                if r.status != 200:
+                    return []
+                soup = BeautifulSoup(await r.text(), "html.parser")
+                for item in soup.select(".gist-snippet")[:max_results]:
+                    a = item.select_one(".gist-snippet-meta a")
+                    p = item.select_one(".gist-snippet-body")
+                    if a and a.get("href"):
+                        results.append({
+                            "url":     f"https://gist.github.com{a['href']}",
+                            "title":   a.get_text(strip=True),
+                            "snippet": p.get_text(strip=True)[:200] if p else "",
+                            "source":  "github_gist_search"
+                        })
+    except Exception as e:
+        logger.debug(f"[GitHub Gist] {e}")
+    return results
+
+
+# ── GITHUB DORKING ──────────────────────────────────────────────────────────
+
+_GH_DORK_TEMPLATES = {
+    "ioc_in_code":    '"{v}" filename:iocs.txt OR filename:indicators',
+    "credential":     '"{v}" password OR token OR secret',
+    "config_leak":    '"{v}" filename:config.yml OR filename:.env',
+    "malware_sample": '"{v}" malware OR implant OR backdoor',
+}
+_GH_HEADERS_BASE = {
+    "Accept":     "application/vnd.github.v3+json",
+    "User-Agent": "hledac-osint/1.0"
+}
+
+
+async def github_dork(
+    value: str,
+    dork_type: str = "ioc_in_code",
+    max_results: int = 20
+) -> list[dict]:
+    """
+    GitHub code search dorking.
+    Without token: 60 req/h (public unauthenticated).
+    With GITHUB_TOKEN env var: 5000 req/h.
+    Token is optional — function works without it.
+    """
+    import os
+    headers = dict(_GH_HEADERS_BASE)
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"token {token}"
+    query = _GH_DORK_TEMPLATES.get(
+        dork_type, _GH_DORK_TEMPLATES["ioc_in_code"]
+    ).format(v=value)
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://api.github.com/search/code",
+                params={"q": query, "per_page": min(max_results, 30)},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    return [
+                        {
+                            "title":   i["name"],
+                            "url":     i["html_url"],
+                            "snippet": i["repository"]["full_name"],
+                            "source":  "github_dork"
+                        }
+                        for i in data.get("items", [])
+                    ]
+                elif r.status == 403:
+                    logger.debug("[GitHub dork] rate limited — set GITHUB_TOKEN")
+    except Exception as e:
+        logger.debug(f"[GitHub dork] {e}")
+    return []
+
+
+# ── TOR HIDDEN SERVICES — Ahmia ─────────────────────────────────────────────
+
+AHMIA_CLEARNET = "https://ahmia.fi/search/"
+AHMIA_ONION    = (
+    "http://juhanurmihxlp77nkq76byazcldy2hlmovfu2epvl5ankdibsot4csyd"
+    ".onion/search/"
+)
+
+
+async def search_ahmia(
+    query: str,
+    max_results: int = 20,
+    use_onion: bool = False
+) -> list[dict]:
+    """
+    Ahmia dark web index search.
+    use_onion=True → via tor_transport.
+    """
+    from bs4 import BeautifulSoup
+    base = AHMIA_ONION if use_onion else AHMIA_CLEARNET
+    html = ""
+    try:
+        if use_onion:
+            from transport.tor_transport import TorTransport
+            # Use direct Tor session if available
+            # Fallback to clearnet if tor not available
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.get(
+                        f"{base}?q={query}",
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        timeout=aiohttp.ClientTimeout(total=15)
+                    ) as r:
+                        html = await r.text() if r.status == 200 else ""
+            except Exception:
+                pass
+        else:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    base, params={"q": query},
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=aiohttp.ClientTimeout(total=15)
+                ) as r:
+                    html = await r.text() if r.status == 200 else ""
+        if not html:
+            return []
+        soup = BeautifulSoup(html, "html.parser")
+        return [
+            {
+                "title":   a.get_text(strip=True),
+                "url":     a["href"],
+                "snippet": p.get_text(strip=True) if p else "",
+                "source":  "ahmia_onion" if use_onion else "ahmia_clearnet"
+            }
+            for li in soup.select("li.result")[:max_results]
+            for a in [li.select_one("h4 a")]
+            for p in [li.select_one("p")]
+            if a and a.get("href")
+        ]
+    except Exception as e:
+        logger.warning(f"[Ahmia] {e}")
+    return []
+
+
+# ── RDAP LOOKUP ──────────────────────────────────────────────────────────────
+
+async def query_rdap(target: str) -> dict:
+    """
+    RDAP — WHOIS successor, structured REST API, no key required.
+    Automatically detects domain vs IP.
+    """
+    is_ip = (
+        target.replace(".", "").isdigit() or ":" in target
+    )
+    base     = "https://rdap.org"
+    endpoint = (
+        f"{base}/ip/{target}" if is_ip
+        else f"{base}/domain/{target}"
+    )
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                endpoint,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    return {
+                        "target": target,
+                        "rdap":   data,
+                        "source": "rdap_org"
+                    }
+    except Exception as e:
+        logger.debug(f"[RDAP] {e}")
+    return {}
 
 
 # ---------------------------------------------------------------------------

@@ -29,6 +29,10 @@ import sys
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+# Sprint 8VC: Exclude legacy/ from Python path to prevent accidental imports
+# legacy/ is for reference only — active code must not import from it
+sys.path = [p for p in sys.path if not p.endswith("/legacy")]
+
 # Sprint 0B: uvloop MUST be installed before any async operations
 _uvloop_installed = False
 try:
@@ -2458,6 +2462,15 @@ async def _run_sprint_mode(
         _boot_record("sprint_mode", "WINDUP")
         _mark_phase("WINDUP")
 
+        # Sprint 8VB: Circuit Breaker stats
+        from transport.circuit_breaker import get_all_breaker_states
+        _cb = get_all_breaker_states()
+        _open_cb = [d for d, s in _cb.items() if s == "open"]
+        logger.info(
+            f"[8VB-CB] breakers={len(_cb)} open={len(_open_cb)} "
+            f"domains={_open_cb[:5]}"
+        )
+
         # Sprint 8QC + 8TC: E2E synthesis — runs in WINDUP, report captured for EXPORT
         windup_report = None
         if store_instance is not None:
@@ -2566,6 +2579,24 @@ async def _windup_synthesis(
         findings=findings,
         force_synthesis=True,  # B.7: explicit force for programmatic call
     )
+
+    # Sprint 8VA D: HypothesisEngine closed loop — generate hypotheses from findings
+    if findings and len(findings) > 0:
+        try:
+            from brain.hypothesis_engine import HypothesisEngine
+            _hyp_engine = HypothesisEngine()
+            finding_texts = [f.get("text", "")[:200] for f in findings[:10]]
+            hypotheses = _hyp_engine.generate_sprint_hypotheses(
+                findings=finding_texts,
+                ioc_graph=None,
+                max_hypotheses=3,
+            )
+            # Sprint 8VA D.2: Každá hypotéza → logged (pivot_queue requires SprintScheduler access)
+            for i, hyp in enumerate(hypotheses or [], 1):
+                hyp_text = hyp if isinstance(hyp, str) else str(hyp)
+                logger.info(f"[8VA] Hypothesis {i}: {hyp_text[:80]}")
+        except Exception as e:
+            logger.debug(f"[8VA] HypothesisEngine skipped: {e}")
 
     # Sprint 8UC B.2.4: Capture synthesis engine for scorecard
     synthesis_engine = getattr(runner, '_last_synthesis_engine', 'unknown')

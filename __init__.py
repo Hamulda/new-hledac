@@ -406,7 +406,8 @@ if ENHANCED_ORCHESTRATOR_AVAILABLE:
 # =============================================================================
 
 # Knowledge Components (from Supreme)
-from .knowledge.persistent_layer import (
+# Sprint 8VC: persistent_layer moved to legacy/, use knowledge.__init__ proxy
+from .knowledge import (
     PersistentKnowledgeLayer,
     KnowledgeNode,
     KnowledgeEdge,

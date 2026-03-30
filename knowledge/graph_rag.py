@@ -35,7 +35,7 @@ except ImportError:
     NUMPY_AVAILABLE = False
     np = None
 
-from hledac.universal.knowledge.persistent_layer import KnowledgeNode
+from hledac.universal.legacy.persistent_layer import KnowledgeNode
 
 logger = logging.getLogger(__name__)
 
