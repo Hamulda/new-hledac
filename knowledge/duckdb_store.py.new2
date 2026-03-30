@@ -1,0 +1,708 @@
+"""
+DuckDB Shadow Analytics Sidecar
+================================
+
+Sprint 8AO + 8AS: DuckDB shadow-mode analytical sidecar with async safety.
+Sprint 8AX: New schema — run_id, url, title, source, relevance_score.
+
+DESIGN PRINCIPLES
+-----------------
+- This is a SIDE CAR, not a replacement for SQLite/Kuzu/LanceDB
+- DuckDB is NOT imported at module level of any boot-path file
+- DuckDB import is deferred to first actual use inside initialize()
+- When RAMDISK_ACTIVE=True: persistent DB under DB_ROOT, temp under RAMDISK_ROOT
+- When RAMDISK_ACTIVE=False: file-backed at DB_ROOT / "analytics.duckdb"
+  (Sprint 8AX change: was :memory:, now file-backed for production durability)
+- :memory: mode is used ONLY when DB_ROOT is unavailable (degraded fallback)
+- All DB operations run on a dedicated single-worker ThreadPoolExecutor
+- All async public methods use run_in_executor to avoid event-loop blocking
+- Connection is created INSIDE the worker thread (thread-affine)
+- PRAGMA threads=2 applied after connection init
+- Batch methods enforce chunking: max_batch_size=500
+- aclose() is idempotent with _closed flag
+
+SCHEMA (8AX)
+-------
+shadow_findings:  id, query, source_type, confidence, ts
+shadow_runs:     run_id, started_at, ended_at, total_fds, rss_mb
+
+ASYNC API SURFACE
+----------------
+- async_initialize()       — async init wrapper
+- async_record_shadow_run(...)   — insert run record
+- async_record_shadow_finding(...)  — insert single finding (NEW schema)
+- async_record_shadow_findings_batch(..., max_batch_size=500) — chunked batch
+- async_query_recent_findings(limit=10)  — query findings
+- async_healthcheck()      — returns True if healthy
+- aclose()            — async idempotent shutdown
+
+USAGE (async)
+------------
+from hledac.universal.knowledge.duckdb_store import DuckDBShadowStore
+
+store = DuckDBShadowStore()
+await store.async_initialize()
+await store.async_record_shadow_run("run1", time.time(), None, 50, 512)
+await store.async_record_shadow_findings_batch([...], max_batch_size=500)
+await store.aclose()
+"""
+
+from __future__ import annotations
+
+import asyncio
+import datetime as _dt
+import os
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+__all__ = ["DuckDBShadowStore"]
+
+# ---------------------------------------------------------------------------
+# Package-level guard: duckdb is imported only inside initialize()
+# ---------------------------------------------------------------------------
+
+_DuckDBModule: Optional[Any] = None
+
+
+def _get_duckdb() -> Any:
+    """Lazy import of duckdb — only loaded when sidecar is actually used."""
+    global _DuckDBModule
+    if _DuckDBModule is None:
+        import duckdb
+
+        _DuckDBModule = duckdb
+    return _DuckDBModule
+
+
+# ---------------------------------------------------------------------------
+# Env-configurable limits
+# ---------------------------------------------------------------------------
+
+_DUCKDB_MEMORY_LIMIT: str = os.environ.get("GHOST_DUCKDB_MEMORY", "1GB")
+_DUCKDB_MAX_TEMP: str = os.environ.get("GHOST_DUCKDB_MAX_TEMP", "1GB")
+
+
+# ---------------------------------------------------------------------------
+# Schema SQL (defined once, used in both modes)
+# 8AX: shadow_findings extended with run_id, url, title, source, relevance_score
+# ---------------------------------------------------------------------------
+
+_SCHEMA_SQL = """
+    CREATE TABLE IF NOT EXISTS shadow_findings (
+        id               VARCHAR PRIMARY KEY,
+        run_id           VARCHAR,
+        query            VARCHAR,
+        url              VARCHAR,
+        title            VARCHAR,
+        source           VARCHAR,
+        source_type      VARCHAR,
+        relevance_score  DOUBLE,
+        confidence       DOUBLE,
+        ts               TIMESTAMP DEFAULT current_timestamp
+    );
+    CREATE TABLE IF NOT EXISTS shadow_runs (
+        run_id      VARCHAR PRIMARY KEY,
+        started_at  TIMESTAMP,
+        ended_at    TIMESTAMP,
+        total_fds   INTEGER,
+        rss_mb      INTEGER
+    );
+"""
+
+
+def _resolve_db_root() -> Optional[Path]:
+    """Resolve DB_ROOT safely, returning None if unavailable."""
+    try:
+        from hledac.universal.paths import DB_ROOT
+        return DB_ROOT
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# DuckDBShadowStore
+# ---------------------------------------------------------------------------
+
+class DuckDBShadowStore:
+    """
+    Async-safe DuckDB sidecar with RAMDISK-first / OPSEC-safe degraded mode.
+
+    CONNECTION MODEL (8AX):
+    - MODE A (RAMDISK active): file-backed DB + temp on RAMDISK
+        database = DB_ROOT / "shadow_analytics.duckdb"
+        temp_directory = RAMDISK_ROOT / "duckdb_tmp"
+    - MODE B (RAMDISK inactive + DB_ROOT available): file-backed at DB_ROOT / "analytics.duckdb"
+        This is the PRODUCTION default when RAMDISK is not active.
+        temp_directory = None (spill disabled)
+    - MODE C (DB_ROOT unavailable): :memory: with PERSISTENT single connection
+        This is the DEGRADED FALLBACK — session-only, no durability.
+        Logged as WARNING on init.
+
+    All DB work runs on a dedicated single-worker ThreadPoolExecutor.
+    Connection is created INSIDE the worker thread (thread-affine).
+    """
+
+    def __init__(self) -> None:
+        self._initialized: bool = False
+        self._closed: bool = False
+        self._db_path: Optional[Path] = None
+        self._temp_dir: Optional[Path] = None
+        self._memory_limit: str = _DUCKDB_MEMORY_LIMIT
+        self._max_temp: str = _DUCKDB_MAX_TEMP
+        self._duckdb_module: Optional[Any] = None
+        self._using_memory_mode: bool = False
+
+        # Single-worker executor for all DB operations (thread-affine)
+        # Named thread so tests can assert duckdb_worker via thread name
+        self._executor: ThreadPoolExecutor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="duckdb_worker",
+        )
+
+        # Persistent connection for :memory: mode; None for file mode
+        self._persistent_conn: Optional[Any] = None
+
+    # ------------------------------------------------------------------
+    # Internal sync helpers — ALL run on the worker thread
+    # ------------------------------------------------------------------
+
+    def _init_connection(self) -> None:
+        """
+        Initialize the DuckDB connection. Must be called from the worker thread.
+        Sets up file or :memory: mode, applies PRAGMAs and schema.
+        """
+        duckdb = _get_duckdb()
+        db_root = _resolve_db_root()
+
+        if self._db_path:
+            # MODE A or B: file-backed — persistent DB
+            # MODE A: RAMDISK active → _temp_dir is set (RAMDISK_ROOT/duckdb_tmp)
+            # MODE B: RAMDISK inactive → _temp_dir is None (no spill to SSD)
+            conn = duckdb.connect(str(self._db_path))
+            conn.execute(f"SET memory_limit = '{self._memory_limit}'")
+            if self._temp_dir:
+                self._temp_dir.mkdir(parents=True, exist_ok=True)
+                conn.execute(f"SET max_temp_directory_size = '{self._max_temp}'")
+                conn.execute(f"SET temp_directory = '{self._temp_dir}'")
+            else:
+                conn.execute("SET max_temp_directory_size = '0GB'")
+            conn.execute("PRAGMA threads=2")
+            conn.execute(_SCHEMA_SQL)
+            conn.close()
+        else:
+            # MODE C: RAMDISK inactive + DB_ROOT unavailable — :memory: DEGRADED FALLBACK
+            self._using_memory_mode = True
+            self._persistent_conn = duckdb.connect(":memory:")
+            self._persistent_conn.execute(f"SET memory_limit = '{self._memory_limit}'")
+            self._persistent_conn.execute("SET max_temp_directory_size = '0GB'")
+            self._persistent_conn.execute("PRAGMA threads=2")
+            self._persistent_conn.execute(_SCHEMA_SQL)
+
+    def _sync_insert_finding(
+        self,
+        finding_id: str,
+        query: str,
+        source_type: str,
+        confidence: float,
+        run_id: Optional[str] = None,
+        url: Optional[str] = None,
+        title: Optional[str] = None,
+        source: Optional[str] = None,
+        relevance_score: Optional[float] = None,
+    ) -> bool:
+        """Sync insert — MUST be called on the worker thread."""
+        try:
+            if self._db_path:
+                duckdb = _get_duckdb()
+                conn = duckdb.connect(str(self._db_path))
+                conn.execute(
+                    """
+                    INSERT INTO shadow_findings
+                        (id, run_id, query, url, title, source, source_type, relevance_score, confidence)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [finding_id, run_id, query, url, title, source, source_type,
+                     relevance_score, confidence],
+                )
+                conn.close()
+            else:
+                self._persistent_conn.execute(
+                    """
+                    INSERT INTO shadow_findings
+                        (id, run_id, query, url, title, source, source_type, relevance_score, confidence)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [finding_id, run_id, query, url, title, source, source_type,
+                     relevance_score, confidence],
+                )
+            return True
+        except Exception:
+            return False
+
+    def _sync_insert_run(
+        self,
+        run_id: str,
+        started_at: Optional[float],
+        ended_at: Optional[float],
+        total_fds: int,
+        rss_mb: int,
+    ) -> bool:
+        """Sync insert run — MUST be called on the worker thread."""
+        try:
+            started_iso = _dt.datetime.fromtimestamp(started_at).isoformat() if started_at is not None else None
+            ended_iso = _dt.datetime.fromtimestamp(ended_at).isoformat() if ended_at is not None else None
+
+            if self._db_path:
+                duckdb = _get_duckdb()
+                conn = duckdb.connect(str(self._db_path))
+                conn.execute(
+                    """
+                    INSERT INTO shadow_runs (run_id, started_at, ended_at, total_fds, rss_mb)
+                    VALUES (?, CAST(? AS TIMESTAMP), CAST(? AS TIMESTAMP), ?, ?)
+                    """,
+                    [run_id, started_iso, ended_iso, total_fds, rss_mb],
+                )
+                conn.close()
+            else:
+                self._persistent_conn.execute(
+                    """
+                    INSERT INTO shadow_runs (run_id, started_at, ended_at, total_fds, rss_mb)
+                    VALUES (?, CAST(? AS TIMESTAMP), CAST(? AS TIMESTAMP), ?, ?)
+                    """,
+                    [run_id, started_iso, ended_iso, total_fds, rss_mb],
+                )
+            return True
+        except Exception:
+            return False
+
+    def _sync_query_findings(self, limit: int) -> List[Dict[str, Any]]:
+        """Sync query — MUST be called on the worker thread."""
+        try:
+            if self._db_path:
+                duckdb = _get_duckdb()
+                conn = duckdb.connect(str(self._db_path))
+                result = conn.execute(
+                    """
+                    SELECT id, run_id, query, url, title, source, source_type,
+                           relevance_score, confidence, ts
+                    FROM shadow_findings
+                    ORDER BY ts DESC
+                    LIMIT ?
+                    """,
+                    [limit],
+                ).fetchall()
+                conn.close()
+            else:
+                result = self._persistent_conn.execute(
+                    """
+                    SELECT id, run_id, query, url, title, source, source_type,
+                           relevance_score, confidence, ts
+                    FROM shadow_findings
+                    ORDER BY ts DESC
+                    LIMIT ?
+                    """,
+                    [limit],
+                ).fetchall()
+
+            return [
+                {
+                    "id": row[0],
+                    "run_id": row[1],
+                    "query": row[2],
+                    "url": row[3],
+                    "title": row[4],
+                    "source": row[5],
+                    "source_type": row[6],
+                    "relevance_score": row[7],
+                    "confidence": row[8],
+                    "ts": row[9],
+                }
+                for row in result
+            ]
+        except Exception:
+            return []
+
+    def _sync_close_on_worker(self) -> None:
+        """Close persistent connection — MUST be called on the worker thread."""
+        if self._persistent_conn is not None:
+            try:
+                self._persistent_conn.close()
+            except Exception:
+                pass
+            self._persistent_conn = None
+
+    # ------------------------------------------------------------------
+    # Public sync API (from 8AO, kept for backward compat)
+    # ------------------------------------------------------------------
+
+    def initialize(self) -> bool:
+        """
+        Initialize DuckDB connection synchronously (backward compat wrapper).
+
+        For async code prefer async_initialize().
+        """
+        if self._closed:
+            return False
+        if self._initialized:
+            return True
+
+        # Resolve path BEFORE init so _db_path is set correctly
+        self._resolve_path()
+
+        try:
+            # Run connection init on the worker thread
+            fut = self._executor.submit(self._init_connection)
+            fut.result()
+            self._duckdb_module = _get_duckdb()
+            self._initialized = True
+            return True
+        except Exception:
+            self._initialized = False
+            return False
+
+    def _resolve_path(self) -> None:
+        """
+        Resolve _db_path based on RAMDISK/DB_ROOT availability.
+
+        MODE A: RAMDISK_ACTIVE=True → DB_ROOT / "shadow_analytics.duckdb"
+        MODE B: RAMDISK_ACTIVE=False + DB_ROOT available → DB_ROOT / "analytics.duckdb"
+        MODE C: DB_ROOT unavailable → None (= :memory: degraded fallback)
+        """
+        try:
+            from hledac.universal.paths import RAMDISK_ACTIVE, RAMDISK_ROOT, DB_ROOT
+            if RAMDISK_ACTIVE:
+                self._db_path = DB_ROOT / "shadow_analytics.duckdb"
+                self._temp_dir = RAMDISK_ROOT / "duckdb_tmp"
+            else:
+                # MODE B: Production default — file-backed analytics DB
+                self._db_path = DB_ROOT / "analytics.duckdb"
+                self._temp_dir = None
+        except Exception:
+            # MODE C: Degraded fallback — :memory: only
+            self._db_path = None
+            self._temp_dir = None
+
+    def insert_shadow_finding(
+        self,
+        finding_id: str,
+        query: str,
+        source_type: str,
+        confidence: float,
+        run_id: Optional[str] = None,
+        url: Optional[str] = None,
+        title: Optional[str] = None,
+        source: Optional[str] = None,
+        relevance_score: Optional[float] = None,
+    ) -> bool:
+        """Sync insert — backward compat. For async use async_record_shadow_finding()."""
+        if not self._initialized or self._closed:
+            return False
+        try:
+            fut = self._executor.submit(
+                self._sync_insert_finding,
+                finding_id, query, source_type, confidence,
+                run_id, url, title, source, relevance_score,
+            )
+            return fut.result()
+        except Exception:
+            return False
+
+    def insert_shadow_run(
+        self,
+        run_id: str,
+        started_at: float,
+        ended_at: Optional[float],
+        total_fds: int,
+        rss_mb: int,
+    ) -> bool:
+        """Sync insert — backward compat. For async use async_record_shadow_run()."""
+        if not self._initialized or self._closed:
+            return False
+        try:
+            fut = self._executor.submit(
+                self._sync_insert_run,
+                run_id, started_at, ended_at, total_fds, rss_mb,
+            )
+            return fut.result()
+        except Exception:
+            return False
+
+    def query_recent_findings(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Sync query — backward compat. For async use async_query_recent_findings()."""
+        if not self._initialized or self._closed:
+            return []
+        try:
+            fut = self._executor.submit(self._sync_query_findings, limit)
+            return fut.result()
+        except Exception:
+            return []
+
+    def close(self) -> None:
+        """
+        Synchronous close — backward compat. Prefer aclose().
+        Idempotent: safe to call multiple times.
+        """
+        self._do_close()
+
+    # ------------------------------------------------------------------
+    # Public async API (new in 8AS)
+    # ------------------------------------------------------------------
+
+    async def async_initialize(self) -> bool:
+        """
+        Async initialize — creates connection on the worker thread.
+
+        Returns True if initialization succeeded, False otherwise.
+        Sidecar is safe to use even if this returns False.
+        """
+        if self._closed:
+            return False
+        if self._initialized:
+            return True
+
+        # Resolve path BEFORE init
+        self._resolve_path()
+
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(self._executor, self._init_connection)
+            self._duckdb_module = _get_duckdb()
+            self._initialized = True
+            return True
+        except Exception:
+            self._initialized = False
+            return False
+
+    async def async_record_shadow_run(
+        self,
+        run_id: str,
+        started_at: float,
+        ended_at: Optional[float],
+        total_fds: int,
+        rss_mb: int,
+    ) -> bool:
+        """
+        Insert a run record into the shadow analytics store.
+
+        Thread-safe, non-blocking — runs on duckdb_worker via run_in_executor.
+        """
+        if not self._initialized or self._closed:
+            return False
+
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                self._executor,
+                self._sync_insert_run,
+                run_id, started_at, ended_at, total_fds, rss_mb,
+            )
+            return True
+        except Exception:
+            return False
+
+    async def async_record_shadow_finding(
+        self,
+        finding_id: str,
+        query: str,
+        source_type: str,
+        confidence: float,
+        run_id: Optional[str] = None,
+        url: Optional[str] = None,
+        title: Optional[str] = None,
+        source: Optional[str] = None,
+        relevance_score: Optional[float] = None,
+    ) -> bool:
+        """
+        Insert a single finding into the shadow analytics store.
+
+        Thread-safe, non-blocking — runs on duckdb_worker via run_in_executor.
+        """
+        if not self._initialized or self._closed:
+            return False
+
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                self._executor,
+                self._sync_insert_finding,
+                finding_id, query, source_type, confidence,
+                run_id, url, title, source, relevance_score,
+            )
+            return True
+        except Exception:
+            return False
+
+    async def async_record_shadow_findings_batch(
+        self,
+        findings: List[Dict[str, Any]],
+        max_batch_size: int = 500,
+    ) -> int:
+        """
+        Insert multiple findings in chunks to avoid unbounded executemany.
+
+        Each chunk is at most max_batch_size records.
+        Returns the number of successfully inserted records.
+
+        Thread-safe, non-blocking — each chunk runs on duckdb_worker.
+        """
+        if not self._initialized or self._closed:
+            return 0
+
+        inserted = 0
+        loop = asyncio.get_running_loop()
+
+        for i in range(0, len(findings), max_batch_size):
+            chunk = findings[i : i + max_batch_size]
+            for record in chunk:
+                try:
+                    await loop.run_in_executor(
+                        self._executor,
+                        self._sync_insert_finding,
+                        record.get("id", ""),
+                        record.get("query", ""),
+                        record.get("source_type", ""),
+                        record.get("confidence", 0.0),
+                        record.get("run_id"),
+                        record.get("url"),
+                        record.get("title"),
+                        record.get("source"),
+                        record.get("relevance_score"),
+                    )
+                    inserted += 1
+                except Exception:
+                    break  # stop on first failure in chunk
+
+        return inserted
+
+    async def async_query_recent_findings(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Query recent findings ordered by timestamp descending.
+
+        Thread-safe, non-blocking — runs on duckdb_worker via run_in_executor.
+        """
+        if not self._initialized or self._closed:
+            return []
+
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(
+                self._executor,
+                self._sync_query_findings,
+                limit,
+            )
+        except Exception:
+            return []
+
+    async def async_healthcheck(self) -> bool:
+        """
+        Quick health check — attempts a zero-cost query.
+
+        Returns True if the store is healthy and responsive.
+        """
+        if not self._initialized or self._closed:
+            return False
+
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                self._executor,
+                self._sync_query_findings,
+                1,
+            )
+            return True  # query succeeded
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------------
+    # Async shutdown (new in 8AS)
+    # ------------------------------------------------------------------
+
+    async def aclose(self) -> None:
+        """
+        Async idempotent shutdown.
+
+        - Sets _closed=True immediately
+        - Closes persistent connection on the worker thread
+        - Shuts down the executor (wait=False, no join)
+        - Safe to call multiple times (idempotent)
+        """
+        if self._closed:
+            return
+
+        self._closed = True
+        self._initialized = False
+
+        # Close connection on worker thread
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(self._executor, self._sync_close_on_worker)
+        except Exception:
+            pass
+
+        # Shutdown executor without blocking
+        self._executor.shutdown(wait=False)
+
+    # ------------------------------------------------------------------
+    # Diagnostic properties (for tests)
+    # ------------------------------------------------------------------
+
+    @property
+    def is_initialized(self) -> bool:
+        """Return True if sidecar was successfully initialized."""
+        return self._initialized
+
+    @property
+    def is_closed(self) -> bool:
+        """Return True if sidecar has been shut down."""
+        return self._closed
+
+    @property
+    def db_path(self) -> Optional[Path]:
+        """Return the database path (None for :memory: mode)."""
+        return self._db_path
+
+    @property
+    def temp_dir(self) -> Optional[Path]:
+        """Return the temp directory path (None if not using RAMDISK)."""
+        return self._temp_dir
+
+    @property
+    def memory_limit(self) -> str:
+        """Return the configured memory limit string."""
+        return self._memory_limit
+
+    @property
+    def max_temp(self) -> str:
+        """Return the configured max temp size string."""
+        return self._max_temp
+
+    @property
+    def is_ramdisk_mode(self) -> bool:
+        """Return True if running in RAMDISK-active mode."""
+        return self._temp_dir is not None
+
+    @property
+    def is_memory_mode(self) -> bool:
+        """Return True if running in :memory: degraded fallback mode."""
+        return self._using_memory_mode
+
+    @property
+    def executor(self) -> ThreadPoolExecutor:
+        """Return the internal executor (for test introspection)."""
+        return self._executor
+
+    # ------------------------------------------------------------------
+    # Internal helper — shared close logic
+    # ------------------------------------------------------------------
+
+    def _do_close(self) -> None:
+        """Synchronous close helper — idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+        self._initialized = False
+        try:
+            self._executor.shutdown(wait=False)
+        except Exception:
+            pass

@@ -1,0 +1,178 @@
+{
+  "classification": "BLOCKED_BY_TOOLCHAIN",
+  "baseline_interpreter": {
+    "path": "/Users/vojtechhamada/.pyenv/versions/3.12.12/bin/python3",
+    "version": "3.12.12 (main, Jan 27 2026, 14:47:29) [Clang 17.0.0 (clang-1700.3.19.1)]",
+    "version_info": [
+      3,
+      12,
+      12
+    ],
+    "executable": "/Users/vojtechhamada/.pyenv/versions/3.12.12/bin/python3",
+    "gil_enabled": "NOT_SUPPORTED",
+    "Py_GIL_DISABLED": null,
+    "has_free_threading": false,
+    "orchestrator": {
+      "success": true,
+      "runs": [
+        2.534093,
+        1.998154,
+        2.125201,
+        2.557211,
+        2.196803
+      ],
+      "median": 2.196803,
+      "stdev": 0.25085082948198517,
+      "min": 1.998154,
+      "max": 2.557211,
+      "rss_samples_mb": [
+        [
+          16,
+          281
+        ],
+        [
+          16,
+          300
+        ],
+        [
+          16,
+          291
+        ],
+        [
+          16,
+          258
+        ],
+        [
+          16,
+          277
+        ]
+      ],
+      "all_stderr": [
+        "fast-langdetect not available, using fallback detection\nWARNING:hledac.universal.tools.reranker:FlashRank not installed. Install with: pip install flashrank\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.intelligence.relationship_discovery:[LSH] datasketch not installed, LSH prediction disabled\nmx.metal.set_cache_limit is deprecated and will be removed in a future version. Use mx.set_cache_limit instead.\nmx.metal.set_wired_limit is deprecated and will be removed in a future version. Use mx.set_wired_limit instead.\nINFO:hledac.universal.utils.mlx_cache:MLX buffers initialized: cache=2560MB, wired=2560MB\nWARNING:hledac.universal.knowledge.entity_linker:rapidfuzz not available. Install with: pip install rapidfuzz\nINFO:hledac.universal.autonomous_orchestrator:[Metal] Heap capped at 4.8GB",
+        "fast-langdetect not available, using fallback detection\nWARNING:hledac.universal.tools.reranker:FlashRank not installed. Install with: pip install flashrank\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.intelligence.relationship_discovery:[LSH] datasketch not installed, LSH prediction disabled\nmx.metal.set_cache_limit is deprecated and will be removed in a future version. Use mx.set_cache_limit instead.\nmx.metal.set_wired_limit is deprecated and will be removed in a future version. Use mx.set_wired_limit instead.\nINFO:hledac.universal.utils.mlx_cache:MLX buffers initialized: cache=2560MB, wired=2560MB\nWARNING:hledac.universal.knowledge.entity_linker:rapidfuzz not available. Install with: pip install rapidfuzz\nINFO:hledac.universal.autonomous_orchestrator:[Metal] Heap capped at 4.8GB",
+        "fast-langdetect not available, using fallback detection\nWARNING:hledac.universal.tools.reranker:FlashRank not installed. Install with: pip install flashrank\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.intelligence.relationship_discovery:[LSH] datasketch not installed, LSH prediction disabled\nmx.metal.set_cache_limit is deprecated and will be removed in a future version. Use mx.set_cache_limit instead.\nmx.metal.set_wired_limit is deprecated and will be removed in a future version. Use mx.set_wired_limit instead.\nINFO:hledac.universal.utils.mlx_cache:MLX buffers initialized: cache=2560MB, wired=2560MB\nWARNING:hledac.universal.knowledge.entity_linker:rapidfuzz not available. Install with: pip install rapidfuzz\nINFO:hledac.universal.autonomous_orchestrator:[Metal] Heap capped at 4.8GB",
+        "fast-langdetect not available, using fallback detection\nWARNING:hledac.universal.tools.reranker:FlashRank not installed. Install with: pip install flashrank\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.intelligence.relationship_discovery:[LSH] datasketch not installed, LSH prediction disabled\nmx.metal.set_cache_limit is deprecated and will be removed in a future version. Use mx.set_cache_limit instead.\nmx.metal.set_wired_limit is deprecated and will be removed in a future version. Use mx.set_wired_limit instead.\nINFO:hledac.universal.utils.mlx_cache:MLX buffers initialized: cache=2560MB, wired=2560MB\nWARNING:hledac.universal.knowledge.entity_linker:rapidfuzz not available. Install with: pip install rapidfuzz\nINFO:hledac.universal.autonomous_orchestrator:[Metal] Heap capped at 4.8GB",
+        "fast-langdetect not available, using fallback detection\nWARNING:hledac.universal.tools.reranker:FlashRank not installed. Install with: pip install flashrank\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.intelligence.relationship_discovery:[LSH] datasketch not installed, LSH prediction disabled\nmx.metal.set_cache_limit is deprecated and will be removed in a future version. Use mx.set_cache_limit instead.\nmx.metal.set_wired_limit is deprecated and will be removed in a future version. Use mx.set_wired_limit instead.\nINFO:hledac.universal.utils.mlx_cache:MLX buffers initialized: cache=2560MB, wired=2560MB\nWARNING:hledac.universal.knowledge.entity_linker:rapidfuzz not available. Install with: pip install rapidfuzz\nINFO:hledac.universal.autonomous_orchestrator:[Metal] Heap capped at 4.8GB"
+      ],
+      "n_runs": 5
+    }
+  },
+  "ft_interpreter": {
+    "path": "/Users/vojtechhamada/.pyenv/versions/3.14.2t/bin/python3.14t",
+    "raw_stdout": "",
+    "raw_stderr": "Traceback (most recent call last):\n  File \"<string>\", line 2, in <module>\n  File \"/Users/vojtechhamada/.pyenv/versions/3.14.2t/lib/python3.14t/sysconfig/__init__.py\", line 5, in <module>\n    import threading\n  File \"/Users/vojtechhamada/.pyenv/versions/3.14.2t/lib/python3.14t/threading.py\", line 9, in <module>\n    from _weakrefset import WeakSet\n  File \"/Users/vojtechhamada/.pyenv/versions/3.14.2t/lib/python3.14t/_weakrefset.py\", line 6, in <module>\n    from types import GenericAlias\n  File \"/Users/vojtechhamada/PycharmProjects/Hledac/hledac/universal/types.py\", line 18, in <module>\n    from dataclasses import dataclass, field\n  File \"/Users/vojtechhamada/.pyenv/versions/3.14.2t/lib/python3.14t/dataclasses.py\", line 1, in <module>\n    import re\n  File \"/Users/vojtechhamada/.pyenv/versions/3.14.2t/lib/python3.14t/re/__init__.py\", line 125, in <module>\n    import enum\n  File \"/Users/vojtechhamada/.pyenv/versions/3.14.2t/lib/python3.14t/enum.py\", line 3, in <module>\n    from types import MappingProxyType, DynamicClassAttribute\nImportError: cannot import name 'MappingProxyType' from 'types' (consider renaming '/Users/vojtechhamada/PycharmProjects/Hledac/hledac/universal/types.py' since it has the same name as the standard library module named 'types' and prevents importing that standard library module)\n",
+    "rc": 1,
+    "orchestrator": null
+  },
+  "package_matrix": {
+    "msgspec": {
+      "current": {
+        "rc": 0,
+        "stdout": "{\"success\": false, \"dt\": 0.00023662500007048948, \"error\": \"ModuleNotFoundError(\\\"No module named 'msgspec'\\\")\", \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 17, \"rss_after\": 17}",
+        "stderr": "",
+        "success": false,
+        "dt": 0.00023662500007048948,
+        "error": "ModuleNotFoundError(\"No module named 'msgspec'\")",
+        "gil_before": "NOT_SUPPORTED",
+        "gil_after": "NOT_SUPPORTED",
+        "rss_before": 17,
+        "rss_after": 17,
+        "classification": "NOT_INSTALLED",
+        "package": "msgspec",
+        "python": "/Users/vojtechhamada/.pyenv/versions/3.12.12/bin/python3"
+      }
+    },
+    "duckdb": {
+      "current": {
+        "rc": 0,
+        "stdout": "{\"success\": false, \"dt\": 0.00021908399958192604, \"error\": \"ModuleNotFoundError(\\\"No module named 'duckdb'\\\")\", \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 16, \"rss_after\": 16}",
+        "stderr": "",
+        "success": false,
+        "dt": 0.00021908399958192604,
+        "error": "ModuleNotFoundError(\"No module named 'duckdb'\")",
+        "gil_before": "NOT_SUPPORTED",
+        "gil_after": "NOT_SUPPORTED",
+        "rss_before": 16,
+        "rss_after": 16,
+        "classification": "NOT_INSTALLED",
+        "package": "duckdb",
+        "python": "/Users/vojtechhamada/.pyenv/versions/3.12.12/bin/python3"
+      }
+    },
+    "pyahocorasick": {
+      "current": {
+        "rc": 0,
+        "stdout": "{\"success\": false, \"dt\": 0.00019379200057301205, \"error\": \"ModuleNotFoundError(\\\"No module named 'pyahocorasick'\\\")\", \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 17, \"rss_after\": 17}",
+        "stderr": "",
+        "success": false,
+        "dt": 0.00019379200057301205,
+        "error": "ModuleNotFoundError(\"No module named 'pyahocorasick'\")",
+        "gil_before": "NOT_SUPPORTED",
+        "gil_after": "NOT_SUPPORTED",
+        "rss_before": 17,
+        "rss_after": 17,
+        "classification": "NOT_INSTALLED",
+        "package": "pyahocorasick",
+        "python": "/Users/vojtechhamada/.pyenv/versions/3.12.12/bin/python3"
+      }
+    },
+    "lmdb": {
+      "current": {
+        "rc": 0,
+        "stdout": "{\"success\": true, \"dt\": 0.0020921249997627456, \"error\": null, \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 16, \"rss_after\": 17}",
+        "stderr": "",
+        "success": true,
+        "dt": 0.0020921249997627456,
+        "error": null,
+        "gil_before": "NOT_SUPPORTED",
+        "gil_after": "NOT_SUPPORTED",
+        "rss_before": 16,
+        "rss_after": 17,
+        "classification": "GIL_ALREADY_ON",
+        "package": "lmdb",
+        "python": "/Users/vojtechhamada/.pyenv/versions/3.12.12/bin/python3"
+      },
+      "ft_op": {
+        "success": false,
+        "error": "",
+        "stderr": "Traceback (most recent call last):\n  File \"<string>\", line 2, in <module>\n  File \"/Users/vojtechhamada/.pyenv/versions/3.14.2t/lib/python3.14t/tempfile.py\", line 39, in <module>\n    import functools a"
+      }
+    },
+    "curl_cffi": {
+      "current": {
+        "rc": 0,
+        "stdout": "{\"success\": false, \"dt\": 0.00013241699980426347, \"error\": \"ModuleNotFoundError(\\\"No module named 'curl_cffi'\\\")\", \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 16, \"rss_after\": 16}",
+        "stderr": "",
+        "success": false,
+        "dt": 0.00013241699980426347,
+        "error": "ModuleNotFoundError(\"No module named 'curl_cffi'\")",
+        "gil_before": "NOT_SUPPORTED",
+        "gil_after": "NOT_SUPPORTED",
+        "rss_before": 16,
+        "rss_after": 16,
+        "classification": "NOT_INSTALLED",
+        "package": "curl_cffi",
+        "python": "/Users/vojtechhamada/.pyenv/versions/3.12.12/bin/python3"
+      }
+    },
+    "mlx": {
+      "current": {
+        "rc": 0,
+        "stdout": "{\"success\": true, \"dt\": 0.00015012499989097705, \"error\": null, \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 16, \"rss_after\": 16}",
+        "stderr": "",
+        "success": true,
+        "dt": 0.00015012499989097705,
+        "error": null,
+        "gil_before": "NOT_SUPPORTED",
+        "gil_after": "NOT_SUPPORTED",
+        "rss_before": 16,
+        "rss_after": 16,
+        "classification": "GIL_ALREADY_ON",
+        "package": "mlx",
+        "python": "/Users/vojtechhamada/.pyenv/versions/3.12.12/bin/python3"
+      }
+    }
+  },
+  "venv_size_mb": 805.9404907226562,
+  "perf_delta_s": null
+}

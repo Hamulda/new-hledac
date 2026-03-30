@@ -1,0 +1,291 @@
+"""
+MetricsRegistry - Prometheus-style lightweight metrics
+===================================================
+
+Simple metrics collection without external dependencies.
+Tracks runtime metrics for debugging RAM constraints.
+
+M1 8GB Optimization:
+- Bounded counters/gauges stored in memory
+- Periodic flush to disk JSONL
+- Ring buffer for recent snapshots
+- No raw strings or large payloads
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import psutil
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+
+# Bounded metric names (no arbitrary labels)
+METRIC_NAMES = frozenset([
+    # Orchestrator metrics
+    "orchestrator_rss_mb",
+    "orchestrator_frontier_size",
+    "orchestrator_evidence_ring_len",
+    "orchestrator_tool_exec_events",
+    "orchestrator_budget_remaining_tokens",
+    "orchestrator_budget_remaining_time",
+    "orchestrator_budget_remaining_api_calls",
+    # Cache metrics
+    "cache_http_size",
+    "cache_snapshot_size",
+    "cache_frontier_size",
+    # Memory metrics
+    "memory_open_fds",
+    "memory_rss_mb",
+    "memory_vms_mb",
+    # MLX metrics
+    "mlx_cache_hits",
+    "mlx_cache_misses",
+    "mlx_cache_size_bytes",
+    "mlx_active_memory_bytes",
+    "mlx_peak_memory_bytes",
+    "mlx_cache_fragmentation_ratio",
+    "mlx_kernel_compilation_time_ms",
+    "mlx_kernel_cache_hit_rate",
+    "model_load_duration_ms",
+    "model_unload_count",
+    "model_load_failures",
+    "action_latency_ms",
+    "thermal_throttle_events",
+    "thermal_recovery_events",
+    "memory_zone_normal_seconds",
+    "memory_zone_high_seconds",
+    "memory_zone_critical_seconds",
+])
+
+
+@dataclass
+class MetricSnapshot:
+    """A single metric snapshot"""
+    ts: datetime
+    name: str
+    value: float
+    labels: Optional[Dict[str, str]] = None  # Only if bounded
+
+
+class MetricsRegistry:
+    """
+    Lightweight metrics registry with disk flush.
+
+    Design:
+    - In-memory counters/gauges (tiny)
+    - Periodic flush to disk JSONL
+    - Ring buffer for recent snapshots (maxlen)
+    - No raw strings or large payloads
+    """
+
+    # Flush cadence
+    FLUSH_EVENTS = 100  # Flush every N events
+    FLUSH_SECONDS = 60  # Or every N seconds
+
+    # Ring buffer size
+    MAX_SNAPSHOTS = 100
+
+    def __init__(
+        self,
+        run_dir: Path,
+        run_id: str = "default"
+    ):
+        """
+        Initialize metrics registry.
+
+        Args:
+            run_dir: Directory for metrics JSONL
+            run_id: Run identifier
+        """
+        self._run_dir = run_dir
+        self._run_id = run_id
+        self._last_flush = datetime.utcnow()
+
+        # Counters (integers)
+        self._counters: Dict[str, int] = {}
+
+        # Gauges (floats)
+        self._gauges: Dict[str, float] = {}
+
+        # Ring buffer for recent snapshots
+        self._snapshots: deque = deque(maxlen=self.MAX_SNAPSHOTS)
+
+        # Event count for flush cadence
+        self._event_count = 0
+
+        # Persist file
+        self._persist_file = self._init_persist_file()
+
+        logger.info(f"MetricsRegistry initialized: run_id={run_id}")
+
+    def _init_persist_file(self) -> Optional[Any]:
+        """Initialize persistence file"""
+        metrics_dir = self._run_dir / "logs"
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        metrics_file = metrics_dir / "metrics.jsonl"
+
+        try:
+            return open(metrics_file, "ab")
+        except Exception as e:
+            logger.warning(f"Failed to open metrics file: {e}")
+            return None
+
+    def _validate_metric_name(self, name: str) -> bool:
+        """Validate metric name is in bounded set"""
+        return name in METRIC_NAMES or name.startswith(("orchestrator_", "cache_", "memory_"))
+
+    def inc(self, name: str, delta: int = 1) -> None:
+        """
+        Increment a counter.
+
+        Args:
+            name: Metric name
+            delta: Amount to increment
+        """
+        if not self._validate_metric_name(name):
+            logger.warning(f"Invalid metric name: {name}")
+            return
+
+        self._counters[name] = self._counters.get(name, 0) + delta
+        self._event_count += 1
+        self._maybe_flush()
+
+    def set_gauge(self, name: str, value: float) -> None:
+        """
+        Set a gauge value.
+
+        Args:
+            name: Metric name
+            value: Gauge value
+        """
+        if not self._validate_metric_name(name):
+            logger.warning(f"Invalid metric name: {name}")
+            return
+
+        self._gauges[name] = value
+        self._event_count += 1
+        self._maybe_flush()
+
+    def _maybe_flush(self) -> None:
+        """Flush to disk if cadence met"""
+        if self._event_count >= self.FLUSH_EVENTS:
+            self.flush()
+
+    def tick(self) -> None:
+        """
+        Tick metrics - call periodically from research loop.
+        Captures current system metrics.
+        """
+        # Process memory
+        try:
+            process = psutil.Process(os.getpid())
+            mem_info = process.memory_info()
+            self.set_gauge("memory_rss_mb", mem_info.rss / (1024 * 1024))
+            self.set_gauge("memory_vms_mb", mem_info.vms / (1024 * 1024))
+        except Exception:
+            pass
+
+        # Open file descriptors (Unix)
+        try:
+            process = psutil.Process(os.getpid())
+            self.set_gauge("memory_open_fds", process.num_fds())
+        except Exception:
+            pass
+
+    def flush(self, force: bool = False) -> None:
+        """
+        Flush metrics to disk.
+
+        Args:
+            force: If True, always flush regardless of time/event thresholds.
+        """
+        now = datetime.utcnow()
+
+        # Check time-based flush (skip if not forced and thresholds not met)
+        if not force:
+            elapsed = (now - self._last_flush).total_seconds()
+            if elapsed < self.FLUSH_SECONDS and self._event_count < self.FLUSH_EVENTS:
+                return
+
+        # Collect metrics
+        metrics = []
+        for name, value in self._counters.items():
+            metrics.append({
+                "ts": now.isoformat(),
+                "name": name,
+                "type": "counter",
+                "value": value,
+            })
+        for name, value in self._gauges.items():
+            metrics.append({
+                "ts": now.isoformat(),
+                "name": name,
+                "type": "gauge",
+                "value": value,
+            })
+
+        # Add to ring buffer
+        for m in metrics:
+            self._snapshots.append(m)
+
+        # Persist
+        if self._persist_file:
+            try:
+                for m in metrics:
+                    line = json.dumps(m, separators=(',', ':'))
+                    self._persist_file.write(line.encode('utf-8') + b'\n')
+                self._persist_file.flush()
+                os.fsync(self._persist_file.fileno())
+            except Exception as e:
+                logger.error(f"Failed to flush metrics: {e}")
+
+        self._last_flush = now
+        self._event_count = 0
+
+        logger.debug(f"Flushed {len(metrics)} metrics to disk")
+
+    def get_summary(self) -> Dict[str, Any]:
+        """Get metrics summary (counts only, no raw data)"""
+        return {
+            "run_id": self._run_id,
+            "counter_count": len(self._counters),
+            "gauge_count": len(self._gauges),
+            "snapshot_count": len(self._snapshots),
+            "counters": dict(self._counters),
+            "gauges": dict(self._gauges),
+        }
+
+    def close(self) -> None:
+        """Close and flush"""
+        self.flush()
+        if self._persist_file:
+            try:
+                self._persist_file.flush()
+                self._persist_file.close()
+            except Exception as e:
+                logger.error(f"Error closing metrics: {e}")
+            finally:
+                self._persist_file = None
+
+    def __enter__(self) -> "MetricsRegistry":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
+
+# Convenience function
+def create_metrics_registry(
+    run_dir: Path,
+    run_id: str = "default"
+) -> MetricsRegistry:
+    """Create a MetricsRegistry instance"""
+    return MetricsRegistry(run_dir=run_dir, run_id=run_id)

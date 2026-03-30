@@ -1,0 +1,62 @@
+"""
+Replay buffer pro MARL s ukládáním do numpy polí (bezpečné, serializovatelné).
+"""
+
+import numpy as np
+import mlx.core as mx
+from pathlib import Path
+from typing import Dict
+
+class MARLReplayBuffer:
+    def __init__(self, capacity: int = 50000, state_dim: int = 12, n_agents: int = 5):
+        self.capacity = capacity
+        self.state_dim = state_dim
+        self.n_agents = n_agents
+        self.states = np.zeros((capacity, state_dim), dtype=np.float32)
+        self.actions = np.zeros((capacity, n_agents), dtype=np.int32)
+        self.rewards = np.zeros(capacity, dtype=np.float32)
+        self.next_states = np.zeros((capacity, state_dim), dtype=np.float32)
+        self.dones = np.zeros(capacity, dtype=np.bool_)
+        self.pos = 0
+        self.size = 0
+
+    def push(self, state: mx.array, actions: np.ndarray, reward: float, next_state: mx.array, done: bool):
+        mx.eval(state, next_state)
+        self.states[self.pos] = np.array(state)
+        self.actions[self.pos] = actions
+        self.rewards[self.pos] = reward
+        self.next_states[self.pos] = np.array(next_state)
+        self.dones[self.pos] = done
+        self.pos = (self.pos + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
+
+    def sample(self, batch_size: int) -> Dict[str, mx.array]:
+        idx = np.random.randint(0, self.size, batch_size)
+        return {
+            'states': mx.array(self.states[idx]),
+            'actions': mx.array(self.actions[idx]),
+            'rewards': mx.array(self.rewards[idx]),
+            'next_states': mx.array(self.next_states[idx]),
+            'dones': mx.array(self.dones[idx])
+        }
+
+    def save(self, path: Path):
+        np.savez_compressed(
+            path.with_suffix('.npz'),
+            states=self.states[:self.size],
+            actions=self.actions[:self.size],
+            rewards=self.rewards[:self.size],
+            next_states=self.next_states[:self.size],
+            dones=self.dones[:self.size]
+        )
+
+    def load(self, path: Path):
+        data = np.load(path.with_suffix('.npz'))
+        n = data['states'].shape[0]
+        self.states[:n] = data['states']
+        self.actions[:n] = data['actions']
+        self.rewards[:n] = data['rewards']
+        self.next_states[:n] = data['next_states']
+        self.dones[:n] = data['dones']
+        self.size = n
+        self.pos = n % self.capacity

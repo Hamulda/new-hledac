@@ -1,0 +1,320 @@
+import os
+import logging
+import shutil
+import tempfile
+import zipfile
+from typing import Optional
+from pathlib import Path
+from datetime import datetime
+
+# Sprint 0A: RAMDISK tempfile dir (lazy, reads tempfile.tempdir at call time)
+def _get_tempdir() -> str:
+    """Return tempfile.gettempdir() - reads current value at call time."""
+    return tempfile.gettempdir()
+
+try:
+    from cryptography.fernet import Fernet
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    import base64
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    CRYPTO_AVAILABLE = False
+
+try:
+    import pyzipper
+    PYZIPPER_AVAILABLE = True
+except ImportError:
+    PYZIPPER_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
+
+
+class LootManager:
+    def __init__(self, vault_path: str):
+        self.vault_path = Path(vault_path)
+        self._use_fallback = not (CRYPTO_AVAILABLE or PYZIPPER_AVAILABLE)
+        
+        if self._use_fallback:
+            logger.warning("Neither cryptography nor pyzipper available, using fallback encryption")
+
+    def _derive_key(self, password: str, salt: bytes) -> bytes:
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=100000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
+        return key
+
+    def _encrypt_with_fernet(self, data: bytes, password: str) -> bytes:
+        salt = os.urandom(16)
+        key = self._derive_key(password, salt)
+        fernet = Fernet(key)
+        encrypted_data = fernet.encrypt(data)
+        return salt + encrypted_data
+
+    def _decrypt_with_fernet(self, encrypted_data: bytes, password: str) -> Optional[bytes]:
+        try:
+            salt = encrypted_data[:16]
+            encrypted = encrypted_data[16:]
+            key = self._derive_key(password, salt)
+            fernet = Fernet(key)
+            return fernet.decrypt(encrypted)
+        except Exception as e:
+            logger.error(f"Decryption failed: {e}")
+            return None
+
+    def _create_zip(self, source_path: Path, output_path: Path) -> bool:
+        try:
+            with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(source_path):
+                    for file in files:
+                        file_path = Path(root) / file
+                        arcname = file_path.relative_to(source_path)
+                        zipf.write(file_path, arcname)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create ZIP: {e}")
+            return False
+
+    def _create_encrypted_zip(self, source_path: Path, output_path: Path, password: str) -> bool:
+        if PYZIPPER_AVAILABLE:
+            return self._create_zip_pyzipper(source_path, output_path, password)
+        elif CRYPTO_AVAILABLE:
+            return self._create_zip_fernet(source_path, output_path, password)
+        else:
+            return self._create_zip_fallback(source_path, output_path, password)
+
+    def _create_zip_pyzipper(self, source_path: Path, output_path: Path, password: str) -> bool:
+        try:
+            with pyzipper.AESZipFile(
+                output_path,
+                'w',
+                encryption=pyzipper.WZ_AES,
+                compression=pyzipper.ZIP_DEFLATED
+            ) as zipf:
+                zipf.setpassword(password.encode())
+                for root, dirs, files in os.walk(source_path):
+                    for file in files:
+                        file_path = Path(root) / file
+                        arcname = file_path.relative_to(source_path)
+                        zipf.write(file_path, arcname)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create encrypted ZIP with pyzipper: {e}")
+            return False
+
+    def _create_zip_fernet(self, source_path: Path, output_path: Path, password: str) -> bool:
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.zip', dir=_get_tempdir()) as temp_file:
+                temp_path = Path(temp_file.name)
+            
+            if not self._create_zip(source_path, temp_path):
+                return False
+            
+            with open(temp_path, 'rb') as f:
+                zip_data = f.read()
+            
+            encrypted_data = self._encrypt_with_fernet(zip_data, password)
+            
+            with open(output_path, 'wb') as f:
+                f.write(encrypted_data)
+            
+            os.unlink(temp_path)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create encrypted ZIP with fernet: {e}")
+            if 'temp_path' in locals() and temp_path.exists():
+                os.unlink(temp_path)
+            return False
+
+    def _create_zip_fallback(self, source_path: Path, output_path: Path, password: str) -> bool:
+        try:
+            import hashlib
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.zip', dir=_get_tempdir()) as temp_file:
+                temp_path = Path(temp_file.name)
+            
+            if not self._create_zip(source_path, temp_path):
+                return False
+            
+            with open(temp_path, 'rb') as f:
+                data = f.read()
+            
+            hash_obj = hashlib.sha256()
+            hash_obj.update(password.encode())
+            xor_key = hash_obj.digest()
+            
+            key_len = len(xor_key)
+            encrypted = bytearray(len(data))
+            for i, byte in enumerate(data):
+                encrypted[i] = byte ^ xor_key[i % key_len]
+            
+            with open(output_path, 'wb') as f:
+                f.write(b'FALLBACK_ENC:')
+                f.write(encrypted)
+            
+            os.unlink(temp_path)
+            logger.warning("Using fallback XOR encryption (not secure)")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create encrypted ZIP with fallback: {e}")
+            if 'temp_path' in locals() and temp_path.exists():
+                os.unlink(temp_path)
+            return False
+
+    def _shred_directory(self, path: Path, passes: int = 3) -> bool:
+        if not path.exists():
+            return True
+        
+        try:
+            for root, dirs, files in os.walk(path, topdown=False):
+                for file in files:
+                    file_path = Path(root) / file
+                    try:
+                        size = file_path.stat().st_size
+                        with open(file_path, 'wb') as f:
+                            for _ in range(passes):
+                                f.write(os.urandom(size))
+                                f.flush()
+                                os.fsync(f.fileno())
+                        os.unlink(file_path)
+                    except Exception as e:
+                        logger.warning(f"Failed to shred {file_path}: {e}")
+                        os.unlink(file_path)
+                
+                for dir_name in dirs:
+                    dir_path = Path(root) / dir_name
+                    try:
+                        os.rmdir(dir_path)
+                    except Exception:
+                        pass
+            
+            try:
+                os.rmdir(path)
+            except Exception as e:
+                logger.warning(f"Failed to remove directory {path}: {e}")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error shredding directory: {e}")
+            return False
+
+    def secure_export(self, output_dir: str, password: str, archive_name: Optional[str] = None) -> Optional[str]:
+        if not self.vault_path.exists():
+            logger.error(f"Vault path does not exist: {self.vault_path}")
+            return None
+        
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        if archive_name is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_name = f"ghostvault_{timestamp}.enc"
+        
+        output_file = output_path / archive_name
+        
+        if not self._create_encrypted_zip(self.vault_path, output_file, password):
+            logger.error("Failed to create encrypted export")
+            return None
+        
+        if not self._shred_directory(self.vault_path):
+            logger.warning("Failed to completely shred vault contents")
+        
+        logger.info(f"Secure export completed: {output_file}")
+        return str(output_file)
+
+    def decrypt_export(self, encrypted_path: str, password: str, output_dir: str) -> Optional[str]:
+        encrypted_file = Path(encrypted_path)
+        if not encrypted_file.exists():
+            logger.error(f"Encrypted file does not exist: {encrypted_file}")
+            return None
+        
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            with open(encrypted_file, 'rb') as f:
+                encrypted_data = f.read()
+            
+            if encrypted_data.startswith(b'FALLBACK_ENC:'):
+                return self._decrypt_fallback(encrypted_data[14:], password, output_path)
+            elif CRYPTO_AVAILABLE:
+                return self._decrypt_fernet(encrypted_data, password, output_path)
+            elif PYZIPPER_AVAILABLE:
+                return self._decrypt_pyzipper(encrypted_file, password, output_path)
+            else:
+                logger.error("No decryption method available")
+                return None
+        except Exception as e:
+            logger.error(f"Decryption failed: {e}")
+            return None
+
+    def _decrypt_fernet(self, encrypted_data: bytes, password: str, output_path: Path) -> Optional[str]:
+        try:
+            decrypted = self._decrypt_with_fernet(encrypted_data, password)
+            if not decrypted:
+                return None
+            
+            extract_path = output_path / "decrypted_vault"
+            extract_path.mkdir(exist_ok=True)
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.zip', dir=_get_tempdir()) as temp_file:
+                temp_path = Path(temp_file.name)
+            
+            temp_path.write_bytes(decrypted)
+            
+            with zipfile.ZipFile(temp_path, 'r') as zipf:
+                zipf.extractall(extract_path)
+            
+            os.unlink(temp_path)
+            return str(extract_path)
+        except Exception as e:
+            logger.error(f"Fernet decryption failed: {e}")
+            return None
+
+    def _decrypt_pyzipper(self, encrypted_file: Path, password: str, output_path: Path) -> Optional[str]:
+        try:
+            extract_path = output_path / "decrypted_vault"
+            extract_path.mkdir(exist_ok=True)
+            
+            with pyzipper.AESZipFile(encrypted_file) as zipf:
+                zipf.setpassword(password.encode())
+                zipf.extractall(extract_path)
+            
+            return str(extract_path)
+        except Exception as e:
+            logger.error(f"Pyzipper decryption failed: {e}")
+            return None
+
+    def _decrypt_fallback(self, encrypted_data: bytes, password: str, output_path: Path) -> Optional[str]:
+        try:
+            import hashlib
+            
+            hash_obj = hashlib.sha256()
+            hash_obj.update(password.encode())
+            xor_key = hash_obj.digest()
+            
+            key_len = len(xor_key)
+            decrypted = bytearray(len(encrypted_data))
+            for i, byte in enumerate(encrypted_data):
+                decrypted[i] = byte ^ xor_key[i % key_len]
+            
+            extract_path = output_path / "decrypted_vault"
+            extract_path.mkdir(exist_ok=True)
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.zip', dir=_get_tempdir()) as temp_file:
+                temp_path = Path(temp_file.name)
+            
+            temp_path.write_bytes(bytes(decrypted))
+            
+            with zipfile.ZipFile(temp_path, 'r') as zipf:
+                zipf.extractall(extract_path)
+            
+            os.unlink(temp_path)
+            return str(extract_path)
+        except Exception as e:
+            logger.error(f"Fallback decryption failed: {e}")
+            return None

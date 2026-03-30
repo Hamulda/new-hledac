@@ -1,0 +1,736 @@
+"""
+✅ CANONICAL - NER Engine s GLiNER-X pro CPU inference
+======================================================
+
+Toto je CANONICAL implementace pro Named Entity Recognition.
+
+Používá knowledgator/gliner-relex-large-v0.5 model pro extrakci named entities a vztahů (joint NER + RE)
+s podporou lazy loading a explicitního CPU-only režimu.
+
+Alternativa: utils/entity_extractor.py (regex-based, rychlejší ale méně přesný)
+
+Pro NER vždy používejte tento modul:
+    from hledac.universal.brain.ner_engine import NEREngine, get_ner_engine
+
+Features:
+- Lazy loading modelu (načte se až při prvním použití)
+- CPU-only inference (map_location="cpu")
+- Podpora batch i single prediction
+- Explicitní unload pro uvolnění paměti
+- Sprint 76: ANE acceleration via NaturalLanguage framework (PyObjC)
+- Sprint 76: CoreML NER model fallback
+"""
+
+import asyncio
+import inspect
+import hashlib
+import json
+import logging
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+from pathlib import Path
+from typing import Dict, List, Optional, Any
+from functools import partial
+
+# Sprint 7B: Lazy torch import for M1 8GB memory optimization
+# Sprint 8G: Made truly lazy - torch import deferred until first use
+_TORCH_AVAILABLE = False
+_torch_module = None
+
+def _get_torch():
+    """Lazy torch accessor - imports torch only when first needed."""
+    global _torch_module, _TORCH_AVAILABLE
+    if _torch_module is None:
+        try:
+            import torch
+            _torch_module = torch
+            _TORCH_AVAILABLE = True
+        except ImportError:
+            _torch_module = None
+            _TORCH_AVAILABLE = False
+    return _torch_module
+
+logger = logging.getLogger(__name__)
+
+# Sprint 76: ANE detection via NaturalLanguage framework
+_NL_AVAILABLE = False
+try:
+    import NaturalLanguage
+    _NL_AVAILABLE = True
+except ImportError:
+    pass
+
+# M1 8GB MEMORY_STRICT limity
+MAX_STRICT_TEXT_LENGTH = 10000  # Max 10k chars v strict módu
+MAX_STRICT_LABELS = 5           # Max 5 labels
+MAX_STRICT_TEXTS = 3            # Max 3 textů v batch
+
+
+class NEREngine:
+    """
+    Engine pro Named Entity Recognition pomocí GLiNER-X.
+
+    Features:
+    - Lazy loading modelu (načte se až při prvním použití)
+    - CPU-only inference (map_location="cpu")
+    - Podpora batch i single prediction
+    - Explicitní unload pro uvolnění paměti
+    - Sprint 76: ANE acceleration via NaturalLanguage framework
+    - Sprint 76: CoreML NER model fallback
+    """
+
+    def __init__(self, model_name: str = "knowledgator/gliner-relex-large-v0.5"):
+        self.model_name = model_name
+        self._model: Optional[Any] = None
+        self._lock = threading.RLock()
+        self._initialized = False
+
+        # Sprint 76: ANE-related attributes
+        self._nl_available = _NL_AVAILABLE
+        self._coreml_ner_model = None
+        self._ane_predictions = 0  # Monitoring: count of ANE-based predictions
+
+    # =============================================================================
+    # Sprint 76: ANE Acceleration Methods
+    # =============================================================================
+
+    async def _load_coreml_model(self):
+        """Lazy load CoreML NER model (běží na ANE)."""
+        try:
+            import coremltools as ct
+            model_path = Path.home() / '.hledac' / 'models' / 'ner.mlmodel'
+            if model_path.exists():
+                self._coreml_ner_model = ct.models.MLModel(str(model_path))
+                logger.info("CoreML NER model loaded")
+        except Exception as e:
+            logger.debug(f"CoreML NER load failed: {e}")
+
+    def _nl_process_sync(self, text: str) -> List[Dict]:
+        """Synchronní volání NaturalLanguage.framework přes PyObjC."""
+        if not self._nl_available:
+            return []
+
+        try:
+            from NaturalLanguage import NLTagger, NLTagScheme, NLTokenUnit
+            from Foundation import NSString
+
+            entities = []
+            ns_string = NSString.stringWithString_(text)
+            tagger = NLTagger.alloc().initWithTagSchemes_([NLTagScheme.nameType])
+            tagger.setString_(ns_string)
+
+            def _block(tag, token_range, stop):
+                if tag:
+                    entities.append({
+                        'text': text[token_range.location:token_range.location + token_range.length],
+                        'type': str(tag).split('.')[-1],
+                        'confidence': 0.85
+                    })
+                return True
+
+            tagger.enumerateTagsInRange_unit_scheme_options_usingBlock_(
+                (0, len(text)),
+                NLTokenUnit.word,
+                NLTagScheme.nameType,
+                0,
+                _block
+            )
+            return entities
+        except Exception as e:
+            logger.warning(f"NL framework failed: {e}")
+            return []
+
+    def get_ane_prediction_count(self) -> int:
+        """Vrátí počet ANE predikcí pro monitoring."""
+        return self._ane_predictions
+
+    @property
+    def is_loaded(self) -> bool:
+        """Vrátí True pokud je model načten v paměti."""
+        return self._model is not None
+
+    async def initialize(self) -> None:
+        """
+        Explicitní inicializace - načte model do paměti.
+
+n        Pokud je model již načten, nic nedělá.
+        """
+        if self._initialized and self._model is not None:
+            logger.debug("NEREngine již inicializován")
+            return
+
+        with self._lock:
+            if self._initialized and self._model is not None:
+                return
+
+            logger.info(f"Načítání GLiNER modelu: {self.model_name}")
+
+            try:
+                from gliner import GLiNER
+
+                # CPU-only načtení modelu
+                self._model = GLiNER.from_pretrained(
+                    self.model_name,
+                    load_tokenizer=True,
+                )
+
+                # Explicitně přesunout na CPU a nastavit eval mode
+                self._model.eval()
+                if hasattr(self._model, 'device'):
+                    self._model = self._model.to('cpu')
+
+                self._initialized = True
+                logger.info("GLiNER model úspěšně načten (CPU)")
+
+            except Exception as e:
+                logger.error(f"Chyba při načítání GLiNER modelu: {e}")
+                self._model = None
+                self._initialized = False
+                raise RuntimeError(f"Nepodařilo se načíst GLiNER model: {e}") from e
+
+    def _ensure_loaded(self) -> None:
+        """Interní metoda pro lazy loading - volá se automaticky před inference."""
+        if self._model is None:
+            logger.info("Lazy loading GLiNER modelu...")
+            try:
+                from gliner import GLiNER
+
+                self._model = GLiNER.from_pretrained(
+                    self.model_name,
+                    load_tokenizer=True,
+                )
+                self._model.eval()
+                if hasattr(self._model, 'device'):
+                    self._model = self._model.to('cpu')
+
+                self._initialized = True
+                logger.info("GLiNER model lazy-loaded (CPU)")
+
+            except Exception as e:
+                logger.error(f"Chyba při lazy loadingu GLiNER modelu: {e}")
+                raise RuntimeError(f"Nepodařilo se načíst GLiNER model: {e}") from e
+
+    def predict(
+        self,
+        text: str,
+        labels: List[str],
+        threshold: float = 0.5
+    ) -> List[Dict[str, Any]]:
+        """
+        Extrahuje entity z textu.
+
+        Args:
+            text: Vstupní text
+            labels: Seznam labelů pro extrakci (např. ["person", "organization", "location"])
+            threshold: Minimální confidence score (0.0 - 1.0)
+
+        Returns:
+            List[Dict]: Seznam nalezených entit s klíči:
+                - entity: text entity
+                - label: typ entity
+                - span: (start, end) pozice v textu
+                - score: confidence score
+        """
+        self._ensure_loaded()
+
+        if not text or not text.strip():
+            return []
+
+        if not labels:
+            raise ValueError("Musí být zadán alespoň jeden label")
+
+        try:
+            # GLiNER predict vrací list entit
+            entities = self._model.predict_entities(
+                text,
+                labels,
+                threshold=threshold
+            )
+
+            # Normalizace výstupu
+            result = []
+            for entity in entities:
+                result.append({
+                    "entity": entity.get("text", ""),
+                    "label": entity.get("label", ""),
+                    "span": (entity.get("start", 0), entity.get("end", 0)),
+                    "score": entity.get("score", 0.0)
+                })
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Chyba při NER predikci: {e}")
+            raise RuntimeError(f"NER predikce selhala: {e}") from e
+
+    # Sprint 80: MLX structured generation (outlines) availability
+    _MLX_AVAILABLE = False
+    _MLX_EXTRACTOR = None
+
+    async def _load_mlx_extractor(self):
+        """Lazy load MLX outlines extractor."""
+        if NEREngine._MLX_AVAILABLE:
+            return
+        try:
+            import outlines
+            from outlines.models import mlx as mlx_outlines
+            NEREngine._MLX_EXTRACTOR = mlx_outlines("mlx-community/Llama-3.2-3B-Instruct-4bit")
+            NEREngine._MLX_AVAILABLE = True
+            logger.info("MLX outlines extractor loaded")
+        except Exception as e:
+            logger.debug(f"MLX outlines load failed: {e}")
+            NEREngine._MLX_AVAILABLE = False
+
+    async def _extract_with_mlx(self, text: str) -> List[Dict]:
+        """Extract entities using MLX outlines structured generation."""
+        if not NEREngine._MLX_AVAILABLE:
+            await self._load_mlx_extractor()
+        if not NEREngine._MLX_AVAILABLE or NEREngine._MLX_EXTRACTOR is None:
+            return []
+
+        try:
+            import msgspec
+
+            class EntityList(msgspec.Struct):
+                entities: List[dict]
+
+            generator = outlines.generate.json(NEREngine._MLX_EXTRACTOR, EntityList)
+            prompt = f"Extract named entities from text:\n{text[:2000]}"
+            result = generator(prompt)
+            return result.entities
+        except Exception as e:
+            logger.warning(f"MLX extraction failed: {e}")
+            return []
+
+    async def predict_async(
+        self,
+        text: str,
+        labels: List[str],
+        threshold: float = 0.5
+    ) -> List[Dict[str, Any]]:
+        """
+        Asynchronní varianta predict - běží v thread poolu.
+
+        Sprint 76: ANE-first strategy - NaturalLanguage framework (ANE) is tried first,
+        then CoreML fallback, then GLiNER.
+
+        Args:
+            text: Vstupní text
+            labels: Seznam labelů pro extrakci
+            threshold: Minimální confidence score
+
+        Returns:
+            List[Dict]: Seznam nalezených entit
+        """
+        # Sprint 76: ANE-first via NaturalLanguage framework
+        if self._nl_available:
+            # ANE via NaturalLanguage
+            return await asyncio.to_thread(self._nl_process_sync, text)
+
+        # CoreML fallback (také ANE)
+        if self._coreml_ner_model is None:
+            await self._load_coreml_model()
+        if self._coreml_ner_model:
+            result = await asyncio.to_thread(
+                self._coreml_ner_model.predict,
+                {'text': text[:512]}
+            )
+            self._ane_predictions += 1
+            return result.get('entities', [])
+
+        # GLiNER fallback (CPU/GPU)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            partial(self.predict, text, labels, threshold)
+        )
+
+    def predict_with_relations(
+        self,
+        text: str,
+        labels: List[str],
+        relations: List[Dict[str, Any]] = None,
+        threshold: float = 0.5
+    ) -> Dict[str, Any]:
+        """
+        Extrahuje entity a volitelně vztahy z textu pomocí gliner-relex.
+
+        Args:
+            text: Vstupní text
+            labels: Seznam labelů pro extrakci (např. ["person", "organization", "threat_actor"])
+            relations: Seznam definic vztahů pro joint extraction
+                   Format: [{"relation": "attributed_to", "pairs_filter": [("malware", "threat_actor")]}]
+            threshold: Minimální confidence score
+
+        Returns:
+            Dict s klíči "entities" a "relations"
+        """
+        self._ensure_loaded()
+
+        if not text or not text.strip():
+            return {"entities": [], "relations": []}
+
+        if not labels:
+            raise ValueError("Musí být zadán alespoň jeden label")
+
+        try:
+            if relations:
+                # Joint inference with relations
+                entities, rels = self._model.predict(
+                    texts=[text],
+                    labels=labels,
+                    relations=relations,
+                    threshold=threshold,
+                    return_relations=True
+                )
+                return {
+                    "entities": entities[0] if entities else [],
+                    "relations": rels[0] if rels else []
+                }
+            else:
+                # NER only
+                entities = self._model.predict_entities(text, labels, threshold=threshold)
+                return {"entities": entities, "relations": []}
+
+        except Exception as e:
+            logger.error(f"Chyba při NER+RE predikci: {e}")
+            raise RuntimeError(f"NER+RE predikce selhala: {e}") from e
+
+    def predict_batch(
+        self,
+        texts: List[str],
+        labels: List[str],
+        threshold: float = 0.5,
+        batch_size: int = 8
+    ) -> List[List[Dict[str, Any]]]:
+        """
+        Batch predikce pro více textů.
+
+        Args:
+            texts: Seznam vstupních textů
+            labels: Seznam labelů pro extrakci
+            threshold: Minimální confidence score
+            batch_size: Velikost batch (pro budoucí optimalizaci)
+
+        Returns:
+            List[List[Dict]]: Seznam výsledků pro každý text
+        """
+        self._ensure_loaded()
+
+        if not texts:
+            return []
+
+        if not labels:
+            raise ValueError("Musí být zadán alespoň jeden label")
+
+        results = []
+
+        for text in texts:
+            try:
+                entities = self.predict(text, labels, threshold)
+                results.append(entities)
+            except Exception as e:
+                logger.error(f"Chyba při batch predikci pro text: {e}")
+                results.append([])
+
+        return results
+
+    async def predict_batch_async(
+        self,
+        texts: List[str],
+        labels: List[str],
+        threshold: float = 0.5,
+        batch_size: int = 8
+    ) -> List[List[Dict[str, Any]]]:
+        """
+        Asynchronní batch predikce.
+
+        Args:
+            texts: Seznam vstupních textů
+            labels: Seznam labelů pro extrakci
+            threshold: Minimální confidence score
+            batch_size: Velikost batch
+
+        Returns:
+            List[List[Dict]]: Seznam výsledků pro každý text
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            partial(self.predict_batch, texts, labels, threshold, batch_size)
+        )
+
+    def unload(self) -> None:
+        """
+        Uvolní model z paměti.
+
+        Po volání unload() se model znovu načte při příštím použití (lazy load).
+        """
+        with self._lock:
+            if self._model is not None:
+                logger.info("Uvolňování GLiNER modelu z paměti...")
+
+                # Odstranění reference na model
+                del self._model
+                self._model = None
+                self._initialized = False
+
+                # Vyčištění PyTorch cache
+                if _TORCH_AVAILABLE:
+                    _t = _get_torch()
+                    if _t is not None and hasattr(_t, 'cuda') and _t.cuda.is_available():
+                        _t.cuda.empty_cache()
+
+                import gc
+                gc.collect()
+
+                logger.info("GLiNER model uvolněn")
+
+    async def predict_strict(
+        self,
+        text: str,
+        labels: List[str],
+        threshold: float = 0.5,
+        timeout: int = 60
+    ) -> List[Dict[str, Any]]:
+        """
+        MEMORY_STRICT mód - GLiNER běží v izolovaném subprocessu.
+
+        Args:
+            text: Vstupní text (max 10k chars)
+            labels: Seznam labelů (max 5)
+            threshold: Minimální confidence score
+            timeout: Timeout v sekundách
+
+        Returns:
+            List[Dict]: Seznam nalezených entit
+        """
+        # Hard limity
+        if len(text) > MAX_STRICT_TEXT_LENGTH:
+            text = text[:MAX_STRICT_TEXT_LENGTH]
+            logger.warning(f"Text truncated to {MAX_STRICT_TEXT_LENGTH} chars in strict mode")
+
+        if len(labels) > MAX_STRICT_LABELS:
+            labels = labels[:MAX_STRICT_LABELS]
+            logger.warning(f"Labels limited to {MAX_STRICT_LABELS} in strict mode")
+
+        try:
+            # Spusť GLiNER v subprocessu
+            return await self._run_in_subprocess(
+                texts=[text],
+                labels=labels,
+                threshold=threshold,
+                timeout=timeout
+            )
+        except Exception as e:
+            logger.error(f"Strict mode NER failed: {e}")
+            return []
+
+    async def predict_batch_strict(
+        self,
+        texts: List[str],
+        labels: List[str],
+        threshold: float = 0.5,
+        timeout: int = 120
+    ) -> List[List[Dict[str, Any]]]:
+        """
+        MEMORY_STRICT batch mód.
+
+        Args:
+            texts: Seznam textů (max 3)
+            labels: Seznam labelů (max 5)
+            threshold: Minimální confidence score
+            timeout: Timeout v sekundách
+
+        Returns:
+            List[List[Dict]]: Seznam výsledků pro každý text
+        """
+        # Hard limity
+        if len(texts) > MAX_STRICT_TEXTS:
+            texts = texts[:MAX_STRICT_TEXTS]
+            logger.warning(f"Texts limited to {MAX_STRICT_TEXTS} in strict mode")
+
+        texts = [t[:MAX_STRICT_TEXT_LENGTH] if len(t) > MAX_STRICT_TEXT_LENGTH else t
+                 for t in texts]
+
+        if len(labels) > MAX_STRICT_LABELS:
+            labels = labels[:MAX_STRICT_LABELS]
+
+        try:
+            return await self._run_in_subprocess(
+                texts=texts,
+                labels=labels,
+                threshold=threshold,
+                timeout=timeout
+            )
+        except Exception as e:
+            logger.error(f"Strict mode batch NER failed: {e}")
+            return [[] for _ in texts]
+
+    async def _run_in_subprocess(
+        self,
+        texts: List[str],
+        labels: List[str],
+        threshold: float,
+        timeout: int
+    ) -> Any:
+        """
+        Spustí GLiNER inference v izolovaném subprocessu.
+
+        Komunikace přes JSONL na stdin/stdout.
+        Subprocess se ukončí po dokončení → OS uvolní RAM.
+        """
+        # Inline kód pro subprocess (aby nebyl potřeba nový soubor)
+        child_code = '''
+import json
+import sys
+import os
+
+# Potlačit PyTorch warningy
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
+# Načíst vstup
+input_data = json.loads(sys.stdin.read())
+texts = input_data['texts']
+labels = input_data['labels']
+threshold = input_data['threshold']
+model_name = input_data.get('model_name', 'knowledgator/gliner-relex-large-v0.5')
+
+try:
+    from gliner import GLiNER
+    import torch
+
+    # Načíst model
+    model = GLiNER.from_pretrained(model_name, load_tokenizer=True)
+    model.eval()
+
+    results = []
+    for text in texts:
+        if not text.strip():
+            results.append([])
+            continue
+
+        try:
+            entities = model.predict_entities(text, labels, threshold=threshold)
+            result = [{
+                "entity": e.get("text", ""),
+                "label": e.get("label", ""),
+                "span": (e.get("start", 0), e.get("end", 0)),
+                "score": e.get("score", 0.0)
+            } for e in entities]
+            results.append(result)
+        except Exception as e:
+            results.append([{"error": str(e)}])
+
+    # Výstup jako JSON
+    print(json.dumps({"success": True, "results": results}))
+
+except Exception as e:
+    print(json.dumps({"success": False, "error": str(e)}))
+'''
+
+        # Připrav data
+        input_data = {
+            'texts': texts,
+            'labels': labels,
+            'threshold': threshold,
+            'model_name': self.model_name
+        }
+
+        # Vytvoř temp soubor s kódem
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+            f.write(child_code)
+            temp_script = f.name
+
+        try:
+            # Spusť subprocess
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, temp_script,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env={**os.environ, 'TOKENIZERS_PARALLELISM': 'false'}
+            )
+
+            # Pošli data a čekej na výsledek
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=json.dumps(input_data).encode()),
+                timeout=timeout
+            )
+
+            if proc.returncode != 0:
+                error_msg = stderr.decode() if stderr else "Unknown error"
+                raise RuntimeError(f"Subprocess failed: {error_msg}")
+
+            # Parsuj výsledek
+            result = json.loads(stdout.decode())
+
+            if not result.get('success'):
+                raise RuntimeError(result.get('error', 'Unknown error'))
+
+            results = result['results']
+
+            # Pokud je jeden text, vrať seznam entit
+            if len(texts) == 1:
+                return results[0] if results else []
+            return results
+
+        finally:
+            # Uklid temp soubor
+            try:
+                os.unlink(temp_script)
+            except Exception:
+                pass
+
+    def get_info(self) -> Dict[str, Any]:
+        """Vrátí informace o engine včetně MEMORY_STRICT podpory."""
+        num_threads = 0
+        if _TORCH_AVAILABLE:
+            _t = _get_torch()
+            if _t:
+                try:
+                    num_threads = _t.get_num_threads()
+                except Exception:
+                    pass
+        return {
+            "model_name": self.model_name,
+            "is_loaded": self.is_loaded,
+            "initialized": self._initialized,
+            "device": "cpu",
+            "num_threads": num_threads,
+            "memory_strict_limits": {
+                "max_text_length": MAX_STRICT_TEXT_LENGTH,
+                "max_labels": MAX_STRICT_LABELS,
+                "max_texts": MAX_STRICT_TEXTS
+            }
+        }
+
+# Singleton instance pro snadné použití
+_default_engine: Optional[NEREngine] = None
+
+
+def get_ner_engine(model_name: str = "knowledgator/gliner-relex-large-v0.5") -> NEREngine:
+    """
+    Vrátí singleton instanci NEREngine.
+
+    Args:
+        model_name: Název modelu (default: knowledgator/gliner-relex-large-v0.5)
+
+    Returns:
+        NEREngine instance
+    """
+    global _default_engine
+    if _default_engine is None:
+        _default_engine = NEREngine(model_name)
+    return _default_engine
+
+
+def reset_ner_engine() -> None:
+    """Resetuje singleton instanci (uvolní model z paměti)."""
+    global _default_engine
+    if _default_engine is not None:
+        _default_engine.unload()
+        _default_engine = None

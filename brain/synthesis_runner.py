@@ -1,0 +1,846 @@
+"""
+SynthesisRunner — Sprint 8QC
+============================
+Orchestrates MLX-based structured synthesis of OSINT findings into STIX-ready reports.
+Works in WINDUP phase only (or with explicit force_synthesis=True).
+
+OSINTReport schema (msgspec.Struct):
+  - query: str
+  - ioc_entities: list[IOCEntity]
+  - threat_summary: str (max 3 věty)
+  - threat_actors: list[str] (APT skupiny, ransomware gangy)
+  - confidence: float (0.0-1.0)
+  - sources_count: int
+  - timestamp: float (Unix epoch)
+
+E2E flow:
+  sprint lifecycle WINDUP → SynthesisRunner.synthesize_findings()
+  → structured_generate() (Outlines MLX constrained JSON)
+  → unload + gc → JSON export do ~/.hledac/reports/
+"""
+
+from __future__ import annotations
+
+import asyncio
+import gc
+import json as _json
+import logging
+import re
+import time
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Optional
+
+import msgspec
+
+if TYPE_CHECKING:
+    from .model_lifecycle import ModelLifecycle
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8UC B.1: JSON Schema for OSINTReport — xgrammar + Outlines compatible
+# ---------------------------------------------------------------------------
+
+
+def _build_osint_json_schema() -> dict:
+    """JSON Schema for OSINTReport — compatible with xgrammar GrammarCompiler and Outlines."""
+    return {
+        "type": "object",
+        "properties": {
+            "title":           {"type": "string"},
+            "summary":         {"type": "string"},
+            "confidence":      {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "findings":        {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+            "threat_actors":   {"type": "array", "items": {"type": "string"}, "maxItems": 10},
+            "iocs":            {"type": "array", "items": {"type": "string"}, "maxItems": 50},
+            "ttps":            {"type": "array", "items": {"type": "string"}, "maxItems": 15},
+            "recommendations": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
+        },
+        "required": ["title", "summary", "confidence"],
+        "additionalProperties": False,
+    }
+
+
+def _infer_ioc_type(text: str) -> str:
+    """Infer IOC type from text content."""
+    t = text.lower()
+    if any(x in t for x in ["cve-", "cve_", "vulnerability"]):
+        return "cve"
+    if "." not in t and len(text) > 20:
+        return "hash"
+    if t.startswith("http") or ".onion" in t or ".i2p" in t:
+        return "onion"
+    if "/" in t and "." not in t.split("/")[0]:
+        return "hash"
+    if t.startswith("1") and len(t) > 30:
+        return "btc"
+    if "@" in t:
+        return "email"
+    return "domain"
+
+# ---------------------------------------------------------------------------
+# OSINTReport Schema — msgspec.Struct for JSON constrained generation
+# ---------------------------------------------------------------------------
+
+
+class IOCEntity(msgspec.Struct):
+    """Jedna IOC entita extrahovaná z findingu."""
+    value: str
+    ioc_type: str  # "cve","ip","hash","onion","domain","apt","malware","btc"
+    severity: str   # "critical","high","medium","low"
+    context: str    # 1 věta
+
+
+class OSINTReport(msgspec.Struct):
+    """
+    STIX-ready OSINT synthesis report.
+
+    Vrací se z structured_generate() při úspěchu.
+    Timestamp je Unix epoch (float), threat_actors jsou APT/ransomware gangy.
+    """
+    query: str
+    ioc_entities: list[IOCEntity]
+    threat_summary: str          # max 3 věty
+    threat_actors: list[str]     # APT skupiny, ransomware gangy
+    confidence: float            # 0.0-1.0
+    sources_count: int
+    timestamp: float            # Unix epoch
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8TA: Outlines json_schema dict — not msgspec.Struct
+# ---------------------------------------------------------------------------
+
+OSINT_JSON_SCHEMA: str = _json.dumps({
+    "type": "object",
+    "properties": {
+        "title":          {"type": "string"},
+        "summary":        {"type": "string"},
+        "threat_actors":  {"type": "array", "items": {"type": "string"}},
+        "findings":       {"type": "array", "items": {"type": "string"}},
+        "confidence":     {"type": "number", "minimum": 0, "maximum": 1},
+        "timestamp":      {"type": "number"},
+    },
+    "required": ["title", "summary", "threat_actors", "findings", "confidence", "timestamp"],
+    "additionalProperties": False,
+})
+
+
+# ---------------------------------------------------------------------------
+# SynthesisRunner
+# ---------------------------------------------------------------------------
+
+
+class SynthesisRunner:
+    """
+    WINDUP-only synthesis orchestrator.
+
+    Usage:
+        runner = SynthesisRunner(model_lifecycle)
+        runner.inject_graph(ioc_graph)
+        report = await runner.synthesize_findings(query, findings, force_synthesis=True)
+        await runner.close()
+    """
+
+    __slots__ = ("_lifecycle", "_ioc_graph", "_cached_model_path", "_last_outlines_used",
+                 "_custom_synthesis_prompt", "_prompt_modifier", "_duckdb_store",
+                 "_last_synthesis_engine")
+
+    def __init__(self, lifecycle: "ModelLifecycle") -> None:
+        self._lifecycle = lifecycle
+        self._ioc_graph: Optional[Any] = None
+        self._cached_model_path: Optional[Path] = None
+        self._last_outlines_used: bool = False
+        # Sprint 8TD: Custom prompt support
+        self._custom_synthesis_prompt: Optional[str] = None
+        self._prompt_modifier: str = ""
+        # Sprint 8UC B.2: DuckDB store for episode recall
+        self._duckdb_store: Optional[Any] = None
+        # Sprint 8UC B.3: Last synthesis engine used
+        self._last_synthesis_engine: str = "none"
+        self._prompt_modifier: str = ""
+
+    def inject_graph(self, graph: Any) -> None:
+        """Inject IOCGraph instance from 8QA for STIX context injection."""
+        self._ioc_graph = graph
+
+    # ------------------------------------------------------------------
+    # Sprint 8TD: Custom prompt injection
+    # ------------------------------------------------------------------
+
+    def set_custom_prompt(self, prompt: str) -> None:
+        """Sprint 8TD: Set custom synthesis prompt from DSPy optimizer."""
+        self._custom_synthesis_prompt = prompt
+        logger.info(f"SynthesisRunner: custom prompt set ({len(prompt)} chars)")
+
+    def set_prompt_modifier(self, modifier: str) -> None:
+        """Sprint 8TD: Set prompt modifier from bandit arm selection."""
+        self._prompt_modifier = modifier
+        logger.info(f"SynthesisRunner: prompt modifier set ({len(modifier)} chars)")
+
+    # ------------------------------------------------------------------
+    # Public synthesis API
+    # ------------------------------------------------------------------
+
+    async def synthesize_findings(
+        self,
+        query: str,
+        findings: list[dict],
+        max_findings: int = 10,
+        force_synthesis: bool = False,
+    ) -> OSINTReport | None:
+        """
+        Synthesize top findings into OSINTReport.
+
+        WINDUP-only (B.7): skip pokud není WINDUP fáze a force_synthesis=False.
+        B.7: skip pokud RSS > 5.5GiB (M1 8GB UMA safety).
+        STIX context (B.6): injektuje se z ioc_graph.export_stix_bundle().
+        """
+        # B.7: WINDUP guard
+        if not self._is_windup_allowed(force_synthesis):
+            logger.debug("Synthesis skipped: not in WINDUP phase (force=%s)", force_synthesis)
+            return None
+
+        # B.7: UMA RSS > 5.5GiB guard
+        if not self._check_uma_guard():
+            return None
+
+        # Sprint 8SB: ensure model is available (discovery + optional download)
+        model_path = await self._ensure_model()
+        if model_path is None:
+            logger.warning("[SYNTHESIS] No model available — skipping")
+            return None
+
+        # Update lifecycle model path for structured_generate
+        self._lifecycle._model_path = model_path
+        self._lifecycle._loaded = False  # force reload with new path
+
+        # STIX context z 8QA grafu
+        stix_context = self._build_stix_context()
+
+        # Sprint 8UC B.2.3: Inject episode context from research memory
+        episode_ctx = ""
+        if self._duckdb_store is not None:
+            episode_ctx = await self._build_episode_context(self._duckdb_store, query)
+
+        # Sestavit prompt z top findings
+        top = sorted(findings, key=lambda f: f.get("confidence", 0.0), reverse=True)[:max_findings]
+        findings_text = "\n".join(
+            f"- [{f.get('source_type', '?')}] {f.get('text', '')[:200]}"
+            for f in top
+        )
+
+        if episode_ctx:
+            prompt = (
+                f"{episode_ctx}\n\n---\n"
+                f"Query: {query}{stix_context}\n"
+                f"Findings:\n{findings_text}\n"
+                f"Current timestamp: {time.time()}"
+            )
+        else:
+            prompt = (
+                f"Query: {query}{stix_context}\n"
+                f"Findings:\n{findings_text}\n"
+                f"Current timestamp: {time.time()}"
+            )
+
+        raw_dict = None
+        used_engine = "none"
+        try:
+            # Sprint 8UC B.1 + B.3: Cascade: xgrammar → streaming → constrained
+            result_tuple = await self._run_xgrammar_generation(prompt)
+            if result_tuple is not None:
+                raw_dict, xgr_ok = result_tuple
+                if xgr_ok:
+                    used_engine = "xgrammar"
+
+            # Fallback 1: streaming
+            if raw_dict is None:
+                result_tuple = await self._run_streaming_generation(
+                    prompt, json_schema=OSINT_JSON_SCHEMA
+                )
+                if result_tuple is not None:
+                    raw_dict, str_ok = result_tuple
+                    if str_ok:
+                        used_engine = "streaming"
+
+            # Fallback 2: constrained via lifecycle's structured_generate
+            if raw_dict is None:
+                raw_dict, outlines_ok = await self._lifecycle.structured_generate(
+                    prompt, OSINT_JSON_SCHEMA
+                )
+                if raw_dict is not None:
+                    used_engine = "constrained"
+        except Exception as e:
+            logger.error("Synthesis error: %s", e)
+            return None
+        finally:
+            # B.4: unload + cleanup v přesném pořadí
+            await self._lifecycle.unload()
+            gc.collect()
+
+        # Log engine used
+        logger.info(f"[SYNTHESIS] Engine used: {used_engine}")
+        self._last_synthesis_engine = used_engine
+
+        if raw_dict is not None:
+            # Sprint 8TA B.1: _parse_raw_to_osintreport s defaulty
+            used_outlines = used_engine in ("streaming", "constrained")
+            report = self._parse_raw_to_osintreport(raw_dict)
+            if report is not None:
+                report.confidence = self._compute_confidence(report, used_outlines)
+                return report
+        return None
+
+    async def close(self) -> None:
+        """Clean close — volá se po syntéze."""
+        # Ensure any pending lifecycle resources are released
+        try:
+            await self._lifecycle.unload()
+        except Exception:
+            pass
+        gc.collect()
+
+    # ------------------------------------------------------------------
+    # Sprint 8TC B.3: Streaming synthesis s early-exit
+    # ------------------------------------------------------------------
+
+    async def _run_streaming_generation(
+        self,
+        prompt: str,
+        json_schema: str | None = None,  # unused — regex early-exit path
+    ) -> tuple[dict | None, bool] | None:
+        """
+        Sprint 8TC B.3: mlx_lm stream_generate s early-exit při kompletním JSON.
+
+        Fallback na regex JSON extract z akumulovaného textu.
+        M1: vše sync v CPU_EXECUTOR — NIKDY přímo v event loop.
+
+        Returns:
+            (dict | None, outlines_used: bool) — stejný formát jako structured_generate
+        """
+        import re as _re
+        import json as _json
+
+        try:
+            model, tokenizer, _model_path = await self._lifecycle._ensure_loaded()
+        except RuntimeError as e:
+            logger.warning("[SYNTHESIS] Model load failed: %s", e)
+            return None
+
+        system_prompt = (
+            "You are a cybersecurity analyst. "
+            "Extract IOC entities from findings. "
+            "Respond with valid JSON matching the schema exactly."
+        )
+        full_prompt = f"<|system|>{system_prompt}<|user|>{prompt}<|assistant|>"
+
+        # Pokus o chat template
+        try:
+            if hasattr(tokenizer, "apply_chat_template"):
+                m = _re.search(r"<\|system\|>(.*?)<\|user\|>(.*?)<\|assistant\|>", full_prompt, _re.DOTALL)
+                if m:
+                    system_text = m.group(1).strip()
+                    user_text = m.group(2).strip()
+                else:
+                    system_text = "You are a cybersecurity analyst. Respond with JSON only."
+                    user_text = full_prompt
+                messages = [
+                    {"role": "system", "content": system_text},
+                    {"role": "user", "content": user_text},
+                ]
+                formatted = tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+            else:
+                formatted = full_prompt
+        except Exception:
+            formatted = full_prompt
+
+        def _stream_sync() -> tuple[dict | None, bool]:
+            import mlx_lm
+
+            accumulated = ""
+            if hasattr(mlx_lm, "stream_generate"):
+                try:
+                    for chunk in mlx_lm.stream_generate(
+                        model,
+                        tokenizer,
+                        prompt=formatted,
+                        max_tokens=512,
+                        verbose=False,
+                    ):
+                        tok = chunk.text if hasattr(chunk, "text") else str(chunk)
+                        accumulated += tok
+                        # Early-exit: hledáme kompletní JSON objekt s "title"
+                        m_match = _re.search(r'\{[^{}]{20,}"title"[^{}]*\}', accumulated, _re.DOTALL)
+                        if m_match:
+                            try:
+                                return _json.loads(m_match.group()), True
+                            except _json.JSONDecodeError:
+                                pass  # neúplný — pokračuj
+                except Exception as e:
+                    logger.warning("[SYNTHESIS] stream_generate failed: %s — fallback", e)
+                    accumulated = ""
+
+            # Fallback: regex JSON extract z akumulovaného textu
+            if accumulated:
+                m_final = _re.search(r'\{.*\}', accumulated, _re.DOTALL)
+                if m_final:
+                    try:
+                        return _json.loads(m_final.group()), True
+                    except Exception:
+                        pass
+
+            return (None, False)
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _stream_sync)
+
+    # ------------------------------------------------------------------
+    # Sprint 8UC B.1: xgrammar guaranteed-JSON synthesis
+    # ------------------------------------------------------------------
+
+    async def _run_xgrammar_generation(
+        self,
+        prompt: str,
+    ) -> tuple[dict | None, bool]:
+        """
+        Sprint 8UC B.1: xgrammar guaranteed-JSON synthesis.
+
+        Uses XGrammarLogitsProcessor for 100% valid JSON guarantee.
+        Falls back to (None, False) on any error — caller handles cascade.
+        """
+        import json as _json
+
+        # Load model BEFORE executor (same pattern as _run_streaming_generation)
+        try:
+            model, tokenizer, _model_path = await self._lifecycle._ensure_loaded()
+        except RuntimeError as e:
+            logger.warning("[SYNTHESIS] xgrammar model load failed: %s", e)
+            return None, False
+
+        def _xgrammar_sync() -> tuple[dict | None, bool]:
+            try:
+                import xgrammar as xgr
+                import mlx_lm
+
+                # Compile JSON schema grammar
+                tokenizer_info = xgr.tokenizer_info.TokenizerInfo.from_tokenizer(tokenizer)
+                compiler = xgr.GrammarCompiler(tokenizer_info)
+                schema = _build_osint_json_schema()
+                grammar = compiler.compile_json_schema(_json.dumps(schema))
+
+                # Build logits processor via contrib.hf
+                try:
+                    processor = xgr.contrib.hf.LogitsProcessor(grammar, tokenizer)
+                except (AttributeError, TypeError):
+                    # Fallback: use grammar directly if LogitsProcessor unavailable
+                    return None, False
+
+                # Format prompt
+                system_prompt = "You are a cybersecurity analyst. Respond with valid JSON only."
+                try:
+                    if hasattr(tokenizer, "apply_chat_template"):
+                        messages = [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": prompt},
+                        ]
+                        formatted = tokenizer.apply_chat_template(
+                            messages, tokenize=False, add_generation_prompt=True
+                        )
+                    else:
+                        formatted = f"<|system|>{system_prompt}<|user|>{prompt}<|assistant|>"
+                except Exception:
+                    formatted = prompt
+
+                # Generate with xgrammar logits processor
+                try:
+                    output = mlx_lm.generate(
+                        model, tokenizer,
+                        prompt=formatted,
+                        max_tokens=512,
+                        logits_processors=[processor],
+                        verbose=False,
+                    )
+                except TypeError:
+                    # Old mlx_lm without logits_processors
+                    output = mlx_lm.generate(
+                        model, tokenizer,
+                        prompt=formatted,
+                        max_tokens=512,
+                        verbose=False,
+                    )
+
+                result = _json.loads(output)
+                if "title" in result and "summary" in result:
+                    return result, True
+                return None, False
+
+            except ImportError:
+                return None, False
+            except Exception as e:
+                logger.warning(f"[SYNTHESIS] xgrammar generation: {e}")
+                return None, False
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _xgrammar_sync)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    async def _ensure_model(self) -> Optional[Path]:
+        """
+        Sprint 8SB: 3-tier model discovery with conditional download.
+
+        Tier 1: cached path from previous call
+        Tier 2: scan ~/.cache/huggingface/hub and ~/.mlx for existing models
+        Tier 3: download Qwen2.5-0.5B-Instruct-4bit (~400MB) then SmolLM2-135M fallback (~70MB)
+
+        Returns Path to model or None if unavailable.
+        """
+        # Tier 1: reuse cached path
+        if self._cached_model_path is not None:
+            if self._cached_model_path.exists():
+                return self._cached_model_path
+            self._cached_model_path = None
+
+        # Tier 2: scan disk
+        search = [Path.home() / ".cache" / "huggingface" / "hub", Path.home() / ".mlx"]
+        for d in search:
+            if not d.exists():
+                continue
+            for pat in [
+                "**/Qwen2.5*0.5B*/config.json",
+                "**/*0.5B*/config.json",
+                "**/*135M*/config.json",
+                "**/SmolLM2*135M*/config.json",
+            ]:
+                hits = list(d.glob(pat))
+                if hits:
+                    self._cached_model_path = hits[0].parent
+                    logger.info("[SYNTHESIS] Model found: %s", self._cached_model_path.name)
+                    return self._cached_model_path
+
+        # Tier 3: download with fallback
+        for model_id, max_gb in [
+            ("mlx-community/Qwen2.5-0.5B-Instruct-4bit", 1.0),
+            ("mlx-community/SmolLM2-135M-Instruct-4bit", 0.2),
+        ]:
+            try:
+                api_url = f"https://huggingface.co/api/models/{model_id}"
+                with urllib.request.urlopen(api_url, timeout=15) as r:
+                    data = _json.loads(r.read())
+                    total = sum(f.get("size", 0) for f in data.get("siblings", []))
+                if total / 1e9 > max_gb:
+                    continue
+                logger.info(
+                    "[SYNTHESIS] Downloading %s (%.0fMB) ...",
+                    model_id,
+                    total / 1e6,
+                )
+                import mlx_lm
+
+                mlx_lm.utils.snapshot_download(model_id)  # type: ignore[attr-defined]
+                logger.info("[SYNTHESIS] Download complete: %s", model_id)
+                # Re-scan disk
+                for d in search:
+                    for pat in ["**/config.json"]:
+                        hits = list(d.glob(pat))
+                        if hits:
+                            self._cached_model_path = hits[0].parent
+                            return self._cached_model_path
+            except Exception as e:
+                logger.warning("[SYNTHESIS] Model download failed for %s: %s", model_id, e)
+        return None
+
+    def _compute_confidence(
+        self,
+        report: "OSINTReport",
+        used_outlines: bool,
+    ) -> float:
+        """
+        Sprint 8SB: Synthesis quality confidence score 0.0–1.0.
+
+        B.8 scoring:
+          base = 0.3 (any output)
+          +0.20 if threat_actors non-empty
+          +0.20 if any CVE mention in ioc_entities
+          +0.15 if all required OSINTReport fields non-empty
+          +0.15 if Outlines constrained (not free-text fallback)
+        """
+        score = 0.30
+        actors = getattr(report, "threat_actors", None)
+        if actors:
+            score += 0.20
+        # Check for CVE mentions in IOC entities
+        iocs = getattr(report, "ioc_entities", None) or []
+        if any("CVE" in str(e.value) for e in iocs if hasattr(e, "value")):
+            score += 0.20
+        # Track if we got any content bonus (for Outlines bonus gate)
+        has_content = bool(actors) or any("CVE" in str(e.value) for e in iocs if hasattr(e, "value"))
+        # All required fields: query/threat_summary non-empty strings,
+        # ioc_entities non-None, sources_count >= 1, timestamp > 0
+        q = getattr(report, "query", None)
+        ts = getattr(report, "threat_summary", None)
+        ie = getattr(report, "ioc_entities", None)
+        sc = getattr(report, "sources_count", None)
+        tm = getattr(report, "timestamp", None)
+        if (
+            q is not None and isinstance(q, str) and q
+            and ts is not None and isinstance(ts, str) and ts
+            and ie is not None
+            and sc is not None and sc >= 1
+            and tm is not None and tm > 0
+        ):
+            score += 0.15
+        if used_outlines and has_content:
+            # Outlines bonus only when report has real content (threat_actors or CVE)
+            score += 0.15
+        return min(1.0, round(score, 3))
+
+    def _is_windup_allowed(self, force: bool) -> bool:
+        """B.7: Check windup phase or force flag."""
+        if force:
+            return True
+        try:
+            from ..utils.sprint_lifecycle import SprintLifecycleManager
+            manager = SprintLifecycleManager.get_instance()
+            return manager.is_windup_phase()
+        except Exception:
+            return False
+
+    def _check_uma_guard(self) -> bool:
+        """
+        B.7: RSS > 5.5GiB → skip synthesis (M1 8GB UMA safety).
+        Also checks EMERGENCY state via evaluate_uma_state.
+        """
+        try:
+            from ..core.resource_governor import evaluate_uma_state, sample_uma_status
+            status = sample_uma_status()
+            if status.rss_gib > 5.5:
+                logger.warning("[SYNTHESIS] Skipped: RSS %.1fGiB > 5.5GiB", status.rss_gib)
+                return False
+            state = evaluate_uma_state(status.system_used_gib)
+            if state == "emergency":
+                logger.warning("[SYNTHESIS] Skipped: UMA EMERGENCY")
+                return False
+            return True
+        except Exception:
+            return True  # fail-open
+
+    def _parse_raw_to_osintreport(self, raw: dict) -> OSINTReport | None:
+        """
+        Sprint 8TA B.1: Safe parsing of raw dict into OSINTReport.
+
+        Uses raw.get() for every field with defaults for missing values.
+        Maps json_schema fields (title/summary/findings) to OSINTReport fields
+        (threat_summary/ioc_entities/sources_count).
+        """
+        try:
+            title = raw.get("title", "OSINT Synthesis")
+            summary = raw.get("summary", "")
+            threat_actors = raw.get("threat_actors") or []
+            findings = raw.get("findings") or []
+            confidence = raw.get("confidence", 0.0)
+            timestamp = raw.get("timestamp", time.time())
+
+            # Map findings list to IOCEntity list
+            ioc_entities: list[IOCEntity] = []
+            for f in findings[:20]:  # max 20
+                if isinstance(f, str):
+                    ioc_entities.append(IOCEntity(
+                        value=f[:100],
+                        ioc_type=_infer_ioc_type(f),
+                        severity="medium",
+                        context=f[:200],
+                    ))
+
+            return OSINTReport(
+                query=title,
+                ioc_entities=ioc_entities,
+                threat_summary=summary[:500] if summary else "",
+                threat_actors=threat_actors[:10],
+                confidence=float(confidence) if confidence else 0.0,
+                sources_count=len(findings),
+                timestamp=float(timestamp) if timestamp else time.time(),
+            )
+        except Exception as e:
+            logger.warning("[SYNTHESIS] _parse_raw_to_osintreport failed: %s", e)
+            return None
+
+    # ── Sprint 8TB: Query Decomposer ────────────────────────────────────
+
+    async def decompose_query(
+        self,
+        query: str,
+        model=None,
+        tokenizer=None,
+    ) -> list[str]:
+        """
+        Decompose query into 3-5 sub-queries. Max 80 tokens.
+
+        Identity fallback if model is None.
+        Uses CPU_EXECUTOR for sync MLX inference.
+        """
+        if model is None or tokenizer is None:
+            logger.debug("decompose_query: no model → identity fallback")
+            return [query]
+
+        PROMPT = (
+            "You are a security OSINT assistant. "
+            "Generate 3-5 specific search queries for: {q}\n"
+            "Output ONLY a JSON array of strings, no explanation.\n"
+            'Example: ["LockBit IOCs 2026","LockBit C2 infra","LockBit victims list"]'
+        ).format(q=query)
+
+        def _gen() -> list[str]:
+            try:
+                import re, json, mlx_lm
+                msgs = [{"role": "user", "content": PROMPT}]
+                prompt_str = tokenizer.apply_chat_template(
+                    msgs, tokenize=False, add_generation_prompt=True,
+                )
+                out = mlx_lm.generate(
+                    model, tokenizer,
+                    prompt=prompt_str,
+                    max_tokens=80,
+                    verbose=False,
+                )
+                m = re.search(r'\[.*?\]', out, re.DOTALL)
+                if m:
+                    parsed = json.loads(m.group())
+                    if isinstance(parsed, list) and parsed:
+                        return [str(s) for s in parsed[:5]]
+            except Exception as e:
+                logger.warning(f"decompose_query generate: {e}")
+            return [query]
+
+        loop = asyncio.get_running_loop()
+        from concurrent.futures import ThreadPoolExecutor
+        _CPU_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+        try:
+            result = await loop.run_in_executor(_CPU_EXECUTOR, _gen)
+        finally:
+            _CPU_EXECUTOR.shutdown(wait=False)
+        logger.info(f"decompose_query '{query[:40]}' → {len(result)} sub-queries")
+        return result
+
+    # ── Sprint 8TB: Ghost Global Context ─────────────────────────────────
+
+    async def _load_global_context(self) -> str:
+        """
+        Load top-10 recurring entities from ghost_global.duckdb as context.
+
+        Returns empty string if DB doesn't exist or on any error.
+        """
+        try:
+            from ..paths import RAMDISK_ROOT
+            import duckdb
+
+            ghost_path = RAMDISK_ROOT / "db" / "ghost_global.duckdb"
+            if not ghost_path.exists():
+                return ""
+            conn = duckdb.connect(str(ghost_path), read_only=True)
+            rows = conn.execute("""
+                SELECT entity_value, entity_type, sprint_count, confidence_cumulative
+                FROM global_entities
+                ORDER BY sprint_count DESC, confidence_cumulative DESC
+                LIMIT 10
+            """).fetchall()
+            conn.close()
+            if not rows:
+                return ""
+            lines = ["Recurring entities from prior sprints:"]
+            for val, typ, cnt, conf in rows:
+                lines.append(f"  [{typ}] {val} (seen {cnt}x, conf={conf:.2f})")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.debug(f"global_context load: {e}")
+            return ""
+
+    # ── Sprint 8UC B.2.3: Episode Context ─────────────────────────────────
+
+    async def _build_episode_context(self, store, query: str) -> str:
+        """Sprint 8UC B.2.3: Načíst relevantní epizody a sestavit context string."""
+        if store is None or not hasattr(store, "recall_episodes"):
+            return ""
+        try:
+            episodes = await store.recall_episodes(None, limit=5)
+        except Exception:
+            return ""
+        if not episodes:
+            return ""
+        import orjson
+        lines = ["Past research context (most recent first):"]
+        for ep in episodes[:3]:
+            findings_raw = ep.get("top_findings", "")
+            try:
+                findings = orjson.loads(findings_raw) if isinstance(findings_raw, str) else findings_raw
+            except Exception:
+                findings = []
+            ep_query = ep.get("query", "")[:60]
+            lines.append(f"  Sprint {ep.get('sprint_id','')}: query='{ep_query}'")
+            if findings and isinstance(findings, list) and len(findings) > 0:
+                lines.append(f"    Key finding: {findings[0][:120]}")
+        return "\n".join(lines)
+
+    # ── Sprint 8TA: STIX Context ───────────────────────────────────────────
+
+    def _build_stix_context(self) -> str:
+        """B.6: STIX context z ioc_graph.export_stix_bundle() pokud dostupný."""
+        if self._ioc_graph is None:
+            return ""
+        try:
+            export_fn = getattr(self._ioc_graph, "export_stix_bundle", None)
+            if export_fn is None:
+                return ""
+            nodes = export_fn()
+            if not nodes:
+                return ""
+            values = [n.get("value", "") for n in nodes[:20] if isinstance(n, dict)]
+            if values:
+                return f"\nKnown IOCs from graph ({len(values)} entities): {', '.join(values)}"
+        except Exception as e:
+            logger.debug("STIX context unavailable: %s", e)
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# E2E export helper (volá se z __main__.py)
+# ---------------------------------------------------------------------------
+
+
+def slugify(s: str) -> str:
+    """Bez-dependency slugify pro export filename."""
+    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
+
+
+async def export_report(
+    report: OSINTReport,
+    query: str,
+    reports_dir: Path | None = None,
+) -> Path:
+    """
+    Export OSINTReport do JSON souboru.
+
+    B.10: E2E export path = ~/.hledac/reports/{timestamp}_{slug(query)}_report.json
+    Vytvoří adresář pokud neexistuje (parents=True, exist_ok=True).
+    """
+    if reports_dir is None:
+        reports_dir = Path.home() / ".hledac" / "reports"
+
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    ts = int(time.time())
+    filename = f"{ts}_{slugify(query)[:40]}_report.json"
+    out_path = reports_dir / filename
+
+    # msgspec → JSON bytes → decode string → write
+    content = msgspec.json.encode(report).decode("utf-8")
+    out_path.write_text(content, encoding="utf-8")
+    logger.info("Sprint report saved: %s", out_path)
+    return out_path

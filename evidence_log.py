@@ -1,0 +1,1296 @@
+"""
+EvidenceLog - Append-only log pro autonomní výzkum
+===================================================
+
+Tento modul implementuje append-only log pro ukládání důkazů
+během autonomního výzkumu. Podporuje verifikaci pomocí hashů,
+JSONL export pro replay mode a dotazování.
+
+M1 8GB Optimalizace:
+- Ring buffer v RAM (max 100 událostí)
+- Append-only JSONL persistencer na disk
+- Trimmované payloady (žádné fulltexty)
+- Automatická rotace logů
+"""
+
+from __future__ import annotations
+
+import asyncio
+import collections
+import hashlib
+import json
+import logging
+import os
+import secrets
+import sqlite3
+import time
+import uuid
+from collections import deque
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Set
+
+from pydantic import BaseModel, Field, field_validator
+
+# Sprint 8C1: Flow trace
+try:
+    from .utils.flow_trace import (
+        trace_evidence_append, trace_evidence_flush, trace_queue_drop,
+        trace_counter, is_enabled,
+    )
+except ImportError:
+    # Fallback if flow_trace not available
+    def trace_evidence_append(*args, **kwargs): pass
+    def trace_evidence_flush(*args, **kwargs): pass
+    def trace_queue_drop(*args, **kwargs): pass
+    def trace_counter(*args, **kwargs): pass
+    def is_enabled(): return False
+
+logger = logging.getLogger(__name__)
+
+
+class EvidenceEvent(BaseModel):
+    """
+    Událost v evidence logu.
+
+    Každá událost má unikátní ID, typ, timestamp, payload
+    a content hash pro verifikaci integrity.
+    """
+
+    event_id: str = Field(..., description="Unikátní ID události")
+    event_type: Literal["tool_call", "observation", "synthesis", "error", "decision", "evidence_packet"] = Field(
+        ..., description="Typ události"
+    )
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    payload: Dict[str, Any] = Field(default_factory=dict, description="Data události")
+    source_ids: List[str] = Field(default_factory=list, description="ID zdrojových událostí")
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Spolehlivost 0-1")
+    content_hash: str = Field(..., description="SHA-256 hash pro verifikaci")
+    run_id: str = Field(..., description="ID běhu výzkumu")
+    # Tamper-evident hash-chain fields (optional for backward compatibility with legacy JSONL)
+    seq_no: int = Field(default=0, description="Sequence number in chain")
+    prev_chain_hash: Optional[str] = Field(default=None, description="Previous event's chain hash")
+    chain_hash: Optional[str] = Field(default=None, description="Chain hash for tamper detection")
+
+    @field_validator('source_ids', mode='before')
+    @classmethod
+    def ensure_list(cls, v):
+        if v is None:
+            return []
+        return v
+
+    def calculate_hash(self) -> str:
+        """Vypočítá SHA-256 hash obsahu události"""
+        # Vytvoř serializovatelnou reprezentaci
+        data = {
+            "event_id": self.event_id,
+            "event_type": self.event_type,
+            "timestamp": self.timestamp.isoformat(),
+            "payload": self._normalize_payload(self.payload),
+            "source_ids": sorted(self.source_ids),
+            "confidence": round(self.confidence, 6),  # Zaokrouhlení pro konzistenci
+            "run_id": self.run_id,
+        }
+        # Serializuj do JSON s konzistentním řazením klíčů
+        json_str = json.dumps(data, sort_keys=True, separators=(',', ':'))
+        return hashlib.sha256(json_str.encode('utf-8')).hexdigest()
+
+    def _normalize_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalizuje payload pro konzistentní hashování"""
+        normalized = {}
+        for key in sorted(payload.keys()):
+            value = payload[key]
+            if isinstance(value, datetime):
+                normalized[key] = value.isoformat()
+            elif isinstance(value, (list, tuple)):
+                normalized[key] = [self._normalize_value(v) for v in value]
+            elif isinstance(value, dict):
+                normalized[key] = self._normalize_payload(value)
+            else:
+                normalized[key] = self._normalize_value(value)
+        return normalized
+
+    def _normalize_value(self, value: Any) -> Any:
+        """Normalizuje jednotlivou hodnotu"""
+        if isinstance(value, float):
+            return round(value, 6)  # Zaokrouhlení floatů
+        elif isinstance(value, (set, frozenset)):
+            return sorted(list(value))
+        elif isinstance(value, bytes):
+            return value.decode('utf-8', errors='replace')
+        return value
+
+    def verify_integrity(self) -> bool:
+        """Ověří integritu události pomocí content hash"""
+        calculated = self.calculate_hash()
+        return calculated == self.content_hash
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Převede událost na dictionary"""
+        result = {
+            "event_id": self.event_id,
+            "event_type": self.event_type,
+            "timestamp": self.timestamp.isoformat(),
+            "payload": self.payload,
+            "source_ids": self.source_ids,
+            "confidence": self.confidence,
+            "content_hash": self.content_hash,
+            "run_id": self.run_id,
+        }
+        # Include chain fields only if set (backward compatibility)
+        if self.seq_no > 0:
+            result["seq_no"] = self.seq_no
+        if self.prev_chain_hash:
+            result["prev_chain_hash"] = self.prev_chain_hash
+        if self.chain_hash:
+            result["chain_hash"] = self.chain_hash
+        return result
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "EvidenceEvent":
+        """Vytvoří událost z dictionary"""
+        # Převeď timestamp string na datetime
+        if isinstance(data.get("timestamp"), str):
+            data["timestamp"] = datetime.fromisoformat(data["timestamp"])
+        return cls(**data)
+
+    def to_jsonl_line(self) -> str:
+        """Převede událost na JSONL řádek"""
+        return json.dumps(self.to_dict(), ensure_ascii=False, separators=(',', ':'))
+
+
+class EvidenceLog:
+    """
+    Append-only log pro ukládání důkazů - M1 8GB RAM optimized.
+
+    Tato třída implementuje:
+    - Append-only zápis (nikdy nemazat)
+    - Ring buffer v RAM (max 100 událostí) pro M1 optimalizaci
+    - Automatická JSONL persistencer na disk
+    - Content hash pro každou událost
+    - Trimmované payloady (žádné fulltexty v RAM)
+    - Dotazování podle typu a confidence
+    - Shrnutí pro Hermes (ne celý raw log)
+    """
+
+    # M1 8GB RAM hard limity
+    MAX_RAM_EVENTS = 100  # Ring buffer size
+    MAX_PAYLOAD_PREVIEW = 200  # Max chars v payload preview
+    JSONL_ROTATE_SIZE = 10 * 1024 * 1024  # 10MB rotace
+
+    # Internal constant for fsync batching (no user toggle)
+    # fsync every N events to avoid per-event IO bottleneck
+    _FSYNC_EVERY_N_EVENTS = 25
+
+    # SQLite batching constants
+    _SQLITE_BATCH_SIZE = 50
+    _SQLITE_FLUSH_INTERVAL = 0.5  # seconds
+
+    def __init__(
+        self,
+        run_id: str,
+        persist_path: Optional[Path] = None,
+        enable_persist: bool = True,
+        encrypt_at_rest: bool = False
+    ):
+        """
+        Inicializuje EvidenceLog.
+
+        Args:
+            run_id: Unikátní ID běhu výzkumu
+            persist_path: Cesta pro JSONL persistenci (None = auto)
+            enable_persist: Zda povolit persistenci na disk
+            encrypt_at_rest: Zda šifrovat data na disku
+        """
+        import os
+
+        self._run_id: str = run_id
+        self._log: deque = deque(maxlen=self.MAX_RAM_EVENTS)  # Ring buffer (max MAX_RAM_EVENTS)
+        self._index_by_type: Dict[str, List[int]] = {
+            "tool_call": [],
+            "observation": [],
+            "synthesis": [],
+            "error": [],
+            "decision": [],
+            "evidence_packet": [],
+        }
+        self._index_by_source: Dict[str, List[int]] = {}
+        self._created_at: datetime = datetime.utcnow()
+        self._frozen: bool = False
+        self._total_count: int = 0  # Celkový počet událostí (včetně na disku)
+        self._dropped_count: int = 0  # Počet vyřazených z ring bufferu
+        self._fsync_counter: int = 0  # Counter for fsync batching
+
+        # Hash-chain state for tamper detection
+        self._seq: int = 0  # Sequence counter
+        self._chain_head: str = ""  # Current chain head hash
+        self._genesis_hash: str = hashlib.sha256(f"GENESIS:{run_id}".encode()).hexdigest()  # Genesis hash
+        self._chain_head = self._genesis_hash  # Initialize chain head
+
+        # Encryption setup
+        self._encrypt_at_rest = encrypt_at_rest or os.environ.get('ENCRYPT_AT_REST', '0') == '1'
+        self._encryption_key = os.environ.get('ENCRYPTION_KEY', '').encode() if self._encrypt_at_rest else None
+
+        if self._encrypt_at_rest:
+            logger.info("[ENCRYPT] enabled=True target=evidence")
+            self._init_encryption()
+        else:
+            self._cipher = None
+
+        # Persistencer setup
+        self._enable_persist: bool = enable_persist
+        self._persist_path: Optional[Path] = None
+        self._persist_file = None
+
+        if enable_persist:
+            if persist_path is None:
+                # Auto path: EVIDENCE_ROOT/{run_id}.jsonl
+                from hledac.universal.paths import EVIDENCE_ROOT
+                evidence_dir = EVIDENCE_ROOT
+                evidence_dir.mkdir(parents=True, exist_ok=True)
+                # Change extension for encrypted files
+                ext = '.enc' if self._encrypt_at_rest else '.jsonl'
+                self._persist_path = evidence_dir / f"{run_id}{ext}"
+            else:
+                self._persist_path = Path(persist_path)
+                self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Otevři append-only file
+            try:
+                self._persist_file = open(
+                    self._persist_path, 'ab' if self._encrypt_at_rest else 'a',
+                    encoding='utf-8' if not self._encrypt_at_rest else None,
+                    buffering=8192
+                )
+                logger.debug(f"EvidenceLog persistence: {self._persist_path}")
+            except Exception as e:
+                logger.error(f"Failed to open evidence log: {e}")
+                self._enable_persist = False
+
+        # SQLite async batching components
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+        self._flush_task: Optional[asyncio.Task] = None
+        self._db_path: Optional[Path] = None
+        self._db: Optional[sqlite3.Connection] = None
+        self._initialized = False
+
+    def __del__(self):
+        """Cleanup - zavři persist file."""
+        if self._persist_file and not self._persist_file.closed:
+            try:
+                self._persist_file.close()
+            except Exception:
+                pass
+
+    async def initialize(self) -> None:
+        """
+        Initialize async SQLite components.
+
+        Creates database, migrates from old JSONL file if exists,
+        and starts background flush worker.
+        """
+        if self._initialized:
+            return
+
+        await asyncio.to_thread(self._init_db)
+        await asyncio.to_thread(self._migrate_from_file)
+        self._flush_task = asyncio.create_task(self._flush_worker())
+        self._initialized = True
+
+    def _init_db(self) -> None:
+        """Initialize SQLite database with WAL mode."""
+        if self._db_path is None:
+            from hledac.universal.paths import EVIDENCE_ROOT
+            evidence_dir = EVIDENCE_ROOT
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            self._db_path = evidence_dir / f"{self._run_id}.db"
+
+        self._db = sqlite3.connect(str(self._db_path))
+        self._db.execute("PRAGMA journal_mode=WAL")
+
+        self._db.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                event_type TEXT NOT NULL,
+                data TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )
+        """)
+        self._db.commit()
+
+    def _migrate_from_file(self) -> None:
+        """Migrate events from old JSONL file if exists."""
+        if self._persist_path is None or not self._persist_path.exists():
+            return
+
+        old_file = self._persist_path
+        migrated_file = old_file.with_suffix('.migrated')
+
+        # Check if already migrated
+        if migrated_file.exists():
+            return
+
+        try:
+            with open(old_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    timestamp = datetime.fromisoformat(data['timestamp']).timestamp()
+                    event_type = data['event_type']
+                    event_data = json.dumps(data)
+                    content_hash = data.get('content_hash', '')
+
+                    self._db.execute(
+                        "INSERT INTO events (timestamp, event_type, data, hash) VALUES (?, ?, ?, ?)",
+                        (timestamp, event_type, event_data, content_hash)
+                    )
+            self._db.commit()
+
+            # Rename old file to mark as migrated
+            old_file.rename(migrated_file)
+            logger.info(f"Migrated {self._run_id} events to SQLite")
+        except Exception as e:
+            logger.warning(f"Migration failed: {e}")
+
+    async def _flush_worker(self) -> None:
+        """Background worker that flushes events in batches."""
+        batch = []
+        last_flush = datetime.now()
+
+        while True:
+            try:
+                # Wait for event or timeout
+                try:
+                    event = await asyncio.wait_for(
+                        self._queue.get(),
+                        timeout=self._SQLITE_FLUSH_INTERVAL
+                    )
+                    if event is None:  # Shutdown signal
+                        break
+                    batch.append(event)
+                except asyncio.TimeoutError:
+                    pass
+
+                # Flush if batch full or timeout reached
+                if len(batch) >= self._SQLITE_BATCH_SIZE or \
+                   (batch and (datetime.now() - last_flush).total_seconds() >= self._SQLITE_FLUSH_INTERVAL):
+                    flush_start = time.perf_counter()
+                    await asyncio.to_thread(self._flush_batch, batch)
+                    flush_latency_ms = (time.perf_counter() - flush_start) * 1000
+                    trace_evidence_flush(len(batch), flush_latency_ms, "ok", len(batch))
+                    batch = []
+                    last_flush = datetime.now()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Flush worker error: {e}")
+                trace_evidence_flush(0, 0.0, "error", None)
+
+        # Final flush
+        if batch:
+            flush_start = time.perf_counter()
+            await asyncio.to_thread(self._flush_batch, batch)
+            flush_latency_ms = (time.perf_counter() - flush_start) * 1000
+            trace_evidence_flush(len(batch), flush_latency_ms, "ok", len(batch))
+
+    def _flush_batch(self, batch: List[Dict[str, Any]]) -> None:
+        """Flush a batch of events to SQLite."""
+        if not batch or not self._db:
+            return
+
+        records = []
+        for event_data in batch:
+            timestamp = event_data.get('timestamp', datetime.now().timestamp())
+            event_type = event_data.get('event_type', 'unknown')
+            data = json.dumps(event_data)
+            content_hash = event_data.get('content_hash', '')
+
+            records.append((timestamp, event_type, data, content_hash))
+
+        self._db.executemany(
+            "INSERT INTO events (timestamp, event_type, data, hash) VALUES (?, ?, ?, ?)",
+            records
+        )
+        self._db.commit()
+
+    def _init_encryption(self):
+        """Initialize encryption cipher."""
+        if not self._encryption_key:
+            self._encryption_key = secrets.token_bytes(32)
+            logger.warning("[ENCRYPT] No ENCRYPTION_KEY env - using temporary key")
+
+        try:
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            self._cipher = (Cipher, algorithms, modes)  # Store for lazy init
+        except ImportError:
+            logger.warning("[ENCRYPT] cryptography not available, encryption disabled")
+            self._encrypt_at_rest = False
+            self._cipher = None
+
+    def _trim_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Trim payload pro RAM šetření - odstraň fulltexty.
+
+        Returns:
+            Trimmovaný payload s preview místo fulltextů
+        """
+        if not payload:
+            return payload
+
+        trimmed = {}
+        for key, value in payload.items():
+            # Seznam polí co jsou potenciálně velká
+            large_fields = {'content', 'fulltext', 'html', 'body', 'text',
+                          'raw_data', 'document', 'finding_text'}
+
+            if key in large_fields and isinstance(value, str):
+                # Vytvoř preview místo fulltextu
+                if len(value) > self.MAX_PAYLOAD_PREVIEW:
+                    preview = value[:self.MAX_PAYLOAD_PREVIEW] + "..."
+                    # Přidej hash pro reference
+                    content_hash = hashlib.sha256(value.encode()).hexdigest()[:16]
+                    trimmed[key] = f"[preview:{content_hash}] {preview}"
+                else:
+                    trimmed[key] = value
+            elif isinstance(value, dict):
+                # Rekurzivně trim nested dicts
+                trimmed[key] = self._trim_payload(value)
+            elif isinstance(value, list) and len(value) > 10:
+                # Omež dlouhé listy na preview
+                trimmed[key] = value[:10] + [f"... ({len(value) - 10} more)"]
+            else:
+                trimmed[key] = value
+
+        return trimmed
+
+    @property
+    def run_id(self) -> str:
+        """ID běhu výzkumu"""
+        return self._run_id
+
+    @property
+    def size(self) -> int:
+        """Celkový počet událostí (včetně persistovaných na disk)"""
+        return self._total_count
+
+    @property
+    def ram_size(self) -> int:
+        """Počet událostí v RAM ring bufferu"""
+        return len(self._log)
+
+    @property
+    def persist_path(self) -> Optional[Path]:
+        """Cesta k persistovanému souboru"""
+        return self._persist_path
+
+    @property
+    def is_frozen(self) -> bool:
+        """Zda je log zmrazený (read-only)"""
+        return self._frozen
+
+    def append(self, event: EvidenceEvent) -> None:
+        """
+        Přidá událost do logu - M1 8GB optimized s ring bufferem.
+
+        Args:
+            event: EvidenceEvent k přidání
+
+        Raises:
+            RuntimeError: Pokud je log zmrazený
+            ValueError: Pokud se neshoduje run_id nebo hash
+        """
+        if self._frozen:
+            raise RuntimeError("Cannot append to frozen EvidenceLog")
+
+        # Kontrola run_id
+        if event.run_id != self._run_id:
+            raise ValueError(
+                f"Event run_id '{event.run_id}' does not match log run_id '{self._run_id}'"
+            )
+
+        # NOTE: verify_integrity() removed in Sprint 79a - redundant with content_hash
+        # computed at event creation. Chain integrity verified on load via verify_chain().
+
+        # ===== HASH-CHAIN: Compute chain hash =====
+        self._seq += 1
+        event.seq_no = self._seq
+        event.prev_chain_hash = self._chain_head
+        # chain_hash = sha256(prev_chain_hash + ":" + content_hash + ":" + event_id)
+        chain_input = f"{self._chain_head}:{event.content_hash}:{event.event_id}"
+        event.chain_hash = hashlib.sha256(chain_input.encode()).hexdigest()
+        self._chain_head = event.chain_hash  # Update chain head
+
+        # Push to async queue for SQLite batching (if initialized)
+        queue_size = self._queue.qsize() if self._queue else 0
+        trace_evidence_append(event.event_type, queue_size, "queued")
+
+        if self._initialized and self._queue:
+            try:
+                self._queue.put_nowait(event.to_dict())
+            except asyncio.QueueFull:
+                logger.warning("SQLite queue full, falling back to file")
+                trace_queue_drop("sqlite_queue", queue_size + 1)
+
+        # Persistuj na disk pokud je povoleno (append-only)
+        if self._enable_persist and self._persist_file:
+            try:
+                line = event.to_jsonl_line()
+                bytes_to_write = line.encode('utf-8') + b'\n'
+
+                # Encrypt if enabled
+                if self._encrypt_at_rest and self._cipher:
+                    try:
+                        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+                        nonce = secrets.token_bytes(12)
+                        cipher = Cipher(
+                            algorithms.AES(self._encryption_key),
+                            modes.GCM(nonce)
+                        )
+                        encryptor = cipher.encryptor()
+                        encrypted = encryptor.update(bytes_to_write) + encryptor.finalize()
+                        # Write: nonce (12) + tag (16) + ciphertext
+                        bytes_to_write = nonce + encryptor.tag + encrypted
+                        logger.debug(f"[ENCRYPT] stored bytes_in={len(line)} bytes_out={len(bytes_to_write)}")
+                    except Exception as e:
+                        logger.warning(f"[ENCRYPT] failed: {e}")
+
+                # Write to file (text mode for non-encrypted, binary for encrypted)
+                if self._encrypt_at_rest:
+                    self._persist_file.write(bytes_to_write)
+                else:
+                    self._persist_file.write(line + '\n')
+                self._persist_file.flush()  # Flush for replay
+                # Batch fsync: only fsync every N events to avoid IO bottleneck
+                # Finalize() will always fsync to preserve crash-safety
+                self._fsync_counter += 1
+                if self._fsync_counter >= self._FSYNC_EVERY_N_EVENTS:
+                    os.fsync(self._persist_file.fileno())
+                    self._fsync_counter = 0
+            except Exception as e:
+                logger.error(f"Failed to persist event: {e}")
+
+        # Trim payload pro RAM šetření
+        event.payload = self._trim_payload(event.payload)
+
+        # Ring buffer logika - using deque with maxlen (auto overflow)
+        # Check if deque is full before appending
+        was_full = len(self._log) == self.MAX_RAM_EVENTS
+
+        # Append to deque (会自动丢弃最旧的如果满了)
+        self._log.append(event)
+        self._total_count += 1
+
+        # If deque overflowed (was full before append), rebuild indexes
+        if was_full:
+            self._dropped_count += 1
+            try:
+                self._rebuild_indexes()
+            except Exception:
+                pass  # Fail-safe: never crash orchestration
+
+        index = len(self._log) - 1
+
+        # Aktualizuj indexy
+        self._index_by_type[event.event_type].append(index)
+
+        # Indexuj podle source_ids
+        for source_id in event.source_ids:
+            if source_id not in self._index_by_source:
+                self._index_by_source[source_id] = []
+            self._index_by_source[source_id].append(index)
+
+        # ===== SHADOW ANALYTICS HOOK (Sprint 8AX) =====
+        # Non-blocking, fail-open: extract finding metadata and enqueue for DuckDB shadow.
+        # GHOST_DUCKDB_SHADOW=1 must be set to activate.
+        # This runs AFTER the event is fully committed to the log — zero risk to main path.
+        try:
+            from .knowledge.analytics_hook import shadow_record_finding
+            # Only emit shadow records for evidence_packet events with URL-bearing payloads
+            if event.event_type == "evidence_packet":
+                payload = event.payload or {}
+                shadow_record_finding(
+                    finding_id=event.event_id,
+                    query=payload.get("query", ""),
+                    source_type="evidence_packet",
+                    confidence=event.confidence,
+                    run_id=event.run_id,
+                    url=payload.get("url"),
+                    title=payload.get("title"),
+                    source=payload.get("source"),
+                    relevance_score=payload.get("relevance_score"),
+                )
+        except Exception:
+            # Fail-open: shadow hook never crashes the main path
+            pass
+
+    def _rebuild_indexes(self) -> None:
+        """Přebuduj indexy po vyřazení z ring bufferu."""
+        self._index_by_type = {
+            "tool_call": [],
+            "observation": [],
+            "synthesis": [],
+            "error": [],
+            "decision": [],
+            "evidence_packet": [],
+        }
+        self._index_by_source = {}
+
+        for i, event in enumerate(self._log):
+            self._index_by_type[event.event_type].append(i)
+            for source_id in event.source_ids:
+                if source_id not in self._index_by_source:
+                    self._index_by_source[source_id] = []
+                self._index_by_source[source_id].append(i)
+
+    def create_event(
+        self,
+        event_type: Literal["tool_call", "observation", "synthesis", "error", "decision", "evidence_packet"],
+        payload: Dict[str, Any],
+        source_ids: Optional[List[str]] = None,
+        confidence: float = 1.0,
+    ) -> EvidenceEvent:
+        """
+        Vytvoří a přidá novou událost.
+
+        Args:
+            event_type: Typ události
+            payload: Data události
+            source_ids: ID zdrojových událostí
+            confidence: Spolehlivost 0-1
+
+        Returns:
+            Vytvořená EvidenceEvent
+        """
+        event_id = f"{self._run_id}_{uuid.uuid4().hex[:12]}"
+
+        # Vytvoř událost s dočasným hashem
+        event = EvidenceEvent(
+            event_id=event_id,
+            event_type=event_type,
+            payload=payload,
+            source_ids=source_ids or [],
+            confidence=confidence,
+            content_hash="",  # Dočasné
+            run_id=self._run_id,
+        )
+
+        # Vypočítej hash
+        event.content_hash = event.calculate_hash()
+
+        # Přidej do logu
+        self.append(event)
+
+        return event
+
+    def create_evidence_packet_event(
+        self,
+        evidence_id: str,
+        packet_path: str,
+        summary: Dict[str, Any],
+        source_ids: Optional[List[str]] = None,
+        confidence: float = 1.0,
+    ) -> EvidenceEvent:
+        """
+        Vytvoří evidence_packet event s payload trimming (jen summary + pointer na packet).
+
+        Args:
+            evidence_id: ID důkazu
+            packet_path: Cesta k packet souboru na disku
+            summary: Shrnutí packetu (url, status, page_type, etc.)
+            source_ids: ID zdrojových událostí
+            confidence: Spolehlivost 0-1
+
+        Returns:
+            EvidenceEvent s trimmovaným payloadem
+        """
+        # Trim payload - jen summary + pointer, žádné fulltexty
+        payload = {
+            'evidence_id': evidence_id,
+            'packet_path': packet_path,  # Pointer na disk
+            'summary': summary,  # Jen metadata, ne obsah
+        }
+
+        return self.create_event(
+            event_type="evidence_packet",
+            payload=payload,
+            source_ids=source_ids,
+            confidence=confidence,
+        )
+
+    # =========================================================================
+    # DECISION LEDGER - Decision events with hard limits
+    # =========================================================================
+
+    # Decision event hard limits
+    MAX_DECISION_SUMMARY_KEYS = 20
+    MAX_DECISION_SUMMARY_VALUE_LEN = 200
+    MAX_DECISION_REASONS = 8
+    MAX_DECISION_REASON_LEN = 120
+    MAX_DECISION_REF_EVIDENCE = 10
+    MAX_DECISION_REF_CLUSTERS = 10
+    MAX_DECISION_REF_URLS = 10
+
+    def create_decision_event(
+        self,
+        kind: str,
+        summary: Dict[str, Any],
+        reasons: List[str],
+        refs: Dict[str, List[str]],
+        confidence: float = 1.0,
+    ) -> EvidenceEvent:
+        """
+        Vytvoří decision event pro Decision Ledger.
+
+        Decision events zaznamenávají důležitá rozhodnutí orchestrátoru
+        s full audit trail - why + inputs + outputs.
+
+        Args:
+            kind: Typ rozhodnutí - "bandit"|"playbook"|"backpressure"|"delta"|"alignment"|"primary_chase"|"drift"
+            summary: Malé dict (max 20 keys, každé value max ~200 chars)
+            reasons: Max 8 stringů (max 120 chars každý)
+            refs: {evidence_ids:[], cluster_ids:[], url_hashes:[]}
+            confidence: Spolehlivost 0-1
+
+        Returns:
+            EvidenceEvent s trimmovaným payloadem
+        """
+        # Validate kind
+        valid_kinds = {"bandit", "playbook", "backpressure", "delta", "alignment", "primary_chase", "drift"}
+        if kind not in valid_kinds:
+            logger.warning(f"[DECISION] Invalid kind={kind}, using 'drift'")
+            kind = "drift"
+
+        # Trim summary - max 20 keys, max 200 chars per value
+        trimmed_summary = {}
+        for i, (k, v) in enumerate(summary.items()):
+            if i >= self.MAX_DECISION_SUMMARY_KEYS:
+                break
+            v_str = str(v)
+            if len(v_str) > self.MAX_DECISION_SUMMARY_VALUE_LEN:
+                v_str = v_str[:self.MAX_DECISION_SUMMARY_VALUE_LEN] + "..."
+            trimmed_summary[k] = v_str
+
+        # Trim reasons - max 8, max 120 chars each
+        trimmed_reasons = []
+        for i, r in enumerate(reasons):
+            if i >= self.MAX_DECISION_REASONS:
+                break
+            if len(r) > self.MAX_DECISION_REASON_LEN:
+                r = r[:self.MAX_DECISION_REASON_LEN] + "..."
+            trimmed_reasons.append(r)
+
+        # Trim refs - max 10 per type
+        trimmed_refs = {}
+        if 'evidence_ids' in refs:
+            trimmed_refs['evidence_ids'] = refs['evidence_ids'][:self.MAX_DECISION_REF_EVIDENCE]
+        if 'cluster_ids' in refs:
+            trimmed_refs['cluster_ids'] = refs['cluster_ids'][:self.MAX_DECISION_REF_CLUSTERS]
+        if 'url_hashes' in refs:
+            trimmed_refs['url_hashes'] = refs['url_hashes'][:self.MAX_DECISION_REF_URLS]
+
+        # Build payload
+        payload = {
+            'kind': kind,
+            'summary': trimmed_summary,
+            'reasons': trimmed_reasons,
+            'refs': trimmed_refs,
+        }
+
+        # Create event - uses ring buffer automatically (max 100)
+        return self.create_event(
+            event_type="decision",
+            payload=payload,
+            source_ids=[],  # Decision events don't need source_ids
+            confidence=confidence,
+        )
+
+    def get(self, index: int) -> Optional[EvidenceEvent]:
+        """
+        Vrátí událost na daném indexu.
+
+        Args:
+            index: Index události
+
+        Returns:
+            EvidenceEvent nebo None pokud index neexistuje
+        """
+        if 0 <= index < len(self._log):
+            return self._log[index]
+        return None
+
+    def get_by_id(self, event_id: str) -> Optional[EvidenceEvent]:
+        """
+        Najde událost podle ID.
+
+        Args:
+            event_id: ID události
+
+        Returns:
+            EvidenceEvent nebo None
+        """
+        for event in self._log:
+            if event.event_id == event_id:
+                return event
+        return None
+
+    def query(
+        self,
+        event_type: Optional[str] = None,
+        min_confidence: float = 0.0,
+        after_timestamp: Optional[datetime] = None,
+        before_timestamp: Optional[datetime] = None,
+        limit: Optional[int] = None,
+    ) -> List[EvidenceEvent]:
+        """
+        Dotazuje se na události v logu.
+
+        Args:
+            event_type: Filtrovat podle typu
+            min_confidence: Minimální confidence (0-1)
+            after_timestamp: Pouze události po tomto čase
+            before_timestamp: Pouze události před tímto časem
+            limit: Maximální počet výsledků
+
+        Returns:
+            Seznam odpovídajících EvidenceEvent
+        """
+        results = []
+
+        # Urči zdrojové indexy
+        if event_type and event_type in self._index_by_type:
+            indices = self._index_by_type[event_type]
+        else:
+            indices = range(len(self._log))
+
+        # Filtrování
+        for idx in indices:
+            event = self._log[idx]
+
+            # Confidence filter
+            if event.confidence < min_confidence:
+                continue
+
+            # Timestamp filters
+            if after_timestamp and event.timestamp < after_timestamp:
+                continue
+            if before_timestamp and event.timestamp > before_timestamp:
+                continue
+
+            results.append(event)
+
+        # Aplikuj limit
+        if limit and len(results) > limit:
+            results = results[:limit]
+
+        return results
+
+    def get_summary(self, last_n: int = 10) -> str:
+        """
+        Vytvoří shrnutí logu pro Hermes.
+
+        Vrací stručné shrnutí posledních N událostí - ne celý raw log.
+
+        Args:
+            last_n: Počet posledních událostí k zahrnutí
+
+        Returns:
+            Formátovaný string shrnutí
+        """
+        lines = [
+            "=" * 60,
+            "EVIDENCE LOG SUMMARY",
+            "=" * 60,
+            f"",
+            f"Run ID: {self._run_id}",
+            f"Total Events: {self.size}",
+            f"Created: {self._created_at.isoformat()}",
+            f"",
+            "Event Counts by Type:",
+        ]
+
+        for event_type, indices in self._index_by_type.items():
+            count = len(indices)
+            if count > 0:
+                lines.append(f"  {event_type}: {count}")
+
+        lines.extend([
+            f"",
+            "-" * 40,
+            f"Last {last_n} Events (newest first):",
+            "-" * 40,
+        ])
+
+        # Poslední N událostí v reverzním pořadí
+        recent_events = self._log[-last_n:] if len(self._log) >= last_n else self._log
+        recent_events = list(reversed(recent_events))
+
+        for i, event in enumerate(recent_events, 1):
+            timestamp = event.timestamp.strftime("%H:%M:%S")
+            payload_summary = self._summarize_payload(event.payload)
+
+            lines.append(
+                f"{i}. [{timestamp}] {event.event_type.upper()} "
+                f"(conf: {event.confidence:.2f})"
+            )
+            lines.append(f"   {payload_summary}")
+
+            if event.source_ids:
+                sources_str = ", ".join(event.source_ids[:3])
+                if len(event.source_ids) > 3:
+                    sources_str += f" (+{len(event.source_ids) - 3} more)"
+                lines.append(f"   Sources: {sources_str}")
+
+            lines.append("")
+
+        lines.extend([
+            "=" * 60,
+        ])
+
+        return "\n".join(lines)
+
+    def _summarize_payload(self, payload: Dict[str, Any], max_length: int = 60) -> str:
+        """Vytvoří stručné shrnutí payloadu"""
+        if not payload:
+            return "(no payload)"
+
+        # Zkus najít vhodné pole pro shrnutí
+        priority_fields = ["action", "tool", "query", "result", "message", "summary"]
+
+        for field in priority_fields:
+            if field in payload:
+                value = payload[field]
+                if isinstance(value, str):
+                    if len(value) > max_length:
+                        return f"{field}={value[:max_length]}..."
+                    return f"{field}={value}"
+                return f"{field}={str(value)[:max_length]}"
+
+        # Fallback: použij první klíč
+        first_key = next(iter(payload.keys()))
+        value = str(payload[first_key])[:max_length]
+        return f"{first_key}={value}{'...' if len(str(payload[first_key])) > max_length else ''}"
+
+    def to_jsonl(self, path: Optional[Path] = None) -> None:
+        """
+        Exportuje log do JSONL souboru pro replay mode.
+
+        M1 8GB: Pokud je již persistováno, pouze zkopíruj soubor.
+
+        Args:
+            path: Cesta k výstupnímu souboru (None = použij persist_path)
+        """
+        export_path = path or self._persist_path
+        if not export_path:
+            raise ValueError("No path specified for export")
+
+        export_path = Path(export_path)
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Pokud je persistováno na stejné místo, nic nedělej
+        if self._persist_path and export_path == self._persist_path:
+            return
+
+        # Pokud je persistováno jinde, zkopíruj soubor
+        if self._persist_path and self._persist_path.exists():
+            import shutil
+            shutil.copy2(self._persist_path, export_path)
+            return
+
+        # Fallback: export z RAM
+        with open(export_path, 'w', encoding='utf-8') as f:
+            for event in self._log:
+                f.write(event.to_jsonl_line() + '\n')
+
+    @classmethod
+    def from_jsonl(
+        cls,
+        path: Path,
+        run_id: Optional[str] = None,
+        load_to_ram: bool = False,
+        max_ram_events: int = 100
+    ) -> "EvidenceLog":
+        """
+        Načte log z JSONL souboru - M1 8GB optimized.
+
+        Args:
+            path: Cesta k JSONL souboru
+            run_id: Volitelné run_id (jinak se zkusí zjistit z první události)
+            load_to_ram: Zda načíst vše do RAM (pouze pro replay/debug)
+            max_ram_events: Max událostí v RAM pokud load_to_ram=True
+
+        Returns:
+            EvidenceLog instance
+        """
+        path = Path(path)
+
+        if not path.exists():
+            raise FileNotFoundError(f"JSONL file not found: {path}")
+
+        # Nejprve zjisti run_id z prvního řádku
+        detected_run_id = run_id
+        if detected_run_id is None:
+            with open(path, 'r', encoding='utf-8') as f:
+                first_line = f.readline().strip()
+                if first_line:
+                    data = json.loads(first_line)
+                    detected_run_id = data.get("run_id", "unknown")
+
+        # Vytvoř log bez persistence (pouze čtení)
+        log = cls(
+            run_id=detected_run_id or "unknown",
+            enable_persist=False
+        )
+
+        # Spočítej celkový počet řádků
+        total_lines = 0
+        with open(path, 'r', encoding='utf-8') as f:
+            for _ in f:
+                total_lines += 1
+
+        log._total_count = total_lines
+
+        # Načti události do RAM - pouze poslední N pro ring buffer
+        with open(path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+            # Pokud nechceme vše v RAM, vem jen poslední max_ram_events
+            if not load_to_ram and len(lines) > max_ram_events:
+                lines = lines[-max_ram_events:]
+                log._dropped_count = total_lines - len(lines)
+
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                data = json.loads(line)
+                event = EvidenceEvent.from_dict(data)
+                # Přidej přímo do _log (skip append pro rychlost při načítání)
+                index = len(log._log)
+                log._log.append(event)
+                log._index_by_type[event.event_type].append(index)
+                for source_id in event.source_ids:
+                    if source_id not in log._index_by_source:
+                        log._index_by_source[source_id] = []
+                    log._index_by_source[source_id].append(index)
+
+        return log
+
+    def freeze(self) -> None:
+        """Zmrazí log - přepne do read-only režimu"""
+        self._frozen = True
+
+    def write_manifest(self) -> Optional[Path]:
+        """
+        Writes a manifest JSON file next to the persist path.
+
+        The manifest contains:
+        - run_id, chain_head, total_count, created_at, last_seq_no, persist_path
+
+        Returns:
+            Path to the written manifest file, or None if no persist_path
+        """
+        if not self._persist_path:
+            logger.warning("Cannot write manifest: no persist_path set")
+            return None
+
+        manifest = {
+            "run_id": self._run_id,
+            "chain_head": self._chain_head,
+            "total_count": self._total_count,
+            "created_at": self._created_at.isoformat(),
+            "last_seq_no": self._seq,
+            "persist_path": str(self._persist_path),
+            "genesis_hash": self._genesis_hash,
+        }
+
+        # Write manifest next to persist path
+        manifest_path = self._persist_path.with_suffix('.manifest.json')
+        try:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(manifest_path, 'w', encoding='utf-8') as f:
+                json.dump(manifest, f, indent=2, ensure_ascii=False)
+            logger.info(f"[EVIDENCE] Manifest written: {manifest_path}")
+            return manifest_path
+        except Exception as e:
+            logger.error(f"Failed to write manifest: {e}")
+            return None
+
+    def finalize(self) -> None:
+        """
+        Finalize the log: flush, write manifest, and close handles.
+
+        This should be called at the end of a run (no user toggle).
+        Always flushes and fsyncs to preserve crash-safety.
+        """
+        # Flush file handles
+        if self._persist_file and not self._persist_file.closed:
+            try:
+                self._persist_file.flush()
+                os.fsync(self._persist_file.fileno())
+                self._fsync_counter = 0  # Reset counter after final fsync
+            except Exception as e:
+                logger.warning(f"Failed to flush persist file: {e}")
+
+        # Write manifest
+        self.write_manifest()
+
+        # Freeze to prevent further modifications
+        self.freeze()
+
+        logger.info(f"[EVIDENCE] Log finalized: run_id={self._run_id}, events={self._total_count}, chain_head={self._chain_head[:16]}...")
+
+    def verify_all(self) -> Dict[str, Any]:
+        """
+        Ověří integritu všech událostí v logu.
+
+        Returns:
+            Dictionary s výsledky verifikace včetně chain_valid a chain_invalid
+        """
+        total = len(self._log)
+        valid = 0
+        invalid = []
+        chain_valid = True
+        chain_invalid = []  # Bounded RAM-safe
+
+        # Track previous chain hash for linkage verification
+        prev_expected_hash = self._genesis_hash
+
+        for i, event in enumerate(self._log):
+            # Content integrity check
+            if event.verify_integrity():
+                valid += 1
+            else:
+                invalid.append({
+                    "index": i,
+                    "event_id": event.event_id,
+                    "stored_hash": event.content_hash,
+                    "calculated_hash": event.calculate_hash(),
+                })
+
+            # Chain integrity check (only for events with chain fields)
+            if event.chain_hash and event.seq_no > 0:
+                # Validate chain_hash recomputation
+                chain_input = f"{event.prev_chain_hash or self._genesis_hash}:{event.content_hash}:{event.event_id}"
+                expected_chain_hash = hashlib.sha256(chain_input.encode()).hexdigest()
+
+                if expected_chain_hash != event.chain_hash:
+                    chain_valid = False
+                    if len(chain_invalid) < 100:  # RAM-safe bound
+                        chain_invalid.append({
+                            "index": i,
+                            "event_id": event.event_id,
+                            "reason": "chain_hash_mismatch",
+                            "expected": expected_chain_hash,
+                            "stored": event.chain_hash,
+                        })
+
+                # Validate linkage prev_chain_hash == previous_event.chain_hash
+                if event.prev_chain_hash and event.prev_chain_hash != prev_expected_hash:
+                    chain_valid = False
+                    if len(chain_invalid) < 100:
+                        chain_invalid.append({
+                            "index": i,
+                            "event_id": event.event_id,
+                            "reason": "linkage_broken",
+                            "expected_prev": prev_expected_hash,
+                            "stored_prev": event.prev_chain_hash,
+                        })
+
+                # Update expected hash for next iteration
+                prev_expected_hash = event.chain_hash
+
+        # Determine chain validity reason if invalid
+        chain_invalid_reason = None
+        if not chain_valid:
+            if chain_invalid:
+                first_issue = chain_invalid[0]
+                chain_invalid_reason = f"{first_issue.get('reason', 'unknown')}_at_index_{first_issue.get('index', 0)}"
+            else:
+                # Legacy events without chain fields
+                chain_invalid_reason = "legacy_events_missing_chain_fields"
+
+        return {
+            "total_events": total,
+            "valid_events": valid,
+            "invalid_events": len(invalid),
+            "integrity_percentage": (valid / total * 100) if total > 0 else 100.0,
+            "invalid_details": invalid[:10],  # Bounded output
+            "all_valid": len(invalid) == 0,
+            # Chain verification results
+            "chain_valid": chain_valid,
+            "chain_invalid_reason": chain_invalid_reason,
+            "chain_invalid": chain_invalid,
+            "chain_head": self._chain_head,
+            "last_seq_no": self._seq,
+        }
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """
+        Vrátí statistiky o logu - M1 8GB optimized.
+
+        Returns:
+            Dictionary se statistikami (RAM + disk)
+        """
+        # Spočítej typy z RAM ring bufferu
+        type_counts = {et: len(indices) for et, indices in self._index_by_type.items()}
+        type_counts = {k: v for k, v in type_counts.items() if v > 0}
+
+        # Průměrná confidence z RAM
+        if self._log:
+            avg_confidence = sum(e.confidence for e in self._log) / len(self._log)
+            timestamps = [e.timestamp for e in self._log]
+            time_span = (max(timestamps) - min(timestamps)).total_seconds()
+        else:
+            avg_confidence = 0.0
+            time_span = 0.0
+
+        return {
+            "total_events": self._total_count,
+            "ram_events": self.ram_size,
+            "dropped_events": self._dropped_count,
+            "event_types": type_counts,
+            "avg_confidence": round(avg_confidence, 4),
+            "time_span_seconds": round(time_span, 2),
+            "created_at": self._created_at.isoformat(),
+            "is_frozen": self._frozen,
+            "persist_path": str(self._persist_path) if self._persist_path else None,
+            "persistence_enabled": self._enable_persist,
+        }
+
+    def get_chain(self, event_id: str) -> List[EvidenceEvent]:
+        """
+        Získá řetězec událostí vedoucí k dané události.
+
+        Prochází source_ids zpětně a sestaví řetězec závislostí.
+
+        Args:
+            event_id: ID cílové události
+
+        Returns:
+            Seznam událostí v řetězci (od nejstarší po cílovou)
+        """
+        chain = []
+        visited = set()
+
+        def traverse(eid: str):
+            if eid in visited:
+                return
+            visited.add(eid)
+
+            event = self.get_by_id(eid)
+            if not event:
+                return
+
+            # Nejprve zpracuj zdroje (rekurzivně)
+            for source_id in event.source_ids:
+                traverse(source_id)
+
+            # Pak přidej aktuální událost
+            chain.append(event)
+
+        traverse(event_id)
+        return chain

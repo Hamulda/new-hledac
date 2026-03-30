@@ -1,0 +1,960 @@
+"""
+Quantum-Inspired Pathfinder Module
+===================================
+
+Implements quantum-inspired pathfinding using MLX (Apple Silicon ML framework)
+for finding hidden relationships in knowledge graphs.
+
+Features:
+- Quantum random walks on graphs using MLX acceleration
+- Grover-style amplitude amplification for target finding
+- Sparse COO matrix representation for memory efficiency
+- M1 8GB RAM optimized with aggressive memory cleanup
+
+This module is designed for OSINT research to discover non-obvious connections
+in knowledge graphs through quantum-inspired algorithms.
+"""
+
+from __future__ import annotations
+
+import gc
+import logging
+import math
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+
+import numpy as np
+
+# Try to import MLX for Apple Silicon acceleration
+try:
+    import mlx.core as mx
+    MLX_AVAILABLE = True
+except ImportError:
+    MLX_AVAILABLE = False
+    mx = None
+
+# Try to import scipy for sparse matrices
+try:
+    from scipy import sparse
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    sparse = None
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class QuantumPathConfig:
+    """Configuration for quantum-inspired pathfinding.
+
+    Attributes:
+        max_steps: Maximum number of quantum walk steps.
+        amplification_strength: Strength of Grover-style amplitude amplification.
+        top_k_paths: Number of top paths to return.
+        max_nodes: Maximum number of nodes (M1 8GB limit).
+        coin_type: Type of quantum coin operator ('hadamard' or 'grover').
+        use_mlx: Whether to use MLX acceleration if available.
+        memory_threshold_gb: Memory threshold for aggressive cleanup.
+    """
+    max_steps: int = 50
+    amplification_strength: float = 1.5
+    top_k_paths: int = 5
+    max_nodes: int = 5000
+    coin_type: str = "hadamard"
+    use_mlx: bool = True
+    memory_threshold_gb: float = 5.5
+
+
+class QuantumInspiredPathFinder:
+    """Quantum-inspired pathfinder for knowledge graphs using MLX.
+
+    This class implements quantum random walks and Grover-style amplitude
+    amplification to find hidden paths in knowledge graphs. It is optimized
+    for M1 MacBook with 8GB RAM using MLX for acceleration.
+
+    Attributes:
+        config: QuantumPathConfig instance with pathfinding parameters.
+        graph: The knowledge graph (networkx Graph or adjacency matrix).
+        node_to_idx: Mapping from node IDs to matrix indices.
+        idx_to_node: Mapping from matrix indices to node IDs.
+        adjacency_matrix: Sparse COO representation of the graph.
+        n_nodes: Number of nodes in the graph.
+        initialized: Whether the pathfinder has been initialized.
+    """
+
+    def __init__(self, config: Optional[QuantumPathConfig] = None) -> None:
+        """Initialize the quantum-inspired pathfinder.
+
+        Args:
+            config: Configuration for pathfinding. Uses defaults if None.
+        """
+        self.config = config or QuantumPathConfig()
+        self.graph: Optional[Any] = None
+        self.node_to_idx: Dict[str, int] = {}
+        self.idx_to_node: Dict[int, str] = {}
+        self.adjacency_matrix: Optional[Union[Any, 'sparse.coo_matrix']] = None
+        self.n_nodes: int = 0
+        self.initialized: bool = False
+        self._mlx_available: bool = MLX_AVAILABLE and self.config.use_mlx
+
+        if self._mlx_available:
+            logger.info("QuantumPathFinder: Using MLX acceleration")
+        else:
+            logger.info("QuantumPathFinder: Using NumPy fallback")
+
+    async def initialize(
+        self,
+        graph: Union[Any, np.ndarray, Dict[str, List[str]]],
+        max_nodes: Optional[int] = None
+    ) -> bool:
+        """Initialize the pathfinder with a knowledge graph.
+
+        Args:
+            graph: Knowledge graph as networkx Graph, adjacency matrix,
+                or adjacency list dictionary.
+            max_nodes: Maximum number of nodes to process. Uses config default
+                if None.
+
+        Returns:
+            True if initialization was successful.
+
+        Raises:
+            ValueError: If graph format is not supported.
+            RuntimeError: If graph exceeds max_nodes limit.
+        """
+        try:
+            max_nodes = max_nodes or self.config.max_nodes
+
+            # Convert graph to adjacency matrix representation
+            if hasattr(graph, 'nodes') and hasattr(graph, 'edges'):
+                # NetworkX graph
+                await self._initialize_from_networkx(graph, max_nodes)
+            elif isinstance(graph, dict):
+                # Adjacency list dictionary
+                await self._initialize_from_adjacency_list(graph, max_nodes)
+            elif isinstance(graph, np.ndarray):
+                # Adjacency matrix
+                await self._initialize_from_matrix(graph, max_nodes)
+            else:
+                raise ValueError(f"Unsupported graph type: {type(graph)}")
+
+            self.initialized = True
+            logger.info(
+                f"QuantumPathFinder initialized with {self.n_nodes} nodes, "
+                f"{'MLX' if self._mlx_available else 'NumPy'} backend"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to initialize QuantumPathFinder: {e}")
+            self.initialized = False
+            return False
+
+    async def _initialize_from_networkx(
+        self,
+        graph: Any,
+        max_nodes: int
+    ) -> None:
+        """Initialize from NetworkX graph.
+
+        Args:
+            graph: NetworkX graph object.
+            max_nodes: Maximum number of nodes.
+        """
+        nodes = list(graph.nodes())
+        if len(nodes) > max_nodes:
+            logger.warning(
+                f"Graph has {len(nodes)} nodes, limiting to {max_nodes}"
+            )
+            nodes = nodes[:max_nodes]
+
+        self.n_nodes = len(nodes)
+        self.node_to_idx = {str(node): i for i, node in enumerate(nodes)}
+        self.idx_to_node = {i: str(node) for i, node in enumerate(nodes)}
+
+        # Build sparse adjacency matrix in COO format
+        rows, cols, data = [], [], []
+        for edge in graph.edges():
+            u, v = str(edge[0]), str(edge[1])
+            if u in self.node_to_idx and v in self.node_to_idx:
+                i, j = self.node_to_idx[u], self.node_to_idx[v]
+                rows.append(i)
+                cols.append(j)
+                data.append(1.0)
+                # Undirected graph: add reverse edge
+                if not graph.is_directed() if hasattr(graph, 'is_directed') else True:
+                    rows.append(j)
+                    cols.append(i)
+                    data.append(1.0)
+
+        await self._build_sparse_matrix(rows, cols, data)
+
+    async def _initialize_from_adjacency_list(
+        self,
+        graph: Dict[str, List[str]],
+        max_nodes: int
+    ) -> None:
+        """Initialize from adjacency list dictionary.
+
+        Args:
+            graph: Dictionary mapping node IDs to lists of neighbor IDs.
+            max_nodes: Maximum number of nodes.
+        """
+        nodes = list(graph.keys())
+        if len(nodes) > max_nodes:
+            logger.warning(
+                f"Graph has {len(nodes)} nodes, limiting to {max_nodes}"
+            )
+            nodes = nodes[:max_nodes]
+
+        self.n_nodes = len(nodes)
+        self.node_to_idx = {node: i for i, node in enumerate(nodes)}
+        self.idx_to_node = {i: node for i, node in enumerate(nodes)}
+
+        # Build sparse adjacency matrix
+        rows, cols, data = [], [], []
+        for node, neighbors in graph.items():
+            if node not in self.node_to_idx:
+                continue
+            i = self.node_to_idx[node]
+            for neighbor in neighbors:
+                if neighbor in self.node_to_idx:
+                    j = self.node_to_idx[neighbor]
+                    rows.append(i)
+                    cols.append(j)
+                    data.append(1.0)
+
+        await self._build_sparse_matrix(rows, cols, data)
+
+    async def _initialize_from_matrix(
+        self,
+        matrix: np.ndarray,
+        max_nodes: int
+    ) -> None:
+        """Initialize from adjacency matrix.
+
+        Args:
+            matrix: Adjacency matrix as numpy array.
+            max_nodes: Maximum number of nodes.
+        """
+        n = min(matrix.shape[0], max_nodes)
+        self.n_nodes = n
+
+        # Create default node IDs
+        self.node_to_idx = {f"node_{i}": i for i in range(n)}
+        self.idx_to_node = {i: f"node_{i}" for i in range(n)}
+
+        # Convert to COO format
+        if SCIPY_AVAILABLE and sparse is not None:
+            if sparse.issparse(matrix):
+                coo = matrix.tocoo()
+            else:
+                coo = sparse.coo_matrix(matrix[:n, :n])
+            await self._build_sparse_matrix(
+                coo.row.tolist(),
+                coo.col.tolist(),
+                coo.data.tolist()
+            )
+        else:
+            # Manual COO conversion
+            rows, cols, data = [], [], []
+            for i in range(n):
+                for j in range(n):
+                    if matrix[i, j] != 0:
+                        rows.append(i)
+                        cols.append(j)
+                        data.append(float(matrix[i, j]))
+            await self._build_sparse_matrix(rows, cols, data)
+
+    async def _build_sparse_matrix(
+        self,
+        rows: List[int],
+        cols: List[int],
+        data: List[float]
+    ) -> None:
+        """Build sparse matrix from COO data.
+
+        Args:
+            rows: Row indices.
+            cols: Column indices.
+            data: Non-zero values.
+        """
+        if not rows:
+            # Empty graph
+            self.adjacency_matrix = None
+            return
+
+        if self._mlx_available and mx is not None:
+            # Use MLX arrays for sparse representation
+            self.adjacency_matrix = {
+                'rows': mx.array(rows, dtype=mx.int32),
+                'cols': mx.array(cols, dtype=mx.int32),
+                'data': mx.array(data, dtype=mx.float32),
+                'shape': (self.n_nodes, self.n_nodes)
+            }
+        elif SCIPY_AVAILABLE and sparse is not None:
+            # Use scipy sparse
+            self.adjacency_matrix = sparse.coo_matrix(
+                (data, (rows, cols)),
+                shape=(self.n_nodes, self.n_nodes)
+            )
+        else:
+            # Dense fallback for small graphs
+            matrix = np.zeros((self.n_nodes, self.n_nodes), dtype=np.float32)
+            for r, c, d in zip(rows, cols, data):
+                matrix[r, c] = d
+            self.adjacency_matrix = matrix
+
+    def initialize_state(self, start_nodes: List[str]) -> Any:
+        """Create quantum superposition state from start nodes.
+
+        Creates an equal superposition of the starting node states,
+        representing the quantum walker's initial position.
+
+        Args:
+            start_nodes: List of node IDs to start from.
+
+        Returns:
+            mx.array or np.array representing the quantum state.
+
+        Raises:
+            RuntimeError: If pathfinder is not initialized.
+            ValueError: If start nodes are not in the graph.
+        """
+        if not self.initialized:
+            raise RuntimeError("PathFinder not initialized. Call initialize() first.")
+
+        # Map start nodes to indices
+        start_indices = []
+        for node in start_nodes:
+            if node in self.node_to_idx:
+                start_indices.append(self.node_to_idx[node])
+            else:
+                logger.warning(f"Start node '{node}' not in graph, skipping")
+
+        if not start_indices:
+            raise ValueError("No valid start nodes found in graph")
+
+        # Create equal superposition
+        n = self.n_nodes
+        amplitude = 1.0 / math.sqrt(len(start_indices))
+
+        if self._mlx_available and mx is not None:
+            state = mx.zeros(n, dtype=mx.float32)
+            for idx in start_indices:
+                # Build update indices and values
+                pass
+            # Create state with values at start indices
+            state_values = mx.zeros(n, dtype=mx.float32)
+            for idx in start_indices:
+                state_values = state_values.at[idx].add(amplitude)
+            state = state_values
+        else:
+            state = np.zeros(n, dtype=np.float32)
+            for idx in start_indices:
+                state[idx] = amplitude
+
+        return state
+
+    def step(self, state: Any, steps: int = 1) -> Any:
+        """Perform quantum random walk steps using MLX.
+
+        Implements a quantum walk with coin and shift operators.
+        The coin operator creates superposition, and the shift operator
+        moves the walker according to the graph structure.
+
+        Args:
+            state: Current quantum state (mx.array or np.array).
+            steps: Number of steps to perform.
+
+        Returns:
+            New quantum state after the walk steps.
+        """
+        if not self.initialized:
+            raise RuntimeError("PathFinder not initialized")
+
+        if self.adjacency_matrix is None:
+            logger.warning("Empty graph, returning unchanged state")
+            return state
+
+        current_state = state
+        for _ in range(steps):
+            current_state = self._quantum_walk_step(current_state)
+
+        return current_state
+
+    def _quantum_walk_step(self, state: Any) -> Any:
+        """Perform a single quantum walk step.
+
+        Args:
+            state: Current quantum state.
+
+        Returns:
+            New state after one step.
+        """
+        # Apply coin operator (creates superposition)
+        coin_state = self._apply_coin_operator(state)
+
+        # Apply shift operator (moves along edges)
+        shifted_state = self._apply_shift_operator(coin_state)
+
+        return shifted_state
+
+    def _apply_coin_operator(self, state: Any) -> Any:
+        """Apply quantum coin operator to create superposition.
+
+        Uses Hadamard-like or Grover coin based on configuration.
+
+        Args:
+            state: Current quantum state.
+
+        Returns:
+            State after coin operation.
+        """
+        if self.config.coin_type == "hadamard":
+            return self._apply_hadamard_coin(state)
+        else:
+            return self._apply_grover_coin(state)
+
+    def _apply_hadamard_coin(self, state: Any) -> Any:
+        """Apply Hadamard-like coin operator.
+
+        Creates equal superposition of moving to neighbors.
+
+        Args:
+            state: Current quantum state.
+
+        Returns:
+            State after Hadamard coin operation.
+        """
+        if self._mlx_available and mx is not None:
+            # Normalize state
+            norm = mx.sqrt(mx.sum(state * state))
+            if norm > 0:
+                return state / norm
+            return state
+        else:
+            norm = np.linalg.norm(state)
+            if norm > 0:
+                return state / norm
+            return state
+
+    def _apply_grover_coin(self, state: Any) -> Any:
+        """Apply Grover coin operator.
+
+        Creates biased superposition favoring high-degree nodes.
+
+        Args:
+            state: Current quantum state.
+
+        Returns:
+            State after Grover coin operation.
+        """
+        # Grover coin: 2|s><s| - I where |s> is uniform superposition
+        n = self.n_nodes
+
+        if self._mlx_available and mx is not None:
+            uniform = mx.ones(n, dtype=mx.float32) / math.sqrt(n)
+            overlap = mx.sum(uniform * state)
+            return 2 * overlap * uniform - state
+        else:
+            uniform = np.ones(n, dtype=np.float32) / math.sqrt(n)
+            overlap = np.dot(uniform, state)
+            return 2 * overlap * uniform - state
+
+    def _apply_shift_operator(self, state: Any) -> Any:
+        """Apply shift operator to move along graph edges.
+
+        Args:
+            state: Current quantum state.
+
+        Returns:
+            State after shift operation.
+        """
+        if self._mlx_available and mx is not None:
+            return self._apply_shift_mlx(state)
+        elif SCIPY_AVAILABLE and sparse is not None:
+            return self._apply_shift_scipy(state)
+        else:
+            return self._apply_shift_numpy(state)
+
+    def _apply_shift_mlx(self, state: Any) -> Any:
+        """Apply shift operator using MLX.
+
+        Args:
+            state: Current quantum state (mx.array).
+
+        Returns:
+            Shifted state.
+        """
+        if not isinstance(self.adjacency_matrix, dict):
+            return state
+
+        rows = self.adjacency_matrix['rows']
+        cols = self.adjacency_matrix['cols']
+        data = self.adjacency_matrix['data']
+
+        # Compute degree for normalization
+        n = self.n_nodes
+        degrees = mx.zeros(n, dtype=mx.float32)
+        for i in range(len(rows)):
+            r = int(rows[i].item())
+            degrees = degrees.at[r].add(1.0)
+
+        # Avoid division by zero
+        degrees = mx.where(degrees > 0, degrees, 1.0)
+
+        # Apply shift: move probability to neighbors
+        new_state = mx.zeros(n, dtype=mx.float32)
+        for i in range(len(rows)):
+            r = int(rows[i].item())
+            c = int(cols[i].item())
+            v = float(data[i].item())
+            # Normalize by degree
+            contribution = v * state[r] / degrees[r]
+            new_state = new_state.at[c].add(contribution)
+
+        return new_state
+
+    def _apply_shift_scipy(self, state: Any) -> Any:
+        """Apply shift operator using scipy sparse.
+
+        Args:
+            state: Current quantum state (numpy array).
+
+        Returns:
+            Shifted state.
+        """
+        if sparse is None:
+            return state
+
+        # Convert to CSR for efficient multiplication
+        if sparse.isspmatrix_coo(self.adjacency_matrix):
+            adj_csr = self.adjacency_matrix.tocsr()
+        else:
+            adj_csr = self.adjacency_matrix
+
+        # Normalize by row degrees (stochastic matrix)
+        degrees = np.array(adj_csr.sum(axis=1)).flatten()
+        degrees[degrees == 0] = 1.0  # Avoid division by zero
+
+        # Create diagonal matrix for normalization
+        D_inv = sparse.diags(1.0 / degrees)
+        normalized = D_inv @ adj_csr
+
+        # Apply shift
+        new_state = normalized.T @ state
+
+        return new_state
+
+    def _apply_shift_numpy(self, state: Any) -> Any:
+        """Apply shift operator using numpy (dense fallback).
+
+        Args:
+            state: Current quantum state.
+
+        Returns:
+            Shifted state.
+        """
+        adj = self.adjacency_matrix
+        if not isinstance(adj, np.ndarray):
+            return state
+
+        # Normalize by row degrees
+        degrees = adj.sum(axis=1)
+        degrees[degrees == 0] = 1.0
+        normalized = adj / degrees[:, np.newaxis]
+
+        # Apply shift
+        new_state = normalized.T @ state
+
+        return new_state
+
+    def amplify_targets(
+        self,
+        state: Any,
+        target_nodes: List[str]
+    ) -> Any:
+        """Apply Grover-style amplitude amplification to target nodes.
+
+        Amplifies the probability amplitudes of target nodes to increase
+        the likelihood of finding paths to them.
+
+        Args:
+            state: Current quantum state.
+            target_nodes: List of target node IDs to amplify.
+
+        Returns:
+            State with amplified target amplitudes.
+        """
+        if not self.initialized:
+            raise RuntimeError("PathFinder not initialized")
+
+        # Map target nodes to indices
+        target_indices = []
+        for node in target_nodes:
+            if node in self.node_to_idx:
+                target_indices.append(self.node_to_idx[node])
+
+        if not target_indices:
+            logger.warning("No valid target nodes found")
+            return state
+
+        # Apply Grover diffusion operator
+        amplified_state = self._grover_diffusion(state, target_indices)
+
+        return amplified_state
+
+    def _grover_diffusion(
+        self,
+        state: Any,
+        target_indices: List[int]
+    ) -> Any:
+        """Apply Grover diffusion operator.
+
+        The diffusion operator reflects the state about the average,
+        amplifying the marked (target) states.
+
+        Args:
+            state: Current quantum state.
+            target_indices: Indices of target nodes.
+
+        Returns:
+            State after diffusion.
+        """
+        n = self.n_nodes
+        strength = self.config.amplification_strength
+
+        if self._mlx_available and mx is not None:
+            # Create oracle (marks target states)
+            oracle = mx.ones(n, dtype=mx.float32)
+            for idx in target_indices:
+                oracle = oracle.at[idx].multiply(-1.0)
+
+            # Apply oracle
+            state = state * oracle
+
+            # Apply diffusion operator: 2|s><s| - I
+            mean = mx.mean(state)
+            diffusion = 2 * mean - state
+
+            # Scale by amplification strength
+            return diffusion * strength
+        else:
+            # NumPy implementation
+            oracle = np.ones(n, dtype=np.float32)
+            for idx in target_indices:
+                oracle[idx] = -1.0
+
+            state = state * oracle
+            mean = np.mean(state)
+            diffusion = 2 * mean - state
+
+            return diffusion * strength
+
+    async def find_paths(
+        self,
+        start_nodes: List[str],
+        target_nodes: List[str],
+        max_steps: Optional[int] = None
+    ) -> List[List[str]]:
+        """Find paths from start nodes to target nodes using quantum walk.
+
+        This is the main pathfinding method that combines quantum random walks
+        with amplitude amplification to discover paths in the knowledge graph.
+
+        Args:
+            start_nodes: List of starting node IDs.
+            target_nodes: List of target node IDs.
+            max_steps: Maximum walk steps. Uses config default if None.
+
+        Returns:
+            List of paths, where each path is a list of node IDs.
+
+        Raises:
+            RuntimeError: If pathfinder is not initialized.
+        """
+        if not self.initialized:
+            raise RuntimeError("PathFinder not initialized. Call initialize() first.")
+
+        max_steps = max_steps or self.config.max_steps
+
+        try:
+            # Initialize quantum state at start nodes
+            state = self.initialize_state(start_nodes)
+
+            # Evolve state through quantum walk
+            for step in range(max_steps):
+                # Perform walk step
+                state = self.step(state, steps=1)
+
+                # Periodically amplify targets
+                if step % 5 == 0 and step > 0:
+                    state = self.amplify_targets(state, target_nodes)
+
+                # Memory cleanup every 10 steps
+                if step % 10 == 0:
+                    gc.collect()
+                    if self._mlx_available and mx is not None:
+                        mx.eval([])
+                        mx.clear_cache()
+
+            # Extract paths from final state
+            paths = self._extract_paths(state, start_nodes, target_nodes)
+
+            return paths
+
+        except Exception as e:
+            logger.error(f"Error in find_paths: {e}")
+            return []
+
+        finally:
+            # Always cleanup after pathfinding
+            gc.collect()
+            if self._mlx_available and mx is not None:
+                mx.eval([])
+                mx.clear_cache()
+            gc.collect()
+
+    def _extract_paths(
+        self,
+        probabilities: Any,
+        start_nodes: List[str],
+        target_nodes: List[str]
+    ) -> List[List[str]]:
+        """Extract paths from probability distribution.
+
+        Uses the final quantum state probabilities to reconstruct
+        likely paths from start to target nodes.
+
+        Args:
+            probabilities: Final quantum state (probability amplitudes).
+            start_nodes: Starting node IDs.
+            target_nodes: Target node IDs.
+
+        Returns:
+            List of reconstructed paths.
+        """
+        # Convert to numpy for path extraction
+        if self._mlx_available and mx is not None:
+            prob_array = np.array(probabilities.tolist())
+        else:
+            prob_array = np.array(probabilities)
+
+        # Compute probabilities (squared amplitudes)
+        probs = np.abs(prob_array) ** 2
+
+        # Find high-probability target nodes
+        target_indices = [
+            self.node_to_idx[node] for node in target_nodes
+            if node in self.node_to_idx
+        ]
+
+        if not target_indices:
+            return []
+
+        # Sort targets by probability
+        target_probs = [(idx, probs[idx]) for idx in target_indices]
+        target_probs.sort(key=lambda x: x[1], reverse=True)
+
+        # Extract top-k paths
+        paths = []
+        top_k = min(self.config.top_k_paths, len(target_probs))
+
+        for i in range(top_k):
+            target_idx, prob = target_probs[i]
+            if prob < 1e-6:  # Skip negligible probabilities
+                continue
+
+            # Reconstruct path using greedy backtracking
+            path = self._reconstruct_path(target_idx, probs, start_nodes)
+            if path:
+                paths.append(path)
+
+        return paths
+
+    def _reconstruct_path(
+        self,
+        target_idx: int,
+        probabilities: np.ndarray,
+        start_nodes: List[str]
+    ) -> List[str]:
+        """Reconstruct a path to target using greedy backtracking.
+
+        Args:
+            target_idx: Index of target node.
+            probabilities: Node probability distribution.
+            start_nodes: Starting node IDs.
+
+        Returns:
+            Reconstructed path as list of node IDs.
+        """
+        start_indices = {
+            self.node_to_idx[node] for node in start_nodes
+            if node in self.node_to_idx
+        }
+
+        path = [target_idx]
+        current = target_idx
+        visited = {current}
+
+        max_backtrack = self.config.max_steps
+
+        for _ in range(max_backtrack):
+            if current in start_indices:
+                # Reached start
+                break
+
+            # Find highest probability predecessor
+            best_pred = None
+            best_prob = -1.0
+
+            # Get predecessors from adjacency matrix
+            predecessors = self._get_predecessors(current)
+
+            for pred in predecessors:
+                if pred not in visited and probabilities[pred] > best_prob:
+                    best_prob = probabilities[pred]
+                    best_pred = pred
+
+            if best_pred is None:
+                break
+
+            current = best_pred
+            path.append(current)
+            visited.add(current)
+
+        # Reverse to get start -> target order
+        path.reverse()
+
+        # Convert indices to node IDs
+        node_path = [
+            self.idx_to_node[idx] for idx in path
+            if idx in self.idx_to_node
+        ]
+
+        return node_path
+
+    def _get_predecessors(self, node_idx: int) -> List[int]:
+        """Get predecessor nodes for a given node.
+
+        Args:
+            node_idx: Node index.
+
+        Returns:
+            List of predecessor indices.
+        """
+        predecessors = []
+
+        if self._mlx_available and mx is not None:
+            if isinstance(self.adjacency_matrix, dict):
+                rows = self.adjacency_matrix['rows']
+                cols = self.adjacency_matrix['cols']
+                for i in range(len(cols)):
+                    if int(cols[i].item()) == node_idx:
+                        predecessors.append(int(rows[i].item()))
+        elif SCIPY_AVAILABLE and sparse is not None:
+            if sparse.isspmatrix(self.adjacency_matrix):
+                # Get column for node_idx (predecessors)
+                col = self.adjacency_matrix.tocsc()[:, node_idx]
+                predecessors = col.nonzero()[0].tolist()
+        elif isinstance(self.adjacency_matrix, np.ndarray):
+            predecessors = np.where(self.adjacency_matrix[:, node_idx] != 0)[0].tolist()
+
+        return predecessors
+
+    async def cleanup(self) -> None:
+        """Clean up resources and free memory.
+
+        This method should be called when the pathfinder is no longer needed
+        to ensure proper memory cleanup on M1 8GB systems.
+        """
+        try:
+            # Clear adjacency matrix
+            if isinstance(self.adjacency_matrix, dict):
+                self.adjacency_matrix = None
+            else:
+                self.adjacency_matrix = None
+
+            # Clear mappings
+            self.node_to_idx.clear()
+            self.idx_to_node.clear()
+
+            # Clear graph reference
+            self.graph = None
+
+            # Force garbage collection
+            gc.collect()
+
+            # Clear MLX cache if available
+            if self._mlx_available and mx is not None:
+                mx.eval([])
+                mx.clear_cache()
+            gc.collect()
+
+            self.initialized = False
+            logger.info("QuantumPathFinder resources cleaned up")
+
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+
+    def get_state_statistics(self, state: Any) -> Dict[str, float]:
+        """Get statistics about a quantum state.
+
+        Args:
+            state: Quantum state.
+
+        Returns:
+            Dictionary with state statistics.
+        """
+        if self._mlx_available and mx is not None:
+            prob_sum = float(mx.sum(state * state).item())
+            max_prob = float(mx.max(state * state).item())
+            entropy = float(-mx.sum(state * state * mx.log(state * state + 1e-10)).item())
+        else:
+            prob_sum = float(np.sum(state ** 2))
+            max_prob = float(np.max(state ** 2))
+            probs = state ** 2
+            entropy = float(-np.sum(probs * np.log(probs + 1e-10)))
+
+        return {
+            "total_probability": prob_sum,
+            "max_probability": max_prob,
+            "entropy": entropy,
+            "n_nodes": self.n_nodes
+        }
+
+
+# Module availability flag
+QUANTUM_PATHFINDER_AVAILABLE = True
+
+
+def create_quantum_pathfinder(
+    config: Optional[QuantumPathConfig] = None
+) -> Optional[QuantumInspiredPathFinder]:
+    """Factory function to create a quantum pathfinder instance.
+
+    This factory function provides a consistent API for creating
+    pathfinder instances, with optional lazy loading support.
+
+    Args:
+        config: Configuration for the pathfinder. Uses defaults if None.
+
+    Returns:
+        QuantumInspiredPathFinder instance or None if creation fails.
+    """
+    try:
+        return QuantumInspiredPathFinder(config)
+    except Exception as e:
+        logger.error(f"Failed to create quantum pathfinder: {e}")
+        return None
+
+
+# Re-export for direct import
+__all__ = [
+    "QuantumInspiredPathFinder",
+    "QuantumPathConfig",
+    "create_quantum_pathfinder",
+    "QUANTUM_PATHFINDER_AVAILABLE"
+]

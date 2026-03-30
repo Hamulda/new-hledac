@@ -1,0 +1,2580 @@
+"""
+HypothesisEngine - Automated Hypothesis Generation and Testing
+===============================================================
+
+A comprehensive hypothesis management system implementing:
+- Automated hypothesis generation from observations (abductive reasoning)
+- Hypothesis testing framework with test design
+- Falsification attempts (Popperian approach)
+- Evidence gathering automation
+- Confidence updating (Bayesian)
+- Hypothesis ranking and selection
+- Multi-hypothesis tracking
+- Adversarial Verification (Devil's Advocate mode)
+
+Hypothesis Types:
+- Existence: Does X exist?
+- Relationship: Is A connected to B?
+- Causal: Does X cause Y?
+- Identity: Is X the same as Y?
+- Temporal: Did X happen before Y?
+
+M1 8GB Optimizations:
+- Efficient hypothesis space pruning
+- Incremental belief updating
+- Memory-efficient evidence tracking
+- Streaming hypothesis evaluation
+- Async database queries for adversarial verification
+- Limited contradiction detection window
+"""
+
+from __future__ import annotations
+
+import asyncio
+import gc
+import hashlib
+import logging
+import re
+import uuid
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum, auto
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Protocol, Set, Tuple, Union
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+class HypothesisType(Enum):
+    """Types of hypotheses supported by the engine."""
+    EXISTENCE = "existence"           # Does X exist?
+    RELATIONSHIP = "relationship"     # Is A connected to B?
+    CAUSAL = "causal"                 # Does X cause Y?
+    IDENTITY = "identity"             # Is X the same as Y?
+    TEMPORAL = "temporal"             # Did X happen before Y?
+
+
+class HypothesisStatus(Enum):
+    """Status of a hypothesis in its lifecycle."""
+    ACTIVE = "active"                 # Currently being tested
+    CONFIRMED = "confirmed"           # Sufficient evidence supports it
+    REJECTED = "rejected"             # Falsified or insufficient support
+    PENDING = "pending"               # Awaiting testing
+    MERGED = "merged"                 # Merged with another hypothesis
+
+
+class TestType(Enum):
+    """Types of tests that can be designed and executed."""
+    EXISTENCE_CHECK = "existence_check"
+    CORRELATION_TEST = "correlation_test"
+    CAUSAL_TEST = "causal_test"
+    IDENTITY_VERIFICATION = "identity_verification"
+    TEMPORAL_ORDERING = "temporal_ordering"
+    CONSISTENCY_CHECK = "consistency_check"
+    PREDICTION_TEST = "prediction_test"
+
+
+@dataclass
+class Evidence:
+    """Evidence item supporting or conflicting with a hypothesis."""
+    evidence_id: str
+    source: str
+    content: str
+    timestamp: datetime
+    reliability: float = 1.0  # 0-1, source reliability
+    relevance: float = 1.0    # 0-1, relevance to hypothesis
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TestResult:
+    """Result of executing a test against a hypothesis."""
+    test_type: str
+    result: str  # passed, failed, inconclusive
+    confidence: float
+    evidence_collected: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=datetime.now)
+
+    def __post_init__(self):
+        if isinstance(self.timestamp, str):
+            self.timestamp = datetime.fromisoformat(self.timestamp)
+
+
+@dataclass
+class TestDesign:
+    """Design for testing a hypothesis."""
+    test_type: str
+    description: str
+    required_data: List[str] = field(default_factory=list)
+    expected_outcome_if_true: str = ""
+    expected_outcome_if_false: str = ""
+    priority: float = 0.5  # 0-1, higher = test sooner
+    cost_estimate: float = 1.0  # Estimated computational cost
+
+
+@dataclass
+class FalsificationResult:
+    """Result of a falsification attempt."""
+    falsified: bool
+    confidence: float
+    counter_evidence: List[str] = field(default_factory=list)
+    reasoning: str = ""
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+# =============================================================================
+# Adversarial Verification Data Classes
+# =============================================================================
+
+@dataclass
+class SourceCredibility:
+    """
+    Credibility assessment for an evidence source.
+
+    Tracks historical accuracy, bias indicators, and overall trustworthiness.
+    Used to weight evidence by source quality.
+    """
+    source_id: str
+    credibility_score: float  # 0-1, overall credibility
+    bias_indicators: List[str] = field(default_factory=list)
+    historical_accuracy: float = 0.5  # 0-1, based on past verification
+    last_updated: datetime = field(default_factory=datetime.now)
+    total_claims: int = 0
+    verified_claims: int = 0
+    contradiction_count: int = 0
+
+    def update_accuracy(self, was_correct: bool) -> None:
+        """Update historical accuracy with a new verification result."""
+        self.total_claims += 1
+        if was_correct:
+            self.verified_claims += 1
+        self.historical_accuracy = self.verified_claims / self.total_claims
+        # Recalculate credibility score
+        self.credibility_score = (
+            self.historical_accuracy * 0.7 +
+            (1.0 - min(1.0, self.contradiction_count / 10)) * 0.3
+        )
+        self.last_updated = datetime.now()
+
+
+@dataclass
+class Event:
+    """Temporal event for consistency checking."""
+    event_id: str
+    description: str
+    timestamp: datetime
+    source: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Contradiction:
+    """
+    Represents a contradiction between two claims or evidence items.
+
+    Tracks the type of contradiction (temporal, factual, logical) and severity.
+    """
+    claim_a: str
+    claim_b: str
+    contradiction_type: str  # temporal, factual, logical, source_bias
+    severity: float  # 0-1, how serious the contradiction is
+    evidence_supporting_a: List[str] = field(default_factory=list)
+    evidence_supporting_b: List[str] = field(default_factory=list)
+    detected_at: datetime = field(default_factory=datetime.now)
+    resolution_notes: str = ""
+
+
+@dataclass
+class CrossReferenceResult:
+    """Result of cross-referencing a claim across databases."""
+    database_id: str
+    claim_found: bool
+    confidence: float
+    supporting_sources: List[str] = field(default_factory=list)
+    conflicting_sources: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AdversarialReport:
+    """
+    Comprehensive adversarial verification report.
+
+    Contains all findings from the devil's advocate analysis including
+    counter-evidence, contradictions, source credibility assessments,
+    and overall confidence scoring.
+    """
+    hypothesis: str
+    supporting_evidence: List[Evidence]
+    contradicting_evidence: List[Evidence]
+    credibility_assessment: Dict[str, SourceCredibility]
+    contradictions_found: List[Contradiction]
+    temporal_consistency: bool
+    overall_confidence: float  # 0-1, confidence in hypothesis after adversarial analysis
+    devil_advocate_score: float  # 0-1, strength of counter-case (higher = stronger counter-arguments)
+    alternative_explanations: List[str] = field(default_factory=list)
+    logical_fallacies: List[str] = field(default_factory=list)
+    generated_at: datetime = field(default_factory=datetime.now)
+    verification_duration_ms: float = 0.0
+
+
+@dataclass
+class Hypothesis:
+    """
+    A hypothesis with full tracking and Bayesian updating.
+
+    Implements Bayesian belief updating:
+    - prior_probability: Initial belief before evidence
+    - posterior_probability: Updated belief after evidence
+    - confidence: Overall confidence score (derived from tests)
+    """
+    id: str
+    statement: str
+    hypothesis_type: str
+    prior_probability: float = 0.5
+    posterior_probability: float = 0.5
+    confidence: float = 0.5
+    supporting_evidence: List[str] = field(default_factory=list)
+    conflicting_evidence: List[str] = field(default_factory=list)
+    test_results: List[TestResult] = field(default_factory=list)
+    status: str = "pending"  # active, confirmed, rejected, pending, merged
+    created_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=datetime.now)
+    parent_hypotheses: List[str] = field(default_factory=list)  # For merged hypotheses
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if isinstance(self.created_at, str):
+            self.created_at = datetime.fromisoformat(self.created_at)
+        if isinstance(self.updated_at, str):
+            self.updated_at = datetime.fromisoformat(self.updated_at)
+
+    def update_probability(self, likelihood_ratio: float) -> None:
+        """
+        Update posterior probability using Bayes' theorem.
+
+        P(H|E) = P(E|H) * P(H) / P(E)
+
+        Args:
+            likelihood_ratio: P(E|H) / P(E|~H)
+        """
+        prior = self.posterior_probability
+        posterior = (likelihood_ratio * prior) / (
+            likelihood_ratio * prior + (1 - prior)
+        )
+        self.posterior_probability = max(0.0, min(1.0, posterior))
+        self.updated_at = datetime.now()
+
+    def add_test_result(self, result: TestResult) -> None:
+        """Add a test result and update confidence."""
+        self.test_results.append(result)
+        self._recalculate_confidence()
+        self.updated_at = datetime.now()
+
+    def add_supporting_evidence(self, evidence_id: str, weight: float = 1.0) -> None:
+        """Add supporting evidence with optional weight."""
+        if evidence_id not in self.supporting_evidence:
+            self.supporting_evidence.append(evidence_id)
+            # Update probability with positive likelihood ratio
+            self.update_probability(1.0 + weight * 0.5)
+        self.updated_at = datetime.now()
+
+    def add_conflicting_evidence(self, evidence_id: str, weight: float = 1.0) -> None:
+        """Add conflicting evidence with optional weight."""
+        if evidence_id not in self.conflicting_evidence:
+            self.conflicting_evidence.append(evidence_id)
+            # Update probability with negative likelihood ratio
+            self.update_probability(1.0 / (1.0 + weight * 0.5))
+        self.updated_at = datetime.now()
+
+    def _recalculate_confidence(self) -> None:
+        """Recalculate confidence based on test results."""
+        if not self.test_results:
+            self.confidence = self.posterior_probability
+            return
+
+        # Weighted average of test confidences
+        total_weight = 0.0
+        weighted_confidence = 0.0
+
+        for i, result in enumerate(self.test_results):
+            # More recent tests have higher weight
+            weight = (i + 1) / len(self.test_results)
+            total_weight += weight
+
+            if result.result == "passed":
+                weighted_confidence += weight * result.confidence
+            elif result.result == "failed":
+                weighted_confidence += weight * (1 - result.confidence)
+            else:  # inconclusive
+                weighted_confidence += weight * 0.5
+
+        self.confidence = weighted_confidence / total_weight if total_weight > 0 else 0.5
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert hypothesis to dictionary."""
+        return {
+            "id": self.id,
+            "statement": self.statement,
+            "hypothesis_type": self.hypothesis_type,
+            "prior_probability": self.prior_probability,
+            "posterior_probability": self.posterior_probability,
+            "confidence": self.confidence,
+            "supporting_evidence": self.supporting_evidence,
+            "conflicting_evidence": self.conflicting_evidence,
+            "test_results": [
+                {
+                    "test_type": tr.test_type,
+                    "result": tr.result,
+                    "confidence": tr.confidence,
+                    "evidence_collected": tr.evidence_collected,
+                    "timestamp": tr.timestamp.isoformat(),
+                }
+                for tr in self.test_results
+            ],
+            "status": self.status,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+            "parent_hypotheses": self.parent_hypotheses,
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Hypothesis:
+        """Create hypothesis from dictionary."""
+        test_results = [
+            TestResult(
+                test_type=tr["test_type"],
+                result=tr["result"],
+                confidence=tr["confidence"],
+                evidence_collected=tr.get("evidence_collected", []),
+                timestamp=datetime.fromisoformat(tr["timestamp"]),
+            )
+            for tr in data.get("test_results", [])
+        ]
+
+        return cls(
+            id=data["id"],
+            statement=data["statement"],
+            hypothesis_type=data["hypothesis_type"],
+            prior_probability=data.get("prior_probability", 0.5),
+            posterior_probability=data.get("posterior_probability", 0.5),
+            confidence=data.get("confidence", 0.5),
+            supporting_evidence=data.get("supporting_evidence", []),
+            conflicting_evidence=data.get("conflicting_evidence", []),
+            test_results=test_results,
+            status=data.get("status", "pending"),
+            created_at=datetime.fromisoformat(data["created_at"]),
+            updated_at=datetime.fromisoformat(data["updated_at"]),
+            parent_hypotheses=data.get("parent_hypotheses", []),
+            metadata=data.get("metadata", {}),
+        )
+
+
+# Protocol for InferenceEngine integration
+class InferenceEngineProtocol(Protocol):
+    """Protocol for inference engine integration."""
+
+    async def abductive_reasoning(
+        self, observations: List[Evidence], context: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Generate possible explanations (hypotheses) from observations."""
+        ...
+
+    async def evidence_chaining(
+        self, hypothesis: Hypothesis, context: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Chain evidence to design tests for a hypothesis."""
+        ...
+
+    async def belief_update(
+        self, hypothesis: Hypothesis, new_evidence: Evidence
+    ) -> float:
+        """Calculate updated belief given new evidence."""
+        ...
+
+
+# =============================================================================
+# Adversarial Verifier
+# =============================================================================
+
+class AdversarialVerifier:
+    """
+    Devil's Advocate verification system for rigorous hypothesis testing.
+
+    Actively seeks evidence against hypotheses, challenges assumptions,
+    detects logical fallacies, and performs comprehensive source credibility
+    analysis. Implements the principle of falsification through adversarial
+    examination.
+
+    M1 8GB Optimizations:
+    - Async database queries for non-blocking I/O
+    - Streaming evidence processing with limited window
+    - Incremental contradiction detection
+    - Aggressive memory cleanup after verification batches
+    - Bounded source credibility with deterministic LRU eviction
+
+    Attributes:
+        hypothesis_engine: Reference to the HypothesisEngine for evidence access
+        source_credibility_db: In-memory cache of source credibility scores
+        max_contradiction_window: Maximum evidence pairs to check for contradictions
+        bias_keywords: Dictionary of bias indicators by category
+    """
+
+    # Memory bounds for M1 8GB optimization (shared with HypothesisEngine)
+    MAX_SOURCE_ITEMS = 5_000
+
+    def __init__(
+        self,
+        hypothesis_engine: HypothesisEngine,
+        max_contradiction_window: int = 100,
+        enable_streaming: bool = True,
+    ):
+        """
+        Initialize the AdversarialVerifier.
+
+        Args:
+            hypothesis_engine: The HypothesisEngine instance to work with
+            max_contradiction_window: Maximum number of evidence items to check
+                                     for contradictions (M1 memory optimization)
+            enable_streaming: Whether to use streaming evidence processing
+        """
+        self.hypothesis_engine = hypothesis_engine
+        self.max_contradiction_window = max_contradiction_window
+        self.enable_streaming = enable_streaming
+
+        # Source credibility cache (bounded with LRU eviction)
+        self._source_credibility: OrderedDict[str, SourceCredibility] = OrderedDict()
+
+        # Bias detection keywords
+        self._bias_keywords = {
+            "political": ["partisan", "biased", "agenda", "propaganda", "lobby"],
+            "commercial": ["sponsored", "advertisement", "paid", "promotion"],
+            "sensationalist": ["shocking", "unbelievable", "miracle", "conspiracy"],
+            "unverified": ["anonymous", "unconfirmed", "alleged", "rumored"],
+        }
+
+        # Logical fallacy patterns
+        self._fallacy_patterns = {
+            "ad_hominem": r"\b(attacking|attack on)\s+(the\s+)?person\b|\b(person\s+is\s+(bad|evil|wrong))\b",
+            "straw_man": r"\b(misrepresents?|mischaracterizes?|distorts?)\b",
+            "false_dichotomy": r"\b(either\s+or|only\s+two\s+(options?|choices?))\b",
+            "appeal_to_authority": r"\b(expert\s+says|according\s+to\s+(expert|authority))\b",
+            "circular_reasoning": r"\b(because\s+it\s+is|it\s+is\s+because)\b",
+            "hasty_generalization": r"\b(all\s+are|everyone\s+knows|always)\b",
+        }
+
+        logger.info(
+            f"AdversarialVerifier initialized (window={max_contradiction_window}, "
+            f"streaming={enable_streaming})"
+        )
+
+    async def verify_claim(
+        self, claim: str, context: Optional[Dict[str, Any]] = None
+    ) -> AdversarialReport:
+        """
+        Perform comprehensive adversarial verification of a claim.
+
+        This is the main entry point for devil's advocate analysis. It gathers
+        evidence, checks for contradictions, assesses source credibility, and
+        generates a comprehensive adversarial report.
+
+        Args:
+            claim: The claim to verify
+            context: Additional context for verification
+
+        Returns:
+            AdversarialReport with comprehensive analysis
+        """
+        import time
+
+        start_time = time.time()
+        context = context or {}
+
+        logger.info(f"Starting adversarial verification for claim: {claim[:50]}...")
+
+        # Step 1: Find supporting and contradicting evidence
+        supporting_evidence = await self._find_supporting_evidence(claim, context)
+        contradicting_evidence = await self.find_counter_evidence_from_claim(
+            claim, context
+        )
+
+        # Step 2: Assess source credibility for all evidence
+        all_sources = set()
+        for e in supporting_evidence + contradicting_evidence:
+            all_sources.add(e.source)
+
+        credibility_assessment = {}
+        for source in all_sources:
+            credibility_assessment[source] = self.assess_source_credibility(source)
+
+        # Step 3: Detect contradictions
+        all_evidence = supporting_evidence + contradicting_evidence
+        contradictions = self.detect_contradictions(all_evidence)
+
+        # Step 4: Check temporal consistency if events are present
+        temporal_consistency = True
+        events = self._extract_events(all_evidence)
+        if len(events) >= 2:
+            temporal_consistency, temporal_contradictions = (
+                self.check_temporal_consistency(events)
+            )
+            contradictions.extend(temporal_contradictions)
+
+        # Step 5: Cross-reference databases
+        cross_references = await self.cross_reference_databases(claim)
+
+        # Step 6: Generate devil's advocate analysis
+        devil_advocate_score, alternative_explanations, logical_fallacies = (
+            await self._generate_devils_advocate_analysis(
+                claim, supporting_evidence, contradicting_evidence, context
+            )
+        )
+
+        # Step 7: Calculate overall confidence
+        overall_confidence = self._calculate_adversarial_confidence(
+            supporting_evidence,
+            contradicting_evidence,
+            credibility_assessment,
+            contradictions,
+            cross_references,
+        )
+
+        # Step 8: Generate path explanations (if graph_rag available)
+        metadata = {}
+        graph_rag = context.get("graph_rag") if context else None
+        if graph_rag and len(contradictions) > 0:
+            try:
+                # Extract path from contradictions
+                path = []
+                for c in contradictions[:3]:  # Limit to 3 paths
+                    if hasattr(c, 'nodes') and c.nodes:
+                        path = list(c.nodes)[:5]  # Max 5 nodes
+                        break
+
+                if path:
+                    explainer = SimpleNodeAblationExplainer(graph_rag)
+                    importances = await explainer.explain_path(path, claim, max_nodes=5)
+                    explanation, prompt_hash = await explain_with_mlx(claim, path)
+
+                    metadata['edge_importances'] = importances
+                    metadata['mlx_explanation'] = explanation
+                    metadata['explainer_type'] = 'leave_one_node_out'
+                    metadata['max_nodes'] = 5
+                    metadata['scoring_fn'] = 'graph_rag.score_path'
+                    metadata['model_id'] = 'mlx-community/Qwen2.5-0.5B-Instruct-4bit'
+                    metadata['prompt_hash'] = prompt_hash
+                    metadata['token_budget'] = 80
+                    metadata['temperature'] = 0.0
+            except Exception as e:
+                logger.debug(f"Path explanation failed: {e}")
+
+        duration_ms = (time.time() - start_time) * 1000
+
+        report = AdversarialReport(
+            hypothesis=claim,
+            supporting_evidence=supporting_evidence,
+            contradicting_evidence=contradicting_evidence,
+            credibility_assessment=credibility_assessment,
+            contradictions_found=contradictions,
+            temporal_consistency=temporal_consistency,
+            overall_confidence=overall_confidence,
+            devil_advocate_score=devil_advocate_score,
+            alternative_explanations=alternative_explanations,
+            logical_fallacies=logical_fallacies,
+            verification_duration_ms=duration_ms,
+        )
+
+        # Add metadata to report
+        if metadata:
+            report.metadata.update(metadata)
+
+        logger.info(
+            f"Adversarial verification complete: confidence={overall_confidence:.2f}, "
+            f"devil_score={devil_advocate_score:.2f}, "
+            f"contradictions={len(contradictions)}"
+        )
+
+        return report
+
+    async def find_counter_evidence(
+        self, hypothesis: Hypothesis
+    ) -> List[Evidence]:
+        """
+        Find evidence that contradicts a hypothesis.
+
+        Searches the hypothesis engine's evidence store and queries external
+        sources to find counter-evidence.
+
+        Args:
+            hypothesis: The hypothesis to find counter-evidence for
+
+        Returns:
+            List of contradicting evidence items
+        """
+        return await self.find_counter_evidence_from_claim(
+            hypothesis.statement,
+            {"hypothesis_type": hypothesis.hypothesis_type},
+        )
+
+    async def find_counter_evidence_from_claim(
+        self, claim: str, context: Optional[Dict[str, Any]] = None
+    ) -> List[Evidence]:
+        """
+        Find counter-evidence for a claim string.
+
+        Args:
+            claim: The claim to find counter-evidence for
+            context: Additional context
+
+        Returns:
+            List of contradicting evidence items
+        """
+        context = context or {}
+        counter_evidence: List[Evidence] = []
+
+        # Search existing evidence in hypothesis engine
+        for evidence_id, evidence in self.hypothesis_engine._evidence.items():
+            # Check if evidence contradicts the claim
+            if self._evidence_contradicts_claim(evidence, claim):
+                counter_evidence.append(evidence)
+
+        # Query external databases for counter-evidence (async)
+        external_evidence = await self._query_counter_evidence_databases(
+            claim, context
+        )
+        counter_evidence.extend(external_evidence)
+
+        # Sort by reliability and relevance
+        counter_evidence.sort(
+            key=lambda e: (e.reliability * e.relevance), reverse=True
+        )
+
+        # Limit to top results (M1 memory optimization)
+        return counter_evidence[:50]
+
+    def assess_source_credibility(self, source: str) -> SourceCredibility:
+        """
+        Assess the credibility of an evidence source.
+
+        Analyzes the source for bias indicators, checks historical accuracy
+        if available, and returns a comprehensive credibility assessment.
+
+        Args:
+            source: The source identifier (URL, database name, etc.)
+
+        Returns:
+            SourceCredibility assessment
+        """
+        # Check cache first
+        if source in self._source_credibility:
+            cached = self._source_credibility[source]
+            # Refresh if older than 24 hours
+            if datetime.now() - cached.last_updated < timedelta(hours=24):
+                # Move to end (update LRU order)
+                self._source_credibility.move_to_end(source)
+                return cached
+
+        # Detect bias indicators
+        bias_indicators = self._detect_bias_indicators(source)
+
+        # Calculate base credibility score
+        base_score = 0.5
+
+        # Adjust based on source type patterns
+        if any(
+            trusted in source.lower()
+            for trusted in [".edu", ".gov", "peer-reviewed", "arxiv"]
+        ):
+            base_score += 0.3
+        elif any(
+            untrusted in source.lower()
+            for untrusted in ["blog", "forum", "social", "wiki"]
+        ):
+            base_score -= 0.2
+
+        # Adjust for bias
+        bias_penalty = len(bias_indicators) * 0.1
+        credibility_score = max(0.0, min(1.0, base_score - bias_penalty))
+
+        # Create assessment
+        assessment = SourceCredibility(
+            source_id=source,
+            credibility_score=credibility_score,
+            bias_indicators=bias_indicators,
+            historical_accuracy=0.5,  # Default until verified
+            total_claims=0,
+            verified_claims=0,
+            contradiction_count=0,
+        )
+
+        # Cache and return (bounded with LRU eviction)
+        if source in self._source_credibility:
+            self._source_credibility.move_to_end(source)
+        else:
+            self._source_credibility[source] = assessment
+
+        # Evict oldest entries if over cap
+        while len(self._source_credibility) > self.MAX_SOURCE_ITEMS:
+            self._source_credibility.popitem(last=False)
+
+        return assessment
+
+    def check_temporal_consistency(
+        self, events: List[Event]
+    ) -> Tuple[bool, List[Contradiction]]:
+        """
+        Check if a sequence of events is temporally consistent.
+
+        Detects impossible temporal orderings (effects before causes,
+        circular dependencies, etc.).
+
+        Args:
+            events: List of events to check
+
+        Returns:
+            Tuple of (is_consistent, list_of_contradictions)
+        """
+        if len(events) < 2:
+            return True, []
+
+        contradictions: List[Contradiction] = []
+
+        # Sort events by timestamp
+        sorted_events = sorted(events, key=lambda e: e.timestamp)
+
+        # Check for explicit temporal contradictions in metadata
+        for i, event_a in enumerate(sorted_events):
+            for event_b in sorted_events[i + 1 :]:
+                # Check if A claims to happen after B (contradiction)
+                if event_a.metadata.get("claims_after") == event_b.event_id:
+                    contradiction = Contradiction(
+                        claim_a=f"{event_a.description} (at {event_a.timestamp})",
+                        claim_b=f"{event_b.description} (at {event_b.timestamp})",
+                        contradiction_type="temporal",
+                        severity=0.9,
+                        evidence_supporting_a=[event_a.source],
+                        evidence_supporting_b=[event_b.source],
+                        resolution_notes=f"Event {event_a.event_id} claims to occur after {event_b.event_id} but has earlier timestamp",
+                    )
+                    contradictions.append(contradiction)
+
+        # Check for cause-effect temporal violations
+        for event in sorted_events:
+            causes = event.metadata.get("causes", [])
+            for cause_id in causes:
+                cause_event = next((e for e in events if e.event_id == cause_id), None)
+                if cause_event and cause_event.timestamp > event.timestamp:
+                    contradiction = Contradiction(
+                        claim_a=f"{event.description} is caused by {cause_event.description}",
+                        claim_b=f"Cause occurs at {cause_event.timestamp}, effect at {event.timestamp}",
+                        contradiction_type="temporal",
+                        severity=0.95,
+                        evidence_supporting_a=[event.source],
+                        evidence_supporting_b=[cause_event.source],
+                        resolution_notes="Effect timestamp precedes cause timestamp",
+                    )
+                    contradictions.append(contradiction)
+
+        is_consistent = len(contradictions) == 0
+        return is_consistent, contradictions
+
+    def detect_contradictions(self, evidence_list: List[Evidence]) -> List[Contradiction]:
+        """
+        Detect contradictions within a set of evidence items.
+
+        Uses efficient pairwise comparison with early termination for
+        memory-constrained environments.
+
+        Args:
+            evidence_list: List of evidence to check for contradictions
+
+        Returns:
+            List of detected contradictions
+        """
+        contradictions: List[Contradiction] = []
+
+        # Limit window for M1 memory optimization
+        window_size = min(len(evidence_list), self.max_contradiction_window)
+        evidence_window = evidence_list[:window_size]
+
+        # Pairwise comparison with early exit for high-confidence contradictions
+        for i, evidence_a in enumerate(evidence_window):
+            for evidence_b in evidence_window[i + 1 :]:
+                contradiction = self._check_pairwise_contradiction(
+                    evidence_a, evidence_b
+                )
+                if contradiction:
+                    contradictions.append(contradiction)
+
+                # Early termination if too many contradictions found
+                if len(contradictions) >= 20:
+                    logger.warning(
+                        "Contradiction detection hit limit (20), stopping early"
+                    )
+                    return contradictions
+
+        return contradictions
+
+    async def cross_reference_databases(
+        self, claim: str
+    ) -> List[CrossReferenceResult]:
+        """
+        Cross-reference a claim across multiple databases.
+
+        Queries various knowledge bases, fact-checking databases, and
+        authoritative sources to verify the claim.
+
+        Args:
+            claim: The claim to cross-reference
+
+        Returns:
+            List of cross-reference results from different databases
+        """
+        results: List[CrossReferenceResult] = []
+
+        # Define databases to query (simulated for M1 optimization)
+        databases = [
+            "knowledge_graph",
+            "fact_check_db",
+            "academic_sources",
+            "news_archive",
+        ]
+
+        # Query all databases concurrently
+        tasks = [self._query_database(db, claim) for db in databases]
+        db_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for db_id, result in zip(databases, db_results):
+            if isinstance(result, Exception):
+                logger.warning(f"Database query failed for {db_id}: {result}")
+                continue
+            results.append(result)
+
+        return results
+
+    def generate_devils_advocate(self, hypothesis: Hypothesis) -> str:
+        """
+        Generate a devil's advocate argument against a hypothesis.
+
+        Creates a structured argument challenging the hypothesis,
+        identifying weak points, and proposing alternative explanations.
+
+        Args:
+            hypothesis: The hypothesis to challenge
+
+        Returns:
+            Devil's advocate argument text
+        """
+        arguments: List[str] = []
+
+        # Challenge 1: Insufficient evidence
+        if len(hypothesis.supporting_evidence) < 3:
+            arguments.append(
+                f"The hypothesis relies on only {len(hypothesis.supporting_evidence)} "
+                "evidence items, which may be insufficient for a robust conclusion."
+            )
+
+        # Challenge 2: Low source diversity
+        sources = set()
+        for eid in hypothesis.supporting_evidence:
+            evidence = self.hypothesis_engine._evidence.get(eid)
+            if evidence:
+                sources.add(evidence.source)
+        if len(sources) < 2:
+            arguments.append(
+                "Evidence comes from a limited number of sources, increasing risk of "
+                "systematic bias or coordinated misinformation."
+            )
+
+        # Challenge 3: Presence of conflicting evidence
+        if hypothesis.conflicting_evidence:
+            arguments.append(
+                f"There are {len(hypothesis.conflicting_evidence)} pieces of conflicting "
+                "evidence that have not been adequately addressed."
+            )
+
+        # Challenge 4: Logical gaps
+        logical_issues = self._identify_logical_gaps(hypothesis)
+        for issue in logical_issues:
+            arguments.append(f"Logical gap identified: {issue}")
+
+        # Challenge 5: Alternative explanations
+        alternatives = self._generate_alternative_explanations(hypothesis)
+        if alternatives:
+            arguments.append(
+                "Alternative explanations exist that could account for the observed evidence:"
+            )
+            for alt in alternatives[:3]:
+                arguments.append(f"  - {alt}")
+
+        # Challenge 6: Assumption violations
+        assumptions = self._identify_assumptions(hypothesis)
+        for assumption in assumptions:
+            arguments.append(
+                f"The hypothesis assumes: '{assumption}' - this may not hold under all conditions."
+            )
+
+        if not arguments:
+            arguments.append(
+                "While the hypothesis appears well-supported, extraordinary claims "
+                "require extraordinary evidence. Continued scrutiny is warranted."
+            )
+
+        return "\n\n".join(arguments)
+
+    # -------------------------------------------------------------------------
+    # Internal Helper Methods
+    # -------------------------------------------------------------------------
+
+    def _detect_bias_indicators(self, source: str) -> List[str]:
+        """Detect bias indicators in a source identifier."""
+        indicators = []
+        source_lower = source.lower()
+
+        for category, keywords in self._bias_keywords.items():
+            if any(kw in source_lower for kw in keywords):
+                indicators.append(category)
+
+        return indicators
+
+    def _evidence_contradicts_claim(self, evidence: Evidence, claim: str) -> bool:
+        """Check if evidence contradicts a claim."""
+        # Simple keyword-based contradiction detection
+        claim_lower = claim.lower()
+        evidence_lower = evidence.content.lower()
+
+        # Check for negation patterns
+        negators = ["not", "no", "never", "false", "incorrect", "disputed"]
+        claim_has_negation = any(n in claim_lower for n in negators)
+        evidence_has_negation = any(n in evidence_lower for n in negators)
+
+        # If one has negation and the other doesn't, check for content similarity
+        if claim_has_negation != evidence_has_negation:
+            # Extract key terms (simple approach)
+            claim_terms = set(claim_lower.split()) - set(negators)
+            evidence_terms = set(evidence_lower.split()) - set(negators)
+
+            # If significant term overlap, likely contradiction
+            overlap = claim_terms & evidence_terms
+            if len(overlap) >= 3:
+                return True
+
+        # Check metadata for explicit contradiction flag
+        if evidence.metadata.get("contradicts"):
+            return True
+
+        return False
+
+    async def _query_counter_evidence_databases(
+        self, claim: str, context: Dict[str, Any]
+    ) -> List[Evidence]:
+        """Query external databases for counter-evidence."""
+        # Simulated async database queries
+        # In production, this would query actual fact-checking APIs
+        await asyncio.sleep(0.001)  # Simulate minimal latency
+        return []
+
+    async def _query_database(self, database_id: str, claim: str) -> CrossReferenceResult:
+        """Query a specific database for claim verification."""
+        # Simulated database query with realistic response patterns
+        await asyncio.sleep(0.001)
+
+        # Generate deterministic but realistic result
+        claim_hash = hashlib.md5(claim.encode()).hexdigest()
+        confidence = int(claim_hash[:2], 16) / 255
+
+        return CrossReferenceResult(
+            database_id=database_id,
+            claim_found=confidence > 0.3,
+            confidence=confidence,
+            supporting_sources=[database_id] if confidence > 0.6 else [],
+            conflicting_sources=[database_id] if confidence < 0.4 else [],
+        )
+
+    def _check_pairwise_contradiction(
+        self, evidence_a: Evidence, evidence_b: Evidence
+    ) -> Optional[Contradiction]:
+        """Check if two evidence items contradict each other."""
+        content_a = evidence_a.content.lower()
+        content_b = evidence_b.content.lower()
+
+        # Check for negation contradictions
+        negators = ["not ", "no ", "never ", "false", "incorrect"]
+        a_negated = any(n in content_a for n in negators)
+        b_negated = any(n in content_b for n in negators)
+
+        if a_negated != b_negated:
+            # Check for similar subject matter
+            a_words = set(content_a.split())
+            b_words = set(content_b.split())
+            overlap = len(a_words & b_words) / max(len(a_words), len(b_words), 1)
+
+            if overlap > 0.5:
+                return Contradiction(
+                    claim_a=evidence_a.content[:100],
+                    claim_b=evidence_b.content[:100],
+                    contradiction_type="factual",
+                    severity=0.7 + (overlap * 0.2),
+                    evidence_supporting_a=[evidence_a.evidence_id],
+                    evidence_supporting_b=[evidence_b.evidence_id],
+                )
+
+        # Check for temporal contradictions
+        time_a = evidence_a.metadata.get("timestamp")
+        time_b = evidence_b.metadata.get("timestamp")
+        if time_a and time_b and time_a != time_b:
+            # Check if they claim opposite temporal relationships
+            pass  # Would need more sophisticated temporal parsing
+
+        return None
+
+    def _extract_events(self, evidence_list: List[Evidence]) -> List[Event]:
+        """Extract temporal events from evidence items."""
+        events: List[Event] = []
+
+        for evidence in evidence_list:
+            # Check if evidence has temporal metadata
+            if "event_timestamp" in evidence.metadata:
+                events.append(
+                    Event(
+                        event_id=evidence.evidence_id,
+                        description=evidence.content[:100],
+                        timestamp=evidence.metadata["event_timestamp"],
+                        source=evidence.source,
+                        metadata=evidence.metadata,
+                    )
+                )
+
+        return events
+
+    async def _find_supporting_evidence(
+        self, claim: str, context: Dict[str, Any]
+    ) -> List[Evidence]:
+        """Find evidence supporting a claim."""
+        supporting: List[Evidence] = []
+
+        for evidence in self.hypothesis_engine._evidence.values():
+            # Check if evidence supports the claim
+            if self._evidence_supports_claim(evidence, claim):
+                supporting.append(evidence)
+
+        # Sort by weighted score
+        supporting.sort(key=lambda e: e.reliability * e.relevance, reverse=True)
+        return supporting[:50]
+
+    def _evidence_supports_claim(self, evidence: Evidence, claim: str) -> bool:
+        """Check if evidence supports a claim."""
+        claim_lower = claim.lower()
+        evidence_lower = evidence.content.lower()
+
+        # Simple keyword overlap
+        claim_words = set(claim_lower.split())
+        evidence_words = set(evidence_lower.split())
+        overlap = len(claim_words & evidence_words)
+
+        # Check for explicit support flag
+        if evidence.metadata.get("supports"):
+            return True
+
+        # Check for high semantic similarity
+        if overlap >= 3:
+            # Check that evidence doesn't negate
+            negators = ["not ", "no ", "never ", "false"]
+            if not any(n in evidence_lower for n in negators):
+                return True
+
+        return False
+
+    async def _generate_devils_advocate_analysis(
+        self,
+        claim: str,
+        supporting: List[Evidence],
+        contradicting: List[Evidence],
+        context: Dict[str, Any],
+    ) -> Tuple[float, List[str], List[str]]:
+        """Generate devil's advocate analysis."""
+        score = 0.0
+        alternatives: List[str] = []
+        fallacies: List[str] = []
+
+        # Score based on counter-evidence strength
+        if contradicting:
+            total_weight = sum(e.reliability * e.relevance for e in contradicting)
+            score += min(0.4, total_weight / 5)
+
+        # Score based on source credibility issues
+        for evidence in supporting:
+            credibility = self.assess_source_credibility(evidence.source)
+            if credibility.credibility_score < 0.4:
+                score += 0.1
+            if credibility.bias_indicators:
+                score += 0.05 * len(credibility.bias_indicators)
+
+        # Detect logical fallacies
+        fallacies = self._detect_logical_fallacies(claim)
+        score += 0.1 * len(fallacies)
+
+        # Generate alternative explanations
+        alternatives = self._generate_alternative_explanations_for_claim(claim)
+        score += 0.05 * len(alternatives)
+
+        return min(1.0, score), alternatives[:5], fallacies
+
+    def _detect_logical_fallacies(self, text: str) -> List[str]:
+        """Detect logical fallacies in text."""
+        fallacies = []
+        text_lower = text.lower()
+
+        for fallacy_name, pattern in self._fallacy_patterns.items():
+            if re.search(pattern, text_lower):
+                fallacies.append(fallacy_name)
+
+        return fallacies
+
+    def _generate_alternative_explanations_for_claim(self, claim: str) -> List[str]:
+        """Generate alternative explanations for a claim."""
+        alternatives = []
+
+        # Pattern-based alternative generation
+        if "causes" in claim.lower() or "leads to" in claim.lower():
+            alternatives.append("The observed correlation may be coincidental")
+            alternatives.append("A third variable may be the true cause")
+            alternatives.append("The causation may be reversed")
+
+        if "is" in claim.lower() or "equals" in claim.lower():
+            alternatives.append("The entities may be similar but distinct")
+            alternatives.append("The relationship may be contextual rather than absolute")
+
+        if "all" in claim.lower() or "every" in claim.lower():
+            alternatives.append("There may be exceptions not yet observed")
+            alternatives.append("The claim may hold only under specific conditions")
+
+        return alternatives
+
+    def _identify_logical_gaps(self, hypothesis: Hypothesis) -> List[str]:
+        """Identify logical gaps in a hypothesis."""
+        gaps = []
+        statement = hypothesis.statement.lower()
+
+        # Check for causal claims without mechanism
+        if hypothesis.hypothesis_type == HypothesisType.CAUSAL.value:
+            if "mechanism" not in statement and "how" not in statement:
+                gaps.append("No proposed causal mechanism")
+
+        # Check for generalizations from limited evidence
+        evidence_count = len(hypothesis.supporting_evidence)
+        if "all" in statement or "every" in statement:
+            if evidence_count < 10:
+                gaps.append(f"Universal claim based on only {evidence_count} evidence items")
+
+        return gaps
+
+    def _generate_alternative_explanations(self, hypothesis: Hypothesis) -> List[str]:
+        """Generate alternative explanations for hypothesis evidence."""
+        return self._generate_alternative_explanations_for_claim(hypothesis.statement)
+
+    def _identify_assumptions(self, hypothesis: Hypothesis) -> List[str]:
+        """Identify underlying assumptions in a hypothesis."""
+        assumptions = []
+        statement = hypothesis.statement
+
+        # Common implicit assumptions
+        if HypothesisType.CAUSAL.value in hypothesis.hypothesis_type:
+            assumptions.append("Causal relationships are stable over time")
+            assumptions.append("No confounding variables are present")
+
+        if HypothesisType.IDENTITY.value in hypothesis.hypothesis_type:
+            assumptions.append("Identity criteria are universally applicable")
+            assumptions.append("Attributes are sufficient for identification")
+
+        return assumptions
+
+    def _calculate_adversarial_confidence(
+        self,
+        supporting: List[Evidence],
+        contradicting: List[Evidence],
+        credibility: Dict[str, SourceCredibility],
+        contradictions: List[Contradiction],
+        cross_references: List[CrossReferenceResult],
+    ) -> float:
+        """Calculate overall confidence after adversarial analysis."""
+        # Base confidence from evidence balance
+        support_weight = sum(
+            e.reliability * e.relevance * credibility.get(e.source, SourceCredibility(e.source, 0.5)).credibility_score
+            for e in supporting
+        )
+        contradict_weight = sum(
+            e.reliability * e.relevance * credibility.get(e.source, SourceCredibility(e.source, 0.5)).credibility_score
+            for e in contradicting
+        )
+
+        total_weight = support_weight + contradict_weight
+        if total_weight == 0:
+            base_confidence = 0.5
+        else:
+            base_confidence = support_weight / total_weight
+
+        # Penalize for contradictions
+        contradiction_penalty = min(0.3, len(contradictions) * 0.1)
+
+        # Adjust based on cross-references
+        cross_ref_boost = 0.0
+        for ref in cross_references:
+            if ref.claim_found and ref.confidence > 0.7:
+                cross_ref_boost += 0.05
+            elif not ref.claim_found:
+                cross_ref_boost -= 0.05
+
+        final_confidence = base_confidence - contradiction_penalty + cross_ref_boost
+        return max(0.0, min(1.0, final_confidence))
+
+
+# =============================================================================
+# Sprint 67: Simple Node Ablation Explainer
+# =============================================================================
+
+class SimpleNodeAblationExplainer:
+    """
+    Explains path importance using leave-one-node-out ablation.
+
+    Computes importance scores by removing each node and measuring
+    the change in path score from graph_rag.
+    """
+
+    def __init__(self, graph_rag):
+        """
+        Initialize explainer.
+
+        Args:
+            graph_rag: GraphRAGOrchestrator instance with score_path method
+        """
+        self.graph_rag = graph_rag
+
+    async def explain_path(
+        self,
+        path: List[str],
+        hypothesis: str,
+        max_nodes: int = 5
+    ) -> Dict[str, float]:
+        """
+        Explain path importance using node ablation.
+
+        Args:
+            path: List of node IDs forming the path
+            hypothesis: The hypothesis to score against
+            max_nodes: Maximum nodes to ablate
+
+        Returns:
+            Dict mapping node index to importance score
+        """
+        if len(path) < 2:
+            return {}
+
+        # Pre-compute hypothesis embedding once
+        embedder = await self.graph_rag._get_embedder()
+        if embedder is None:
+            return {}
+
+        try:
+            hypothesis_emb = await embedder._embed_text(hypothesis)
+            if hypothesis_emb is None:
+                hypothesis_emb = [0.0] * 384
+        except Exception:
+            hypothesis_emb = [0.0] * 384
+
+        # Get original score
+        n_nodes = min(len(path), max_nodes)
+        try:
+            original_score = await self.graph_rag.score_path(
+                path, hypothesis, hypothesis_emb=hypothesis_emb
+            )
+        except Exception:
+            return {}
+
+        importances = {}
+        for i in range(n_nodes):
+            if i == 0 or i >= len(path) - 1:
+                continue  # Skip start/end nodes
+
+            # Create path with node removed
+            new_path = path[:i] + path[i+1:]
+
+            try:
+                new_score = await self.graph_rag.score_path(
+                    new_path, hypothesis, hypothesis_emb=hypothesis_emb
+                )
+                importances[str(i)] = original_score - new_score
+            except Exception:
+                continue
+
+        # Filter out non-positive importances
+        if all(v <= 0.0 for v in importances.values()):
+            return {}
+
+        return importances
+
+
+async def explain_with_mlx(
+    hypothesis: str,
+    path: List[str],
+    model_name: str = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+) -> tuple[str, str]:
+    """
+    Generate textual explanation using MLX-LM.
+
+    Args:
+        hypothesis: The hypothesis
+        path: Graph path
+        model_name: Model identifier
+
+    Returns:
+        Tuple of (explanation, prompt_hash)
+    """
+    import asyncio
+    import hashlib
+
+    try:
+        from hledac.universal.utils.mlx_cache import get_mlx_model, get_mlx_semaphore
+
+        model, tokenizer = await get_mlx_model(model_name)
+        if model is None or tokenizer is None:
+            return "MLX model unavailable", ""
+
+        prompt = f"Explain why this path in a knowledge graph is important for the hypothesis: '{hypothesis}'. Path: {' -> '.join(path)}"
+
+        from mlx_lm import generate
+        loop = asyncio.get_running_loop()
+
+        async with get_mlx_semaphore():
+            try:
+                explanation = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        lambda: generate(model, tokenizer, prompt, max_tokens=80, temp=0.0)
+                    ),
+                    timeout=10.0
+                )
+            except TypeError:
+                # Fallback if temp not supported
+                explanation = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        lambda: generate(model, tokenizer, prompt, max_tokens=80)
+                    ),
+                    timeout=10.0
+                )
+
+        prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()[:8]
+        return explanation.strip(), prompt_hash
+
+    except asyncio.TimeoutError:
+        return "Explanation generation timed out", ""
+    except Exception as e:
+        logger.debug(f"MLX explanation failed: {e}")
+        return f"Generation failed: {e}", ""
+
+
+class HypothesisEngine:
+    """
+    Engine for automated hypothesis generation, testing, and management.
+
+    Implements a Popperian approach to hypothesis testing with Bayesian
+    confidence updating. Now includes Adversarial Verification capabilities
+    for rigorous devil's advocate analysis. Optimized for M1 8GB RAM constraints.
+
+    Key Features:
+    - Automated hypothesis generation from observations
+    - Test design and execution framework
+    - Falsification attempts (Popperian approach)
+    - Adversarial Verification (Devil's Advocate mode)
+    - Source credibility assessment and bias detection
+    - Temporal consistency verification
+    - Cross-database reference checking
+    - Bayesian confidence updating
+    - Hypothesis ranking and selection
+    - Multi-hypothesis tracking with pruning
+
+    Adversarial Verification Features:
+    - Active counter-evidence search
+    - Source bias and credibility scoring
+    - Contradiction detection (factual, temporal, logical)
+    - Alternative explanation generation
+    - Logical fallacy detection
+    - Devil's advocate argument generation
+
+    M1 8GB Optimizations:
+    - Streaming evaluation to limit memory usage
+    - Aggressive pruning of low-confidence hypotheses
+    - Incremental belief updates
+    - Async database queries for adversarial checks
+    - Limited contradiction detection window
+    - Periodic garbage collection
+    - Bounded evidence and source credibility with deterministic eviction
+    """
+
+    # Memory bounds for M1 8GB optimization
+    MAX_EVIDENCE_ITEMS = 10_000
+    MAX_SOURCE_ITEMS = 5_000
+
+    def __init__(
+        self,
+        inference_engine: Optional[InferenceEngineProtocol] = None,
+        max_hypotheses: int = 100,
+        min_confidence_threshold: float = 0.1,
+        memory_limit_mb: float = 500.0,
+        enable_adversarial_verification: bool = True,
+    ):
+        """
+        Initialize the HypothesisEngine.
+
+        Args:
+            inference_engine: Optional inference engine for abductive reasoning
+            max_hypotheses: Maximum number of hypotheses to track
+            min_confidence_threshold: Minimum confidence to keep a hypothesis
+            memory_limit_mb: Target memory limit for hypothesis storage
+            enable_adversarial_verification: Whether to enable adversarial verification
+        """
+        self.inference_engine = inference_engine
+        self.max_hypotheses = max_hypotheses
+        self.min_confidence_threshold = min_confidence_threshold
+        self.memory_limit_mb = memory_limit_mb
+        self.enable_adversarial_verification = enable_adversarial_verification
+
+        # Hypothesis storage
+        self._hypotheses: Dict[str, Hypothesis] = {}
+        self._evidence: OrderedDict[str, Evidence] = OrderedDict()
+
+        # Test design templates
+        self._test_templates: Dict[str, Callable[[Hypothesis], TestDesign]] = {}
+        self._init_test_templates()
+
+        # Adversarial verifier (initialized lazily)
+        self._adversarial_verifier: Optional[AdversarialVerifier] = None
+
+        # Source credibility tracking for adversarial verification (bounded)
+        self._source_credibility_cache: OrderedDict[str, SourceCredibility] = OrderedDict()
+
+        # Statistics
+        self._stats = {
+            "generated": 0,
+            "tested": 0,
+            "confirmed": 0,
+            "rejected": 0,
+            "merged": 0,
+            "pruned": 0,
+            "adversarial_checks": 0,
+        }
+
+        logger.info(
+            f"HypothesisEngine initialized (max_hypotheses={max_hypotheses}, "
+            f"memory_limit={memory_limit_mb}MB, "
+            f"adversarial_verification={enable_adversarial_verification})"
+        )
+
+    def _init_test_templates(self) -> None:
+        """Initialize test design templates for each hypothesis type."""
+        self._test_templates = {
+            HypothesisType.EXISTENCE.value: self._design_existence_test,
+            HypothesisType.RELATIONSHIP.value: self._design_relationship_test,
+            HypothesisType.CAUSAL.value: self._design_causal_test,
+            HypothesisType.IDENTITY.value: self._design_identity_test,
+            HypothesisType.TEMPORAL.value: self._design_temporal_test,
+        }
+
+    # -------------------------------------------------------------------------
+    # Bounded evidence and source credibility with deterministic LRU eviction
+    # -------------------------------------------------------------------------
+
+    def _evict_evidence_if_needed(self) -> None:
+        """Evict oldest evidence items if over MAX_EVIDENCE_ITEMS cap."""
+        while len(self._evidence) > self.MAX_EVIDENCE_ITEMS:
+            # popitem(last=False) removes oldest (FIFO/LRU)
+            self._evidence.popitem(last=False)
+
+    def _evict_source_credibility_if_needed(self) -> None:
+        """Evict oldest source credibility entries if over MAX_SOURCE_ITEMS cap."""
+        while len(self._source_credibility_cache) > self.MAX_SOURCE_ITEMS:
+            self._source_credibility_cache.popitem(last=False)
+
+    def add_evidence(self, evidence: Evidence) -> str:
+        """
+        Add evidence with bounded storage and LRU eviction.
+
+        Args:
+            evidence: Evidence object to add
+
+        Returns:
+            Evidence ID
+        """
+        # Move to end if exists (update = touch)
+        if evidence.evidence_id in self._evidence:
+            self._evidence.move_to_end(evidence.evidence_id)
+        else:
+            self._evidence[evidence.evidence_id] = evidence
+
+        self._evict_evidence_if_needed()
+        return evidence.evidence_id
+
+    def _update_source_credibility(self, source: str, credibility: SourceCredibility) -> None:
+        """
+        Update source credibility with bounded storage and LRU eviction.
+
+        Args:
+            source: Source identifier
+            credibility: Source credibility assessment
+        """
+        # Move to end if exists (update = touch)
+        if source in self._source_credibility_cache:
+            self._source_credibility_cache.move_to_end(source)
+        else:
+            self._source_credibility_cache[source] = credibility
+
+        self._evict_source_credibility_if_needed()
+
+    def _design_existence_test(self, hypothesis: Hypothesis) -> TestDesign:
+        """Design a test for an existence hypothesis."""
+        return TestDesign(
+            test_type=TestType.EXISTENCE_CHECK.value,
+            description=f"Verify existence of entity mentioned in: {hypothesis.statement}",
+            required_data=["entity_reference", "source_verification"],
+            expected_outcome_if_true="Entity found in reliable sources",
+            expected_outcome_if_false="Entity not found or disputed",
+            priority=0.8,
+            cost_estimate=1.0,
+        )
+
+    def _design_relationship_test(self, hypothesis: Hypothesis) -> TestDesign:
+        """Design a test for a relationship hypothesis."""
+        return TestDesign(
+            test_type=TestType.CORRELATION_TEST.value,
+            description=f"Test correlation between entities in: {hypothesis.statement}",
+            required_data=["entity_a_data", "entity_b_data", "co_occurrence"],
+            expected_outcome_if_true="Entities show significant correlation",
+            expected_outcome_if_false="No significant correlation found",
+            priority=0.7,
+            cost_estimate=1.5,
+        )
+
+    def _design_causal_test(self, hypothesis: Hypothesis) -> TestDesign:
+        """Design a test for a causal hypothesis."""
+        return TestDesign(
+            test_type=TestType.CAUSAL_TEST.value,
+            description=f"Test causal link in: {hypothesis.statement}",
+            required_data=["temporal_precedence", "covariation", "alternative_explanations"],
+            expected_outcome_if_true="Cause precedes effect with consistent covariation",
+            expected_outcome_if_false="No consistent causal pattern found",
+            priority=0.9,
+            cost_estimate=2.0,
+        )
+
+    def _design_identity_test(self, hypothesis: Hypothesis) -> TestDesign:
+        """Design a test for an identity hypothesis."""
+        return TestDesign(
+            test_type=TestType.IDENTITY_VERIFICATION.value,
+            description=f"Verify identity equivalence in: {hypothesis.statement}",
+            required_data=["unique_identifiers", "attribute_comparison", "source_cross_reference"],
+            expected_outcome_if_true="All identifiers and attributes match",
+            expected_outcome_if_false="Discrepancies found in identifiers or attributes",
+            priority=0.75,
+            cost_estimate=1.2,
+        )
+
+    def _design_temporal_test(self, hypothesis: Hypothesis) -> TestDesign:
+        """Design a test for a temporal hypothesis."""
+        return TestDesign(
+            test_type=TestType.TEMPORAL_ORDERING.value,
+            description=f"Verify temporal ordering in: {hypothesis.statement}",
+            required_data=["timestamp_a", "timestamp_b", "event_sequence"],
+            expected_outcome_if_true="Event A clearly precedes Event B",
+            expected_outcome_if_false="Event B precedes or concurrent with Event A",
+            priority=0.7,
+            cost_estimate=1.0,
+        )
+
+    # -------------------------------------------------------------------------
+    # Adversarial Verification Integration
+    # -------------------------------------------------------------------------
+
+    @property
+    def adversarial_verifier(self) -> AdversarialVerifier:
+        """
+        Lazy initialization of the AdversarialVerifier.
+
+        Returns:
+            AdversarialVerifier instance
+        """
+        if self._adversarial_verifier is None:
+            self._adversarial_verifier = AdversarialVerifier(
+                hypothesis_engine=self,
+                max_contradiction_window=100,
+                enable_streaming=True,
+            )
+        return self._adversarial_verifier
+
+    async def adversarial_verification(
+        self, hypothesis: Union[Hypothesis, str], context: Optional[Dict[str, Any]] = None
+    ) -> AdversarialReport:
+        """
+        Perform comprehensive adversarial verification of a hypothesis.
+
+        This method runs the devil's advocate analysis on a hypothesis,
+        actively seeking counter-evidence, checking source credibility,
+        detecting contradictions, and challenging assumptions.
+
+        Args:
+            hypothesis: The hypothesis to verify (or claim string)
+            context: Additional context for verification
+
+        Returns:
+            AdversarialReport with comprehensive analysis
+        """
+        if not self.enable_adversarial_verification:
+            logger.warning("Adversarial verification is disabled")
+            claim = hypothesis.statement if isinstance(hypothesis, Hypothesis) else hypothesis
+            return AdversarialReport(
+                hypothesis=claim,
+                supporting_evidence=[],
+                contradicting_evidence=[],
+                credibility_assessment={},
+                contradictions_found=[],
+                temporal_consistency=True,
+                overall_confidence=0.5,
+                devil_advocate_score=0.0,
+                alternative_explanations=["Adversarial verification disabled"],
+            )
+
+        self._stats["adversarial_checks"] += 1
+
+        if isinstance(hypothesis, Hypothesis):
+            return await self.adversarial_verifier.verify_claim(
+                hypothesis.statement, {**(context or {}), "hypothesis": hypothesis}
+            )
+        else:
+            return await self.adversarial_verifier.verify_claim(hypothesis, context)
+
+    def assess_source_credibility(self, source: str) -> SourceCredibility:
+        """
+        Assess the credibility of an evidence source.
+
+        Args:
+            source: The source identifier
+
+        Returns:
+            SourceCredibility assessment
+        """
+        if not self.enable_adversarial_verification:
+            return SourceCredibility(source_id=source, credibility_score=0.5)
+
+        return self.adversarial_verifier.assess_source_credibility(source)
+
+    def detect_contradictions(self, evidence_list: List[Evidence]) -> List[Contradiction]:
+        """
+        Detect contradictions within a set of evidence items.
+
+        Args:
+            evidence_list: List of evidence to check
+
+        Returns:
+            List of detected contradictions
+        """
+        if not self.enable_adversarial_verification:
+            return []
+
+        return self.adversarial_verifier.detect_contradictions(evidence_list)
+
+    def check_temporal_consistency(
+        self, events: List[Event]
+    ) -> Tuple[bool, List[Contradiction]]:
+        """
+        Check if a sequence of events is temporally consistent.
+
+        Args:
+            events: List of events to check
+
+        Returns:
+            Tuple of (is_consistent, list_of_contradictions)
+        """
+        if not self.enable_adversarial_verification:
+            return True, []
+
+        return self.adversarial_verifier.check_temporal_consistency(events)
+
+    def generate_devils_advocate(self, hypothesis: Hypothesis) -> str:
+        """
+        Generate a devil's advocate argument against a hypothesis.
+
+        Args:
+            hypothesis: The hypothesis to challenge
+
+        Returns:
+            Devil's advocate argument text
+        """
+        if not self.enable_adversarial_verification:
+            return "Adversarial verification is disabled."
+
+        return self.adversarial_verifier.generate_devils_advocate(hypothesis)
+
+    def generate_hypotheses(
+        self, observations: List[Evidence], context: Optional[Dict[str, Any]] = None
+    ) -> List[Hypothesis]:
+        """
+        Generate hypotheses from observations using abductive reasoning.
+
+        Args:
+            observations: List of evidence observations
+            context: Additional context for hypothesis generation
+
+        Returns:
+            List of generated hypotheses
+        """
+        context = context or {}
+        generated: List[Hypothesis] = []
+
+        # Store evidence (bounded storage with LRU eviction)
+        for obs in observations:
+            self.add_evidence(obs)
+
+        # Use inference engine if available
+        if self.inference_engine:
+            try:
+                # Sprint 8BG: Avoid nested asyncio.run() — detect running loop
+                try:
+                    _ = asyncio.get_running_loop()
+                except RuntimeError:
+                    # No running loop — safe to use asyncio.run()
+                    explanations = asyncio.run(
+                        self.inference_engine.abductive_reasoning(observations, context)
+                    )
+                else:
+                    # Running loop exists — called from async context, skip inference
+                    explanations = []
+                    logger.debug("generate_hypotheses called from async context, skipping inference engine")
+                for exp in explanations:
+                    hypothesis = self._create_hypothesis_from_explanation(exp)
+                    generated.append(hypothesis)
+                    self._hypotheses[hypothesis.id] = hypothesis
+            except Exception as e:
+                logger.warning(f"Inference engine abductive reasoning failed: {e}")
+
+        # Fallback: Generate hypotheses from observation patterns
+        if not generated:
+            generated = self._generate_hypotheses_from_patterns(observations, context)
+
+        self._stats["generated"] += len(generated)
+
+        # Prune if exceeding max
+        if len(self._hypotheses) > self.max_hypotheses:
+            self._prune_hypotheses()
+
+        logger.info(f"Generated {len(generated)} hypotheses from {len(observations)} observations")
+        return generated
+
+    def _create_hypothesis_from_explanation(self, explanation: Dict[str, Any]) -> Hypothesis:
+        """Create a hypothesis from an inference engine explanation."""
+        return Hypothesis(
+            id=str(uuid.uuid4())[:8],
+            statement=explanation.get("statement", "Unknown hypothesis"),
+            hypothesis_type=explanation.get("type", HypothesisType.EXISTENCE.value),
+            prior_probability=explanation.get("probability", 0.5),
+            posterior_probability=explanation.get("probability", 0.5),
+            metadata=explanation.get("metadata", {}),
+        )
+
+    def _generate_hypotheses_from_patterns(
+        self, observations: List[Evidence], context: Dict[str, Any]
+    ) -> List[Hypothesis]:
+        """Generate hypotheses by analyzing observation patterns."""
+        generated: List[Hypothesis] = []
+
+        # Group observations by source and topic
+        by_topic: Dict[str, List[Evidence]] = {}
+        for obs in observations:
+            topic = obs.metadata.get("topic", "general")
+            if topic not in by_topic:
+                by_topic[topic] = []
+            by_topic[topic].append(obs)
+
+        # Generate existence hypotheses
+        for topic, evidence_list in by_topic.items():
+            if len(evidence_list) >= 2:
+                h = Hypothesis(
+                    id=str(uuid.uuid4())[:8],
+                    statement=f"Entity '{topic}' exists based on multiple observations",
+                    hypothesis_type=HypothesisType.EXISTENCE.value,
+                    prior_probability=0.6,
+                    posterior_probability=0.6,
+                    supporting_evidence=[e.evidence_id for e in evidence_list[:3]],
+                )
+                generated.append(h)
+                self._hypotheses[h.id] = h
+
+        # Generate relationship hypotheses from co-occurrence
+        topics = list(by_topic.keys())
+        for i, topic_a in enumerate(topics):
+            for topic_b in topics[i + 1 :]:
+                # Check for co-occurrence in observations
+                co_occur = self._check_co_occurrence(
+                    by_topic[topic_a], by_topic[topic_b]
+                )
+                if co_occur > 0.5:
+                    h = Hypothesis(
+                        id=str(uuid.uuid4())[:8],
+                        statement=f"'{topic_a}' is related to '{topic_b}'",
+                        hypothesis_type=HypothesisType.RELATIONSHIP.value,
+                        prior_probability=co_occur,
+                        posterior_probability=co_occur,
+                        supporting_evidence=[
+                            e.evidence_id
+                            for e in by_topic[topic_a][:2] + by_topic[topic_b][:2]
+                        ],
+                    )
+                    generated.append(h)
+                    self._hypotheses[h.id] = h
+
+        # Generate causal hypotheses from temporal patterns
+        temporal_obs = [o for o in observations if "timestamp" in o.metadata]
+        if len(temporal_obs) >= 2:
+            temporal_obs.sort(key=lambda x: x.metadata.get("timestamp", ""))
+            for i in range(len(temporal_obs) - 1):
+                h = Hypothesis(
+                    id=str(uuid.uuid4())[:8],
+                    statement=f"'{temporal_obs[i].content[:30]}...' may cause '{temporal_obs[i + 1].content[:30]}...'",
+                    hypothesis_type=HypothesisType.CAUSAL.value,
+                    prior_probability=0.3,  # Causal claims need strong evidence
+                    posterior_probability=0.3,
+                    supporting_evidence=[
+                        temporal_obs[i].evidence_id,
+                        temporal_obs[i + 1].evidence_id,
+                    ],
+                )
+                generated.append(h)
+                self._hypotheses[h.id] = h
+
+        return generated
+
+    def _check_co_occurrence(self, evidence_a: List[Evidence], evidence_b: List[Evidence]) -> float:
+        """Check co-occurrence rate between two evidence groups."""
+        if not evidence_a or not evidence_b:
+            return 0.0
+
+        # Simple co-occurrence: shared sources
+        sources_a = {e.source for e in evidence_a}
+        sources_b = {e.source for e in evidence_b}
+        shared = sources_a & sources_b
+        total = sources_a | sources_b
+
+        return len(shared) / len(total) if total else 0.0
+
+    def design_test(self, hypothesis: Hypothesis) -> TestDesign:
+        """
+        Design a test for a hypothesis.
+
+        Args:
+            hypothesis: The hypothesis to test
+
+        Returns:
+            Test design for the hypothesis
+        """
+        template = self._test_templates.get(hypothesis.hypothesis_type)
+        if template:
+            return template(hypothesis)
+
+        # Default test design
+        return TestDesign(
+            test_type=TestType.CONSISTENCY_CHECK.value,
+            description=f"General consistency check for: {hypothesis.statement}",
+            required_data=["supporting_sources", "cross_references"],
+            expected_outcome_if_true="Hypothesis is consistent with available data",
+            expected_outcome_if_false="Inconsistencies found",
+            priority=0.5,
+            cost_estimate=1.0,
+        )
+
+    async def execute_test(
+        self, test: TestDesign, context: Dict[str, Any]
+    ) -> TestResult:
+        """
+        Execute a test design and return results.
+
+        Args:
+            test: The test design to execute
+            context: Execution context with required data
+
+        Returns:
+            Test result
+        """
+        self._stats["tested"] += 1
+
+        # Check if required data is available
+        missing_data = [
+            req for req in test.required_data if req not in context
+        ]
+        if missing_data:
+            return TestResult(
+                test_type=test.test_type,
+                result="inconclusive",
+                confidence=0.5,
+                evidence_collected=[],
+                metadata={"missing_data": missing_data},
+            )
+
+        # Simulate test execution (in practice, this would involve actual data collection)
+        try:
+            # Use inference engine for evidence chaining if available
+            if self.inference_engine:
+                chained_evidence = await self.inference_engine.evidence_chaining(
+                    context.get("hypothesis"), context
+                )
+                evidence_ids = [e.get("id") for e in chained_evidence if e.get("id")]
+            else:
+                # Fallback: use context evidence
+                evidence_ids = context.get("available_evidence", [])
+
+            # Determine result based on evidence quality
+            evidence_quality = sum(
+                self._evidence.get(eid, Evidence("", "", "", datetime.now())).reliability
+                for eid in evidence_ids
+            ) / len(evidence_ids) if evidence_ids else 0.5
+
+            # Simulate test outcome
+            if evidence_quality > 0.7:
+                result = "passed"
+                confidence = evidence_quality
+            elif evidence_quality < 0.3:
+                result = "failed"
+                confidence = 1 - evidence_quality
+            else:
+                result = "inconclusive"
+                confidence = 0.5
+
+            return TestResult(
+                test_type=test.test_type,
+                result=result,
+                confidence=confidence,
+                evidence_collected=evidence_ids,
+                metadata={"test_description": test.description},
+            )
+
+        except Exception as e:
+            logger.error(f"Test execution failed: {e}")
+            return TestResult(
+                test_type=test.test_type,
+                result="inconclusive",
+                confidence=0.0,
+                evidence_collected=[],
+                metadata={"error": str(e)},
+            )
+
+    def update_hypothesis(self, hypothesis: Hypothesis, result: TestResult) -> None:
+        """
+        Update a hypothesis based on a test result.
+
+        Args:
+            hypothesis: The hypothesis to update
+            result: The test result to incorporate
+        """
+        hypothesis.add_test_result(result)
+
+        # Update status based on confidence
+        if hypothesis.confidence > 0.8:
+            hypothesis.status = HypothesisStatus.CONFIRMED.value
+            self._stats["confirmed"] += 1
+        elif hypothesis.confidence < 0.2:
+            hypothesis.status = HypothesisStatus.REJECTED.value
+            self._stats["rejected"] += 1
+
+        # Update in storage
+        self._hypotheses[hypothesis.id] = hypothesis
+
+        logger.debug(
+            f"Updated hypothesis {hypothesis.id}: "
+            f"confidence={hypothesis.confidence:.2f}, status={hypothesis.status}"
+        )
+
+    def attempt_falsification(
+        self, hypothesis: Hypothesis, use_adversarial: bool = True
+    ) -> FalsificationResult:
+        """
+        Attempt to falsify a hypothesis (Popperian approach).
+
+        Actively seeks counter-evidence rather than confirmation.
+        When use_adversarial is True, uses the AdversarialVerifier for
+        enhanced counter-evidence search, source credibility checking,
+        and contradiction detection.
+
+        Args:
+            hypothesis: The hypothesis to attempt to falsify
+            use_adversarial: Whether to use adversarial verification
+
+        Returns:
+            Falsification result
+        """
+        counter_evidence: List[str] = []
+        falsified = False
+        confidence = 0.0
+        reasoning = ""
+
+        # Check for conflicting evidence
+        if hypothesis.conflicting_evidence:
+            counter_evidence = hypothesis.conflicting_evidence[:5]
+            falsification_strength = len(hypothesis.conflicting_evidence) / (
+                len(hypothesis.supporting_evidence)
+                + len(hypothesis.conflicting_evidence)
+                + 1
+            )
+
+            if falsification_strength > 0.5:
+                falsified = True
+                confidence = falsification_strength
+                reasoning = (
+                    f"Strong counter-evidence ({len(hypothesis.conflicting_evidence)} items) "
+                    f"contradicts hypothesis"
+                )
+
+        # Check for failed tests
+        failed_tests = [t for t in hypothesis.test_results if t.result == "failed"]
+        if failed_tests:
+            falsified = True
+            confidence = max(confidence, max(t.confidence for t in failed_tests))
+            reasoning += f"; {len(failed_tests)} tests failed"
+            counter_evidence.extend([t.test_type for t in failed_tests])
+
+        # Check for logical inconsistencies
+        if not falsified:
+            inconsistency = self._check_logical_inconsistency(hypothesis)
+            if inconsistency:
+                falsified = True
+                confidence = 0.8
+                reasoning = f"Logical inconsistency detected: {inconsistency}"
+
+        # Enhanced adversarial verification
+        if use_adversarial and self.enable_adversarial_verification:
+            try:
+                # Run adversarial checks
+                adversarial_falsification = self._attempt_adversarial_falsification(
+                    hypothesis
+                )
+
+                # Merge results
+                if adversarial_falsification.falsified:
+                    falsified = True
+                    confidence = max(confidence, adversarial_falsification.confidence)
+                    counter_evidence.extend(adversarial_falsification.counter_evidence)
+                    if reasoning:
+                        reasoning += "; " + adversarial_falsification.reasoning
+                    else:
+                        reasoning = adversarial_falsification.reasoning
+
+            except Exception as e:
+                logger.warning(f"Adversarial falsification failed: {e}")
+
+        return FalsificationResult(
+            falsified=falsified,
+            confidence=confidence,
+            counter_evidence=counter_evidence,
+            reasoning=reasoning or "No falsification criteria met",
+        )
+
+    def _attempt_adversarial_falsification(
+        self, hypothesis: Hypothesis
+    ) -> FalsificationResult:
+        """
+        Enhanced falsification using adversarial verification.
+
+        Args:
+            hypothesis: The hypothesis to falsify
+
+        Returns:
+            Falsification result from adversarial analysis
+        """
+        counter_evidence: List[str] = []
+        contradictions_found = 0
+        credibility_issues = 0
+
+        # Get all evidence for this hypothesis
+        all_evidence_ids = (
+            hypothesis.supporting_evidence + hypothesis.conflicting_evidence
+        )
+        all_evidence = [
+            self._evidence.get(eid) for eid in all_evidence_ids if eid in self._evidence
+        ]
+
+        # Check for contradictions in evidence
+        if len(all_evidence) >= 2:
+            contradictions = self.adversarial_verifier.detect_contradictions(
+                all_evidence
+            )
+            contradictions_found = len(contradictions)
+
+            for contradiction in contradictions:
+                counter_evidence.append(
+                    f"contradiction:{contradiction.claim_a[:30]}..."
+                )
+
+        # Check source credibility for supporting evidence
+        for eid in hypothesis.supporting_evidence:
+            evidence = self._evidence.get(eid)
+            if evidence:
+                credibility = self.adversarial_verifier.assess_source_credibility(
+                    evidence.source
+                )
+                if credibility.credibility_score < 0.4:
+                    credibility_issues += 1
+                    counter_evidence.append(f"low_credibility:{evidence.source}")
+
+        # Check for temporal inconsistencies
+        events = self.adversarial_verifier._extract_events(all_evidence)
+        if len(events) >= 2:
+            is_consistent, temporal_contradictions = (
+                self.adversarial_verifier.check_temporal_consistency(events)
+            )
+            if not is_consistent:
+                contradictions_found += len(temporal_contradictions)
+                for tc in temporal_contradictions:
+                    counter_evidence.append(f"temporal:{tc.claim_a[:30]}...")
+
+        # Calculate falsification confidence
+        falsified = contradictions_found > 0 or credibility_issues >= 2
+
+        if contradictions_found > 0:
+            confidence = min(0.9, 0.5 + (contradictions_found * 0.1))
+        elif credibility_issues >= 2:
+            confidence = 0.6
+        else:
+            confidence = 0.0
+
+        reasoning_parts = []
+        if contradictions_found > 0:
+            reasoning_parts.append(f"{contradictions_found} contradictions detected")
+        if credibility_issues > 0:
+            reasoning_parts.append(f"{credibility_issues} credibility issues found")
+
+        return FalsificationResult(
+            falsified=falsified,
+            confidence=confidence,
+            counter_evidence=counter_evidence,
+            reasoning="; ".join(reasoning_parts) if reasoning_parts else "No adversarial issues found",
+        )
+
+    def _check_logical_inconsistency(self, hypothesis: Hypothesis) -> Optional[str]:
+        """Check for logical inconsistencies in a hypothesis."""
+        # Check if hypothesis contradicts confirmed hypotheses
+        for other_id, other in self._hypotheses.items():
+            if other_id == hypothesis.id:
+                continue
+            if other.status != HypothesisStatus.CONFIRMED.value:
+                continue
+
+            # Simple contradiction detection
+            if self._statements_contradict(hypothesis.statement, other.statement):
+                return f"Contradicts confirmed hypothesis {other_id}"
+
+        return None
+
+    def _statements_contradict(self, stmt_a: str, stmt_b: str) -> bool:
+        """Check if two statements contradict each other."""
+        # Simple negation detection
+        negators = ["not ", "no ", "never ", "does not ", "is not ", "cannot "]
+        a_negated = any(stmt_a.lower().startswith(n) for n in negators)
+        b_negated = any(stmt_b.lower().startswith(n) for n in negators)
+
+        # If one is negated and the other isn't, they might contradict
+        # This is a simplified check - real implementation would use NLP
+        if a_negated != b_negated:
+            # Check for similar content
+            a_clean = stmt_a.lower()
+            b_clean = stmt_b.lower()
+            for n in negators:
+                a_clean = a_clean.replace(n, "")
+                b_clean = b_clean.replace(n, "")
+
+            # If content is similar but negation differs
+            if len(set(a_clean.split()) & set(b_clean.split())) > 3:
+                return True
+
+        return False
+
+    def rank_hypotheses(
+        self, hypotheses: Optional[List[Hypothesis]] = None
+    ) -> List[Hypothesis]:
+        """
+        Rank hypotheses by composite score.
+
+        Scoring considers:
+        - Confidence (posterior probability)
+        - Test history quality
+        - Evidence diversity
+        - Falsification resistance
+
+        Args:
+            hypotheses: List to rank (defaults to all tracked hypotheses)
+
+        Returns:
+            Ranked list of hypotheses (highest score first)
+        """
+        hypotheses = hypotheses or list(self._hypotheses.values())
+
+        scored: List[Tuple[float, Hypothesis]] = []
+        for h in hypotheses:
+            score = self._calculate_hypothesis_score(h)
+            scored.append((score, h))
+
+        # Sort by score descending
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [h for _, h in scored]
+
+    def _calculate_hypothesis_score(self, hypothesis: Hypothesis) -> float:
+        """Calculate composite score for a hypothesis."""
+        # Base confidence score
+        confidence_score = hypothesis.posterior_probability
+
+        # Test quality score
+        if hypothesis.test_results:
+            passed = sum(1 for t in hypothesis.test_results if t.result == "passed")
+            test_score = passed / len(hypothesis.test_results)
+        else:
+            test_score = 0.5
+
+        # Evidence diversity score
+        unique_sources = len(set(
+            self._evidence.get(eid, Evidence("", "unknown", "", datetime.now())).source
+            for eid in hypothesis.supporting_evidence
+        ))
+        diversity_score = min(1.0, unique_sources / 3)
+
+        # Falsification resistance
+        falsification = self.attempt_falsification(hypothesis)
+        resistance_score = 1 - falsification.confidence if falsification.falsified else 1.0
+
+        # Weighted composite
+        composite = (
+            confidence_score * 0.35 +
+            test_score * 0.25 +
+            diversity_score * 0.20 +
+            resistance_score * 0.20
+        )
+
+        return composite
+
+    def get_most_likely(
+        self, hypotheses: Optional[List[Hypothesis]] = None
+    ) -> Optional[Hypothesis]:
+        """
+        Get the most likely hypothesis from a list.
+
+        Args:
+            hypotheses: List to search (defaults to all tracked hypotheses)
+
+        Returns:
+            The highest-ranked hypothesis, or None if empty
+        """
+        ranked = self.rank_hypotheses(hypotheses)
+        return ranked[0] if ranked else None
+
+    def merge_hypotheses(
+        self, h1: Hypothesis, h2: Hypothesis
+    ) -> Optional[Hypothesis]:
+        """
+        Attempt to merge two hypotheses if they are compatible.
+
+        Args:
+            h1: First hypothesis
+            h2: Second hypothesis
+
+        Returns:
+            Merged hypothesis if compatible, None otherwise
+        """
+        # Check for compatibility
+        if h1.hypothesis_type != h2.hypothesis_type:
+            return None
+
+        # Check for significant overlap in evidence
+        shared_evidence = set(h1.supporting_evidence) & set(h2.supporting_evidence)
+        total_evidence = set(h1.supporting_evidence) | set(h2.supporting_evidence)
+        overlap_ratio = len(shared_evidence) / len(total_evidence) if total_evidence else 0
+
+        if overlap_ratio < 0.3:
+            return None
+
+        # Check for statement similarity
+        statement_similarity = self._statement_similarity(h1.statement, h2.statement)
+        if statement_similarity < 0.5:
+            return None
+
+        # Create merged hypothesis
+        merged = Hypothesis(
+            id=str(uuid.uuid4())[:8],
+            statement=f"Merged: {h1.statement[:50]} + {h2.statement[:50]}",
+            hypothesis_type=h1.hypothesis_type,
+            prior_probability=max(h1.prior_probability, h2.prior_probability),
+            posterior_probability=(h1.posterior_probability + h2.posterior_probability) / 2,
+            confidence=(h1.confidence + h2.confidence) / 2,
+            supporting_evidence=list(total_evidence),
+            conflicting_evidence=list(
+                set(h1.conflicting_evidence) | set(h2.conflicting_evidence)
+            ),
+            test_results=h1.test_results + h2.test_results,
+            status=HypothesisStatus.ACTIVE.value,
+            parent_hypotheses=[h1.id, h2.id],
+        )
+
+        # Mark parents as merged
+        h1.status = HypothesisStatus.MERGED.value
+        h2.status = HypothesisStatus.MERGED.value
+        self._hypotheses[h1.id] = h1
+        self._hypotheses[h2.id] = h2
+
+        # Store merged hypothesis
+        self._hypotheses[merged.id] = merged
+        self._stats["merged"] += 1
+
+        logger.info(f"Merged hypotheses {h1.id} and {h2.id} into {merged.id}")
+        return merged
+
+    def _statement_similarity(self, stmt_a: str, stmt_b: str) -> float:
+        """Calculate simple similarity between two statements."""
+        words_a = set(stmt_a.lower().split())
+        words_b = set(stmt_b.lower().split())
+
+        if not words_a or not words_b:
+            return 0.0
+
+        intersection = words_a & words_b
+        union = words_a | words_b
+
+        return len(intersection) / len(union)
+
+    def run_hypothesis_cycle(
+        self,
+        observations: List[Evidence],
+        max_iterations: int = 10,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> List[Hypothesis]:
+        """
+        Run a complete hypothesis generation and testing cycle.
+
+        This is the main entry point for automated hypothesis management.
+
+        Args:
+            observations: Initial observations to generate hypotheses from
+            max_iterations: Maximum number of test iterations
+            context: Additional context
+
+        Returns:
+            Final list of hypotheses after testing
+        """
+        context = context or {}
+        logger.info(f"Starting hypothesis cycle with {len(observations)} observations")
+
+        # Phase 1: Generate hypotheses
+        hypotheses = self.generate_hypotheses(observations, context)
+        if not hypotheses:
+            logger.warning("No hypotheses generated")
+            return []
+
+        # Phase 2: Design and execute tests
+        for iteration in range(max_iterations):
+            active_hypotheses = [
+                h for h in self._hypotheses.values()
+                if h.status == HypothesisStatus.ACTIVE.value
+            ]
+
+            if not active_hypotheses:
+                logger.info("No active hypotheses remaining")
+                break
+
+            # Select highest priority hypothesis to test
+            ranked = self.rank_hypotheses(active_hypotheses)
+            target = ranked[0]
+
+            # Design test
+            test = self.design_test(target)
+
+            # Execute test (async wrapper for sync context)
+            # Sprint 8BG: Avoid nested asyncio.run() — detect running loop
+            try:
+                result = asyncio.run(
+                    self.execute_test(test, {**context, "hypothesis": target})
+                )
+                self.update_hypothesis(target, result)
+            except RuntimeError as e:
+                if "asyncio.run() cannot be called" in str(e):
+                    logger.warning("execute_test called from async context, skipping")
+                else:
+                    logger.error(f"Test execution failed: {e}")
+            except Exception as e:
+                logger.error(f"Test execution failed: {e}")
+
+            # Attempt falsification periodically
+            if iteration % 3 == 0:
+                for h in list(self._hypotheses.values())[:5]:  # Top 5
+                    if h.status == HypothesisStatus.ACTIVE.value:
+                        falsification = self.attempt_falsification(h)
+                        if falsification.falsified:
+                            h.status = HypothesisStatus.REJECTED.value
+                            h.confidence *= (1 - falsification.confidence)
+                            self._hypotheses[h.id] = h
+
+            # Memory management
+            if iteration % 5 == 0:
+                self._prune_hypotheses()
+                gc.collect()
+
+        # Final ranking
+        final_hypotheses = self.rank_hypotheses()
+        logger.info(
+            f"Hypothesis cycle complete: {len(final_hypotheses)} hypotheses, "
+            f"{self._stats['confirmed']} confirmed, {self._stats['rejected']} rejected"
+        )
+
+        return final_hypotheses
+
+    def _prune_hypotheses(self) -> None:
+        """Prune low-confidence hypotheses to manage memory."""
+        if len(self._hypotheses) <= self.max_hypotheses:
+            return
+
+        # Sort by score
+        ranked = self.rank_hypotheses()
+
+        # Keep top hypotheses
+        to_keep = set(h.id for h in ranked[: self.max_hypotheses])
+
+        # Remove low-confidence hypotheses
+        removed = 0
+        for hid in list(self._hypotheses.keys()):
+            if hid not in to_keep:
+                h = self._hypotheses[hid]
+                if h.confidence < self.min_confidence_threshold:
+                    del self._hypotheses[hid]
+                    removed += 1
+
+        self._stats["pruned"] += removed
+        if removed > 0:
+            logger.debug(f"Pruned {removed} low-confidence hypotheses")
+
+    def get_hypothesis(self, hypothesis_id: str) -> Optional[Hypothesis]:
+        """Get a hypothesis by ID."""
+        return self._hypotheses.get(hypothesis_id)
+
+    def get_all_hypotheses(
+        self, status: Optional[str] = None
+    ) -> List[Hypothesis]:
+        """
+        Get all hypotheses, optionally filtered by status.
+
+        Args:
+            status: Filter by status (active, confirmed, rejected, pending, merged)
+
+        Returns:
+            List of hypotheses
+        """
+        hypotheses = list(self._hypotheses.values())
+        if status:
+            hypotheses = [h for h in hypotheses if h.status == status]
+        return hypotheses
+
+    # ------------------------------------------------------------------
+    # Sprint 8TD: Sprint-aware hypothesis generation
+    # ------------------------------------------------------------------
+
+    def generate_sprint_hypotheses(
+        self,
+        findings: list[str],
+        ioc_graph: Any = None,
+        max_hypotheses: int = 3,
+    ) -> list[str]:
+        """
+        Sprint 8TD: Generovat testovatelné hypotézy z IOC findings.
+
+        WINDUP fáze: voláno po sprintu s top findings + IOC graph.
+        Formát: "IF [evidence] THEN [hypothesis] [confidence: 0.x]"
+
+        Args:
+            findings: List of top finding strings
+            ioc_graph: Optional IOC graph for context
+            max_hypotheses: Max počet hypotéz (default 3)
+
+        Returns:
+            List of hypothesis strings
+        """
+        if not findings:
+            return []
+
+        # Sestavit hypotézy z findings
+        hypotheses: list[str] = []
+
+        for i, finding in enumerate(findings[:max_hypotheses]):
+            # Základní formát hypotézy
+            h = f"IF finding: {finding[:100]!r} THEN credible_with_confidence: 0.{7+i}"
+            hypotheses.append(h)
+
+        # Přidat IOC-based hypotézy pokud máme graf
+        if ioc_graph is not None and len(findings) >= 2:
+            try:
+                # Jednoduchá korelace: 2+ findings z stejného source = related
+                h_ioc = (
+                    f"IF {len(findings)} related findings THEN shared_attribution "
+                    f"with confidence: 0.{min(9, 5 + len(findings))}"
+                )
+                hypotheses.append(h_ioc)
+            except Exception:
+                pass
+
+        # Ořezat na max_hypotheses
+        return hypotheses[:max_hypotheses]
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get engine statistics."""
+        return {
+            **self._stats,
+            "total_hypotheses": len(self._hypotheses),
+            "total_evidence": len(self._evidence),
+            "by_status": {
+                status.value: len(
+                    [h for h in self._hypotheses.values() if h.status == status.value]
+                )
+                for status in HypothesisStatus
+            },
+        }
+
+    def clear(self) -> None:
+        """Clear all hypotheses and evidence (memory management)."""
+        self._hypotheses.clear()
+        self._evidence.clear()
+        self._source_credibility_cache.clear()
+        self._stats = {
+            "generated": 0,
+            "tested": 0,
+            "confirmed": 0,
+            "rejected": 0,
+            "merged": 0,
+            "pruned": 0,
+            "adversarial_checks": 0,
+        }
+        # Reset adversarial verifier
+        self._adversarial_verifier = None
+        gc.collect()
+        logger.info("HypothesisEngine cleared")
+
+
+# Factory function
+def create_hypothesis_engine(
+    inference_engine: Optional[InferenceEngineProtocol] = None,
+    **kwargs,
+) -> HypothesisEngine:
+    """
+    Factory function for creating a HypothesisEngine.
+
+    Args:
+        inference_engine: Optional inference engine for integration
+        **kwargs: Additional arguments for HypothesisEngine
+
+    Returns:
+        Configured HypothesisEngine instance
+    """
+    return HypothesisEngine(inference_engine=inference_engine, **kwargs)

@@ -1,0 +1,8 @@
+use_default_settings: true
+server:
+  secret_key: "ghost_prime_local_secret_2026_03_23_abcdef"
+  limiter: false
+search:
+  formats:
+    - html
+    - json

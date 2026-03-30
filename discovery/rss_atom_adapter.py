@@ -1,0 +1,1282 @@
+"""
+RSS 2.0 and Atom 1.0 passive feed adapter.
+
+Public-passive only: uses async_fetch_public_text() from 8AD as sole network input.
+No storage writes. No LLM calls.
+
+Parsing strategy:
+- Namespace-safe via local-name helpers.
+- Primary parser: defusedxml.ElementTree (available in env).
+- Fallback: stdlib xml.etree.ElementTree.
+- RSS 2.0: channel/item → title/link/description/pubDate/guid.
+- Atom 1.0: feed/entry → title/link[@href]/summary/published/updated.
+
+Security:
+- XML entity/DOCTYPE guard before parsing.
+- Size cap delegated to 8AD (max_bytes).
+- Fail-soft on malformed XML.
+
+Deduplication (preserve-first within a single feed):
+- RSS: guid > link > fallback(title|published_raw).
+- Atom: link[@rel=alternate/@href] > link[@href] > fallback(title|published_raw).
+
+Sprint 8AJ — Feed Source Discovery + Curated Seeds:
+- HTML <link rel="alternate"> discovery from downloaded HTML.
+- <base href> awareness for relative URL resolution.
+- Typed curated seed surface (OSINT-relevant feeds).
+- Deterministic merge of discovered + seeded sources.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+import time
+import urllib.parse
+from asyncio import CancelledError
+from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
+from typing import TYPE_CHECKING, Any
+
+import msgspec
+import xxhash
+
+
+def _entry_hash(title: str, published_raw: str) -> str:
+    """Compute deterministic xxhash of title|published_raw for entry identity."""
+    return xxhash.xxh64(f"{(title or '')}|{(published_raw or '')}").hexdigest()
+
+# Sprint 8AH: defusedxml is primary parser when available.
+# stdlib xml.etree.ElementTree is fallback.
+try:
+    import defusedxml.ElementTree as _DET
+except ImportError:
+    import xml.etree.ElementTree as _DET
+
+if TYPE_CHECKING:
+    from hledac.universal.fetching.public_fetcher import FetchResult  # noqa: F401
+
+
+# ---------------------------------------------------------------------------
+# DTOs
+# ---------------------------------------------------------------------------
+
+
+class FeedEntryHit(msgspec.Struct, frozen=True, gc=False):
+    """Single parsed feed entry."""
+
+    feed_url: str
+    entry_url: str
+    title: str
+    summary: str
+    published_raw: str
+    published_ts: float | None
+    source: str
+    rank: int
+    retrieved_ts: float
+    entry_hash: str = ""  # Sprint 8AN: xxhash of title|published_raw for dedup
+    # Sprint 8BE: rich feed content field (content:encoded / entry.content[0].value)
+    rich_content: str = ""
+
+
+class FeedBatchResult(msgspec.Struct, frozen=True, gc=False):
+    """Result of fetching and parsing one feed."""
+
+    feed_url: str
+    entries: tuple[FeedEntryHit, ...]
+    error: str | None = None
+
+
+# Sprint 8AJ — Feed Discovery DTOs
+
+
+class FeedDiscoveryHit(msgspec.Struct, frozen=True, gc=False):
+    """Single feed URL discovered from an HTML page."""
+
+    page_url: str
+    feed_url: str
+    title: str
+    feed_type: str
+    confidence: float
+    source: str
+    discovered_ts: float
+
+
+class FeedDiscoveryBatchResult(msgspec.Struct, frozen=True, gc=False):
+    """Result of discovering feed URLs from an HTML page."""
+
+    page_url: str
+    hits: tuple[FeedDiscoveryHit, ...]
+    error: str | None = None
+
+
+class FeedSeed(msgspec.Struct, frozen=True, gc=False):
+    """Single curated OSINT-relevant feed seed."""
+
+    feed_url: str
+    label: str
+    source: str
+    priority: int = 0
+
+
+class MergedFeedSource(msgspec.Struct, frozen=True, gc=False):
+    """A feed source after merging discovered and seeded sources."""
+
+    feed_url: str
+    label: str
+    origin: str  # "seed" | "discovered"
+    priority: int
+
+
+# ---------------------------------------------------------------------------
+# Module-level constants
+# ---------------------------------------------------------------------------
+
+_SOURCE: str = "rss_atom"
+_MAX_ENTRIES_HARD: int = 100
+_XML_ENTITY_RE: re.Pattern[str] = re.compile(
+    r"<!ENTITY|<!DOCTYPE", re.IGNORECASE
+)
+# ISO 8601 / RFC 3339 normalization
+_ISO_Z_RE: re.Pattern[str] = re.compile(r"Z$")
+
+# Sprint 8AJ — Feed Discovery constants
+_FEED_TYPES_HIGH: tuple[str, ...] = (
+    "application/rss+xml",
+    "application/atom+xml",
+)
+_FEED_TYPES_LOW: tuple[str, ...] = (
+    "application/xml",
+    "text/xml",
+)
+_MAX_CANDIDATES_DEFAULT: int = 10
+_MAX_CANDIDATES_HARD: int = 20
+
+
+# ---------------------------------------------------------------------------
+# Namespace-safe local-name helpers
+# ---------------------------------------------------------------------------
+
+
+def _local_name(tag: str) -> str:
+    """Strip namespace prefix, return local name."""
+    if tag is None:
+        return ""
+    idx = tag.rfind("}")
+    if idx >= 0:
+        return tag[idx + 1 :]
+    return tag
+
+
+def _find_first_child(
+    parent, localname: str
+) -> Any | None:
+    """Find first direct child element by local name (namespace-safe)."""
+    children = list(parent)
+    for child in children:
+        if _local_name(child.tag) == localname:
+            return child
+    return None
+
+
+def _iter_children(parent, localname: str):
+    """Yield all direct child elements matching local name."""
+    children = list(parent)
+    for child in children:
+        if _local_name(child.tag) == localname:
+            yield child
+
+
+# ---------------------------------------------------------------------------
+# URL normalization (conservative, matching 8AC style)
+# ---------------------------------------------------------------------------
+
+
+def _normalize_url(raw: str | None) -> str:
+    """Normalize URL for dedup: lowercase scheme+host, strip lone ?."""
+    if not raw:
+        return ""
+    raw = raw.strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(raw)
+        # lowercase scheme and host only
+        normalized = parsed._replace(
+            scheme=parsed.scheme.lower(),
+            netloc=parsed.netloc.lower(),
+        ).geturl()
+        # strip lone trailing "?"
+        if normalized.endswith("?"):
+            normalized = normalized[:-1]
+        return normalized
+    except Exception:
+        return raw.strip()
+
+
+# ---------------------------------------------------------------------------
+# Text extraction helpers
+# ---------------------------------------------------------------------------
+
+
+def _text_of(element) -> str:
+    """Return element text or empty string."""
+    if element is None:
+        return ""
+    text = element.text
+    if text is None:
+        return ""
+    return text.strip()
+
+
+
+# ---------------------------------------------------------------------------
+# Date parsing (fail-soft, no locale dependency)
+# ---------------------------------------------------------------------------
+
+
+def _parse_published_ts(raw: str | None) -> float | None:
+    """Parse date from RSS or Atom formats. Returns None on failure."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    # Try RFC 3339 / ISO 8601 via fromisoformat
+    try:
+        normalized = _ISO_Z_RE.sub("+00:00", raw)
+        dt = __import__("datetime").datetime.fromisoformat(normalized)
+        return dt.timestamp()
+    except Exception:
+        pass
+    # Try RSS pubDate via email.utils
+    try:
+        dt = parsedate_to_datetime(raw)
+        return dt.timestamp()
+    except Exception:
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# XML security guard
+# ---------------------------------------------------------------------------
+
+
+def _is_xml_entity_dangerous(text: str) -> bool:
+    """Check for ENTITY / DOCTYPE declarations that could be XML bombs."""
+    if not text:
+        return False
+    return bool(_XML_ENTITY_RE.search(text))
+
+
+# ---------------------------------------------------------------------------
+# Entry identity / dedup key
+# ---------------------------------------------------------------------------
+
+
+def _entry_dedup_key(
+    entry_url: str,
+    title: str,
+    published_raw: str,
+    guid_raw: str | None,
+    is_permalink: bool | None,
+) -> str:
+    """
+    Build stable dedup key following RSS identity priority:
+    guid (if permalink or no attribute) > link > fallback(title|published_raw).
+    """
+    if guid_raw:
+        # guid with isPermaLink="true" or no attribute can serve as URL
+        if is_permalink or is_permalink is None:
+            return f"g:{guid_raw}"
+        # isPermaLink="false" → use as dedup key only
+        return f"gf:{guid_raw}"
+    if entry_url:
+        return f"u:{entry_url}"
+    return f"f:{title.lower().strip()}|{published_raw}"
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8AR — Safe XML Recovery
+# ---------------------------------------------------------------------------
+
+import xml.etree.ElementTree as _ET  # stdlib fallback only
+
+
+class _ParseMode:
+    """Parse-mode observability labels for internal/tracking use."""
+
+    RAW_DEFUSEDXML = "raw_defusedxml"
+    SANITIZED_DEFUSEDXML = "sanitized_defusedxml"
+    SANITIZED_STDLIB_FALLBACK = "sanitized_stdlib_fallback"
+    FINAL_FAIL = "final_fail"
+
+
+# Explicit allowlist of benign HTML named entities that appear in real feeds.
+# Each entry is (entity_name, unicode_replacement).
+# Covers: dashes, quotes, apostrophes, ellipsis,nbsp.
+_BENIGN_HTML_ENTITIES: tuple[tuple[str, str], ...] = (
+    ("nbsp", "\u00a0"),  # non-breaking space
+    ("ndash", "\u2013"),  # en dash
+    ("mdash", "\u2014"),  # em dash
+    ("ldquo", "\u201c"),  # left double quotation mark
+    ("rdquo", "\u201d"),  # right double quotation mark
+    ("lsquo", "\u2018"),  # left single quotation mark
+    ("rsquo", "\u2019"),  # right single quotation mark
+    ("hellip", "\u2026"),  # horizontal ellipsis
+)
+
+
+def _safe_sanitize_xml(raw: str) -> str:
+    """
+    Produce a sanitized copy of XML text safe for re-parsing.
+
+    Single-pass scanner that:
+    1. Strips <!DOCTYPE ...> declarations (including internal subsets).
+    2. Strips <!ENTITY ...> declarations entirely.
+    3. Removes ``&name;`` references for stripped custom entities.
+    4. Replaces benign HTML named-entity references with Unicode equivalents.
+
+    Standard XML predefined entities (&amp; &lt; &gt; &quot; &apos;) and numeric
+    character references (&#NNN; &#xHHH;) are left untouched.
+
+    Unknown custom entity references NOT on the allowlist remain and will
+    cause a parse failure (fail-soft behaviour).
+
+    Returns the original input unchanged if no DOCTYPE/ENTITY declarations
+    are present (fast path).
+    """
+    # Fast path: no dangerous declarations AND no entity references to process
+    # Note: we still process the input even with benign entity refs
+    # (predefined entities like &amp; are left untouched by the scanner)
+    if (
+        "<!doctype" not in raw.lower()
+        and "<!entity" not in raw.lower()
+        and "&" not in raw
+    ):
+        return raw
+
+    import re as _re
+
+    # ---- Precompute sets ----
+    _predefined: frozenset[str] = frozenset(
+        {"amp", "lt", "gt", "quot", "apos"}
+    )
+    # apos is included because defusedxml resolves it to "'" natively in XML 1.0.
+    _benign_names: frozenset[str] = frozenset(
+        name for name, _ in _BENIGN_HTML_ENTITIES
+    )
+    _benign_patterns: tuple[tuple[str, str], ...] = tuple(_BENIGN_HTML_ENTITIES)
+
+    result: list[str] = []
+    i = 0
+    n = len(raw)
+
+    while i < n:
+        c = raw[i]
+
+        # ---- Handle <!DOCTYPE ...> ----
+        if c == "<" and raw[i:i+9].lower() == "<!doctype":
+            # Skip the entire DOCTYPE block using bracket-depth tracker
+            i += 9
+            depth = 0  # inside [...]:
+            in_quote = False
+            quote_char: str | None = None
+            while i < n:
+                ch = raw[i]
+                if not in_quote:
+                    if ch in ('"', "'"):
+                        in_quote = True
+                        quote_char = ch
+                    elif ch == "[":
+                        depth += 1
+                    elif ch == "]":
+                        if depth > 0:
+                            depth -= 1
+                            if depth == 0 and i + 1 < n and raw[i + 1] == ">":
+                                i += 2  # consume ']>'
+                                break
+                    elif ch == ">" and depth == 0:
+                        i += 1  # consume bare '>'
+                        break
+                else:
+                    if ch == quote_char:
+                        in_quote = False
+                        quote_char = None
+                i += 1
+
+        # ---- Handle <!ENTITY ...> ----
+        elif c == "<" and raw[i:i+9].lower() == "<!entity":
+            # Skip the entire ENTITY declaration without copying to output
+            i += 9
+            in_quote = False
+            quote_char: str | None = None
+            while i < n:
+                ch = raw[i]
+                if not in_quote:
+                    if ch in ('"', "'"):
+                        in_quote = True
+                        quote_char = ch
+                    elif ch == ">" and not in_quote:
+                        i += 1
+                        break
+                else:
+                    if ch == quote_char:
+                        in_quote = False
+                        quote_char = None
+                i += 1
+
+        # ---- Handle &name; entity reference ----
+        elif c == "&" and i + 1 < n and raw[i + 1] != "#":
+            # Potential named entity reference
+            sem_idx = raw.find(";", i + 1)
+            if sem_idx != -1 and sem_idx - i < 20:  # sanity limit on name length
+                name = raw[i + 1:sem_idx]
+                name_is_valid = (
+                    name
+                    and name.isidentifier()
+                    and name.lower() not in _predefined
+                )
+                if name_is_valid:
+                    if name.lower() in _benign_names:
+                        # Replace with Unicode equivalent
+                        replacement = next(
+                            repl
+                            for n_, repl in _benign_patterns
+                            if n_.lower() == name.lower()
+                        )
+                        result.append(replacement)
+                        i = sem_idx + 1
+                        continue
+                    # else: custom entity reference not on allowlist.
+                    # Replace with space to prevent undefined-entity parse errors
+                    # while preserving document structure.
+                    result.append(" ")
+                    i = sem_idx + 1
+                    continue
+                # Not a valid identifier: treat as literal '&'
+                result.append(c)
+                i += 1
+            else:
+                result.append(c)
+                i += 1
+
+        # ---- Default: copy character ----
+        else:
+            result.append(c)
+            i += 1
+
+    return "".join(result)
+
+
+# ---------------------------------------------------------------------------
+# Feed parsers
+# ---------------------------------------------------------------------------
+
+
+def _child_by_name(parent, localname):
+    """Find first child by local name using list(parent) snapshot."""
+    children = list(parent)
+    for child in children:
+        if child.tag == localname:
+            return child
+    return None
+
+
+def _parse_rss(root, feed_url: str, retrieved_ts: float) -> list[FeedEntryHit]:
+    """
+    Parse RSS 2.0 feed.
+
+    RSS 2.0 structure:
+      rss/channel/item/title/link/description/pubDate/guid[@isPermaLink]
+    """
+    channel = _child_by_name(root, "channel")
+    if channel is None:
+        return []
+
+    entries: list[FeedEntryHit] = []
+    seen_keys: set[str] = set()
+
+    channel_children = list(channel)
+    for child in channel_children:
+        if child.tag != "item":
+            continue
+        item = child
+        # Extract fields using list(item) snapshot
+        item_children = list(item)
+        # Sprint 8BE: content:encoded is first-choice rich content (use first child only as fallback for title)
+        title = ""
+        content_encoded = ""
+        link = ""
+        description = ""
+        pub_date_raw = ""
+        guid_raw = ""
+        is_permalink = None
+        for ic in item_children:
+            ln = ic.tag
+            # Sprint 8BE: use _local_name for namespace-safe matching
+            local = _local_name(ln)
+            if local == "title":
+                title = (ic.text or "").strip()
+            # content:encoded uses namespace in RSS; _local_name strips namespace
+            # so "{http://purl.org/rss/1.0/modules/content/}encoded" -> "encoded"
+            # We distinguish from other "encoded"-named elements via original tag
+            elif local == "encoded" and "content" in ln.lower():
+                content_encoded = (ic.text or "").strip()
+            elif local == "link":
+                link = (ic.text or "").strip()
+            elif local == "description":
+                description = (ic.text or "").strip()
+            elif local == "pubDate":
+                pub_date_raw = (ic.text or "").strip()
+            elif local == "guid":
+                guid_raw = (ic.text or "").strip()
+                attr = ic.get("isPermaLink")
+                if attr is not None:
+                    is_permalink = attr.lower() == "true"
+        # Sprint 8BE: fallback for title if it was never set (item had no <title> element)
+        if not title and item_children:
+            title = (item_children[0].text or "").strip()
+
+        published_ts = _parse_published_ts(pub_date_raw)
+
+        # Determine entry_url
+        guid_is_url = bool(guid_raw) and (is_permalink is True or is_permalink is None)
+        if guid_is_url:
+            entry_url = _normalize_url(guid_raw)
+        else:
+            entry_url = _normalize_url(link)
+
+        if guid_raw:
+            dedup_key = _entry_dedup_key(entry_url, title, pub_date_raw, guid_raw, is_permalink)
+        else:
+            dedup_key = _entry_dedup_key(entry_url, title, pub_date_raw, None, None)
+
+        if dedup_key in seen_keys:
+            continue
+        seen_keys.add(dedup_key)
+
+        entries.append(
+            FeedEntryHit(
+                feed_url=feed_url,
+                entry_url=entry_url or "",
+                title=title or "",
+                summary=description or "",
+                published_raw=pub_date_raw or "",
+                published_ts=published_ts,
+                source=_SOURCE,
+                rank=len(entries),
+                retrieved_ts=retrieved_ts,
+                entry_hash=_entry_hash(title or "", pub_date_raw or ""),
+                # Sprint 8BE: rich_content = content:encoded if present, else ""
+                rich_content=content_encoded or "",
+            )
+        )
+
+    return entries
+
+
+def _parse_atom(root, feed_url: str, retrieved_ts: float) -> list[FeedEntryHit]:
+    """
+    Parse Atom 1.0 feed.
+
+    Atom 1.0 structure:
+      feed/entry/title/link[@href][@rel=alternate or no rel]/summary/published/updated
+    """
+    entries: list[FeedEntryHit] = []
+    seen_keys: set[str] = set()
+
+    for entry in _iter_children(root, "entry"):
+        title = _text_of(_find_first_child(entry, "title"))
+        summary = _text_of(_find_first_child(entry, "summary"))
+        # Sprint 8BE: extract content element for rich HTML content
+        content_el = _find_first_child(entry, "content")
+        rich_content = _text_of(content_el) or ""
+        published_raw = _text_of(
+            _find_first_child(entry, "published")
+        ) or _text_of(_find_first_child(entry, "updated"))
+        published_ts = _parse_published_ts(published_raw)
+
+        # Find entry URL: rel="alternate" or no rel attribute, with href
+        entry_url = ""
+        for link_el in _iter_children(entry, "link"):
+            rel = link_el.get("rel")
+            href = link_el.get("href") or ""
+            if rel is None or rel == "alternate":
+                entry_url = _normalize_url(href)
+                break
+        if not entry_url:
+            # Fallback: any link with href
+            for link_el in _iter_children(entry, "link"):
+                href = link_el.get("href") or ""
+                if href:
+                    entry_url = _normalize_url(href)
+                    break
+
+        dedup_key = _entry_dedup_key(entry_url, title, published_raw, None, None)
+
+        if dedup_key in seen_keys:
+            continue
+        seen_keys.add(dedup_key)
+
+        entries.append(
+            FeedEntryHit(
+                feed_url=feed_url,
+                entry_url=entry_url or "",
+                title=title or "",
+                summary=summary or "",
+                published_raw=published_raw or "",
+                published_ts=published_ts,
+                source=_SOURCE,
+                rank=len(entries),
+                retrieved_ts=retrieved_ts,
+                entry_hash=_entry_hash(title or "", published_raw or ""),
+                # Sprint 8BE: rich_content = content element if present, else ""
+                rich_content=rich_content or "",
+            )
+        )
+
+    return entries
+
+
+def _report_parse_mode(out_list: list[str] | None, mode: str) -> None:
+    """Append parse mode label to the out list if provided. Never raises."""
+    if out_list is not None:
+        out_list.append(mode)
+
+
+def _parse_feed_xml(
+    xml_text: str,
+    feed_url: str,
+    retrieved_ts: float,
+    _parse_mode_out: list[str] | None = None,
+) -> list[FeedEntryHit]:
+    """
+    Detect feed type and parse accordingly.
+    Returns list of FeedEntryHit or empty list on failure.
+
+    Recovery order (Sprint 8AR):
+    1. Primary defusedxml on raw input.
+    2. Sanitized copy retry via defusedxml (removes DOCTYPE/ENTITY,
+       replaces benign HTML named entities).
+    3. Sanitized copy via stdlib ET fallback.
+    4. Fail-soft.
+
+    ``_parse_mode_out``, if provided, is appended with the parse mode
+    label for observability (never raises, never affects results).
+    """
+    # ---- Step 1: primary defusedxml on raw input ----
+    try:
+        root = _DET.fromstring(xml_text)
+        if root is not None:
+            _report_parse_mode(_parse_mode_out, _ParseMode.RAW_DEFUSEDXML)
+            local_root = _local_name(root.tag)
+            if local_root == "rss":
+                return _parse_rss(root, feed_url, retrieved_ts)
+            elif local_root == "feed":
+                return _parse_atom(root, feed_url, retrieved_ts)
+            else:
+                return []
+    except Exception:
+        pass
+
+    # ---- Step 2: sanitized defusedxml retry ----
+    sanitized = _safe_sanitize_xml(xml_text)
+    try:
+        root = _DET.fromstring(sanitized)
+        if root is not None:
+            _report_parse_mode(_parse_mode_out, _ParseMode.SANITIZED_DEFUSEDXML)
+            local_root = _local_name(root.tag)
+            if local_root == "rss":
+                return _parse_rss(root, feed_url, retrieved_ts)
+            elif local_root == "feed":
+                return _parse_atom(root, feed_url, retrieved_ts)
+            else:
+                return []
+    except Exception:
+        pass
+
+    # ---- Step 3: sanitized stdlib ET fallback ----
+    try:
+        root = _ET.fromstring(sanitized)
+        if root is not None:
+            _report_parse_mode(_parse_mode_out, _ParseMode.SANITIZED_STDLIB_FALLBACK)
+            local_root = _local_name(root.tag)
+            if local_root == "rss":
+                return _parse_rss(root, feed_url, retrieved_ts)
+            elif local_root == "feed":
+                return _parse_atom(root, feed_url, retrieved_ts)
+            else:
+                return []
+    except Exception:
+        pass
+
+    # ---- Step 4: fail-soft ----
+    _report_parse_mode(_parse_mode_out, _ParseMode.FINAL_FAIL)
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Public API — Feed Fetching
+# ---------------------------------------------------------------------------
+
+
+async def async_fetch_feed_entries(
+    feed_url: str,
+    max_entries: int = 20,
+    timeout_s: float = 35.0,
+    max_bytes: int = 2_000_000,
+) -> FeedBatchResult:
+    """
+    Fetch and parse a RSS 2.0 or Atom 1.0 feed.
+
+    Parameters
+    ----------
+    feed_url:
+        URL of the feed.
+    max_entries:
+        Maximum entries to return (default 20, hard cap 100).
+    timeout_s:
+        Fetch timeout passed to 8AD async_fetch_public_text.
+    max_bytes:
+        Maximum bytes to accept from 8AD fetch.
+
+    Returns
+    -------
+    FeedBatchResult
+        entries tuple (possibly empty) on success,
+        or entries=() with error string on failure.
+    """
+    # Clamp hard cap
+    max_entries = min(max(max_entries, 1), _MAX_ENTRIES_HARD)
+
+    # Import here to keep this module import-light
+    from hledac.universal.fetching.public_fetcher import async_fetch_public_text
+
+    retrieved_ts = time.time()
+
+    # Network call via 8AD
+    try:
+        result = await async_fetch_public_text(
+            feed_url, timeout_s=timeout_s, max_bytes=max_bytes
+        )
+    except CancelledError:
+        raise  # never swallow
+
+    # Handle fetch-level errors fail-soft
+    if result.error or result.text is None:
+        return FeedBatchResult(
+            feed_url=feed_url,
+            entries=(),
+            error=result.error or "fetch_returned_none",
+        )
+
+    # Guard removed by Sprint 8AR: DOCTYPE/ENTITY handling is now done
+    # via sanitized recovery inside _parse_feed_xml.
+
+    # Parse
+    parsed = _parse_feed_xml(result.text, feed_url, retrieved_ts)
+
+    if not parsed and result.text.strip():
+        # Non-empty text but nothing parsed → malformed
+        return FeedBatchResult(
+            feed_url=feed_url,
+            entries=(),
+            error="xml_parse_error",
+        )
+
+    # Deduplicate (preserve-first within this feed)
+    seen_keys: set[str] = set()
+    deduped: list[FeedEntryHit] = []
+    for entry in parsed:
+        key = _entry_dedup_key(
+            entry.entry_url,
+            entry.title,
+            entry.published_raw,
+            None,
+            None,
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(entry)
+
+    # Apply max_entries and re-rank
+    entries: list[FeedEntryHit] = []
+    for rank, entry in enumerate(deduped[:max_entries]):
+        # Create new instance with updated rank (msgspec frozen → new instance)
+        entries.append(
+            FeedEntryHit(
+                feed_url=entry.feed_url,
+                entry_url=entry.entry_url,
+                title=entry.title,
+                summary=entry.summary,
+                published_raw=entry.published_raw,
+                published_ts=entry.published_ts,
+                source=entry.source,
+                rank=rank,
+                retrieved_ts=entry.retrieved_ts,
+                entry_hash=entry.entry_hash,
+                # Sprint 8BE: preserve rich_content from original entry
+                rich_content=getattr(entry, "rich_content", "") or "",
+            )
+        )
+
+    return FeedBatchResult(feed_url=feed_url, entries=tuple(entries))
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8AJ — HTML Feed Discovery
+# ---------------------------------------------------------------------------
+
+
+class _FeedLinkParser(HTMLParser):
+    """
+    Lightweight HTMLParser that extracts <link rel="alternate"> feed candidates.
+
+    Fail-soft: collects partial hits even if parsing fails mid-document.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._hits: list[dict[str, str]] = []
+        self._base_href: str | None = None
+        self._error: str | None = None
+
+    @property
+    def hits(self) -> list[dict[str, str]]:
+        return self._hits
+
+    @property
+    def base_href(self) -> str | None:
+        return self._base_href
+
+    @property
+    def parse_error(self) -> str | None:
+        """Return the first parse error message, if any."""
+        return self._error
+
+    def error(self, message: str) -> None:
+        # HTMLParser.error() is called on parse failures.
+        # Store only the first error for diagnostics.
+        if self._error is None:
+            self._error = message
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        if tag == "base":
+            # <base href="..."> — take the first valid one
+            if self._base_href is None:
+                for name, value in attrs:
+                    if name == "href" and value and value.strip():
+                        self._base_href = value.strip()
+                        break
+            return
+
+        if tag != "link":
+            return
+
+        # Build attr dict (lowercase keys, preserve case of values)
+        attr_dict: dict[str, str] = {}
+        for name, value in attrs:
+            if name is not None and value is not None:
+                attr_dict[name.lower()] = value
+
+        rel = attr_dict.get("rel", "")
+        # Normalize rel to lowercase for matching
+        rel_lower = rel.lower()
+        if "alternate" not in rel_lower:
+            return
+
+        href = attr_dict.get("href", "")
+        if not href or not href.strip():
+            return
+
+        # Reject fragment-only href before urljoin
+        href_stripped = href.strip()
+        if href_stripped.startswith("#"):
+            return
+
+        # Reject non-http schemes
+        scheme = urllib.parse.urlparse(href_stripped).scheme.lower()
+        if scheme and scheme not in ("http", "https"):
+            return
+
+        feed_type = attr_dict.get("type", "").lower()
+        title = attr_dict.get("title", "") or ""
+
+        self._hits.append(
+            {
+                "href": href,
+                "type": feed_type,
+                "title": title,
+            }
+        )
+
+    def handle_startendtag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        # e.g. <link ... /> — same logic as starttag
+        self.handle_starttag(tag, attrs)
+
+
+def _resolve_feed_href(
+    raw_href: str,
+    base_url: str,
+) -> str:
+    """
+    Resolve a raw href against a base URL.
+
+    If raw_href is already absolute (has scheme), return as-is after
+    basic normalization. Otherwise use urllib.parse.urljoin.
+    Finally strip any fragment and normalize scheme+host to lowercase.
+    """
+    raw_href = raw_href.strip()
+    if not raw_href:
+        return ""
+
+    # Fast path: already absolute
+    parsed = urllib.parse.urlparse(raw_href)
+    if parsed.scheme in ("http", "https"):
+        # Strip fragment
+        resolved = parsed._replace(fragment="").geturl()
+        return _normalize_url(resolved)
+
+    # Resolve relative against base_url
+    resolved = urllib.parse.urljoin(base_url, raw_href)
+    # Strip fragment
+    resolved_parsed = urllib.parse.urlparse(resolved)
+    resolved = resolved_parsed._replace(fragment="").geturl()
+    return _normalize_url(resolved)
+
+
+def discover_feed_urls_from_html(
+    page_url: str,
+    html_text: str,
+    max_candidates: int = _MAX_CANDIDATES_DEFAULT,
+) -> FeedDiscoveryBatchResult:
+    """
+    Discover RSS/Atom feed URLs from an HTML page's <link> tags.
+
+    Only considers ``<link rel="alternate">`` tags with a feed-compatible
+    MIME type. Relative hrefs are resolved using the page's ``<base href>``
+    if present, otherwise against ``page_url``.
+
+    Parameters
+    ----------
+    page_url:
+        URL of the HTML page (used as base for relative href resolution).
+    html_text:
+        Raw HTML content of the page.
+    max_candidates:
+        Maximum number of feed candidates to return (hard cap 20).
+
+    Returns
+    -------
+    FeedDiscoveryBatchResult
+        ``hits`` tuple of ``FeedDiscoveryHit`` ordered by confidence (high
+        first), then preserve-first. ``error`` is set only on parse failure
+        that prevents any extraction.
+    """
+    # Clamp max_candidates
+    max_candidates = max(1, min(max_candidates, _MAX_CANDIDATES_HARD))
+
+    parser = _FeedLinkParser()
+    parse_error: str | None = None
+
+    try:
+        parser.feed(html_text)
+    except Exception as e:
+        parse_error = str(e)
+
+    base_href = parser.base_href
+    base_url = base_href if base_href else page_url
+
+    seen_urls: set[str] = set()
+    hits: list[FeedDiscoveryHit] = []
+    discovered_ts = time.time()
+
+    for hit_dict in parser.hits:
+        raw_href = hit_dict["href"]
+        feed_type = hit_dict["type"]
+        title = hit_dict["title"]
+
+        # Determine confidence
+        if feed_type in _FEED_TYPES_HIGH:
+            confidence = 1.0
+        elif feed_type in _FEED_TYPES_LOW:
+            confidence = 0.5
+        else:
+            # Unknown or missing type — skip
+            continue
+
+        resolved = _resolve_feed_href(raw_href, base_url)
+        if not resolved:
+            continue
+
+        # Scheme guard: only http/https
+        parsed_resolved = urllib.parse.urlparse(resolved)
+        if parsed_resolved.scheme not in ("http", "https"):
+            continue
+
+        # Dedup preserve-first
+        if resolved in seen_urls:
+            continue
+        seen_urls.add(resolved)
+
+        hits.append(
+            FeedDiscoveryHit(
+                page_url=page_url,
+                feed_url=resolved,
+                title=title or "",
+                feed_type=feed_type,
+                confidence=confidence,
+                source="link_tag",
+                discovered_ts=discovered_ts,
+            )
+        )
+
+        if len(hits) >= max_candidates:
+            break
+
+    # If we found hits, clear parse error (partial is OK)
+    if hits:
+        parse_error = None
+    elif parse_error:
+        # No hits and had a parse error — signal complete failure
+        return FeedDiscoveryBatchResult(
+            page_url=page_url,
+            hits=(),
+            error=f"html_parse_error:{parse_error}",
+        )
+
+    # Sort: high confidence first, preserve-first for same confidence
+    hits.sort(key=lambda h: -h.confidence)
+
+    return FeedDiscoveryBatchResult(
+        page_url=page_url,
+        hits=tuple(hits),
+        error=None,
+    )
+
+
+async def async_discover_feed_urls(
+    page_url: str,
+    timeout_s: float = 35.0,
+    max_bytes: int = 2_000_000,
+    max_candidates: int = _MAX_CANDIDATES_DEFAULT,
+) -> FeedDiscoveryBatchResult:
+    """
+    Thin async wrapper: fetch an HTML page via 8AD and discover feed URLs.
+
+    The CPU-bound HTML parsing is offloaded to a thread pool so it never
+    blocks the event loop.
+
+    Fail-soft behaviour:
+    - Fetch error → empty hits + error string.
+    - Non-HTML content type → empty hits + error string.
+    - ``CancelledError`` is re-raised and never swallowed.
+
+    Parameters
+    ----------
+    page_url:
+        URL of the HTML page to fetch and analyse.
+    timeout_s:
+        Fetch timeout passed to 8AD.
+    max_bytes:
+        Maximum bytes to accept from 8AD.
+    max_candidates:
+        Passed through to ``discover_feed_urls_from_html``.
+    """
+    # Import here to keep import surface clean
+    from hledac.universal.fetching.public_fetcher import async_fetch_public_text
+
+    try:
+        result = await async_fetch_public_text(
+            page_url, timeout_s=timeout_s, max_bytes=max_bytes
+        )
+    except CancelledError:
+        raise  # never swallow
+
+    # Fail-soft on fetch errors
+    if result.error or result.text is None:
+        return FeedDiscoveryBatchResult(
+            page_url=page_url,
+            hits=(),
+            error=result.error or "fetch_returned_none",
+        )
+
+    # Reject non-HTML content types
+    content_type = (result.headers or {}).get("content-type", "").lower()
+    if content_type and not (
+        "text/html" in content_type
+        or "application/xhtml+xml" in content_type
+    ):
+        return FeedDiscoveryBatchResult(
+            page_url=page_url,
+            hits=(),
+            error=f"content_type_rejected:{content_type}",
+        )
+
+    # Offload pure-Python HTML parsing to thread pool
+    batch: FeedDiscoveryBatchResult = await asyncio.to_thread(
+        discover_feed_urls_from_html,
+        page_url,
+        result.text,
+        max_candidates,
+    )
+
+    return batch
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8AJ — Curated Seed Surface
+# ---------------------------------------------------------------------------
+
+
+def get_default_feed_seeds() -> tuple[FeedSeed, ...]:
+    """
+    Return a small typed set of OSINT-relevant curated feed seeds.
+
+    No network calls are made at import time. Priority is non-zero only
+    for feeds that are primary OSINT sources; supporting feeds get 0.
+    """
+    return (
+        # CISA — critical infrastructure advisories
+        FeedSeed(
+            feed_url="https://www.cisa.gov/feeds/hns.xml",
+            label="CISA HNS",
+            source="curated_seed",
+            priority=10,
+        ),
+        # NVD — CVE database
+        FeedSeed(
+            feed_url="https://nvd.nist.gov/feeds/xml/cve/misc/nvd-rss.xml",
+            label="NVD CVE RSS",
+            source="curated_seed",
+            priority=10,
+        ),
+        # The Hacker News
+        FeedSeed(
+            feed_url="https://feeds.feedburner.com/TheHackersNews",
+            label="The Hacker News",
+            source="curated_seed",
+            priority=5,
+        ),
+        # Abuse.ch URLhaus — malware URL blocklist
+        FeedSeed(
+            feed_url="https://abuse.ch/feeds/urlhaus/",
+            label="URLhaus",
+            source="curated_seed",
+            priority=10,
+        ),
+        # WeLiveSecurity — ESET security research
+        FeedSeed(
+            feed_url="https://www.welivesecurity.com/feed/",
+            label="WeLiveSecurity",
+            source="curated_seed",
+            priority=3,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8AT — Seed Health Truth Surface
+# ---------------------------------------------------------------------------
+
+
+def normalize_seed_identity(seed: FeedSeed) -> str:
+    """
+    Return a canonical identity string for a FeedSeed.
+
+    Uses the URL host + path (no query/fragment) for stable identification.
+    No network calls.
+    """
+    try:
+        parsed = urllib.parse.urlparse(seed.feed_url)
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path}"
+    except Exception:
+        return seed.feed_url.lower().strip()
+
+
+def get_default_feed_seed_truth() -> dict[str, Any]:
+    """
+    Return a truth-surface dict describing the current curated seed state.
+
+    Intended for test and audit use. Side-effect free.
+    """
+    seeds = get_default_feed_seeds()
+    return {
+        "count": len(seeds),
+        "identities": sorted(normalize_seed_identity(s) for s in seeds),
+        "urls": sorted(s.feed_url for s in seeds),
+        "has_authenticated_reuters": any(
+            "reuters.com" in s.feed_url.lower() for s in seeds
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8AJ — Merge Discovered + Seeded Sources
+# ---------------------------------------------------------------------------
+
+
+def _normalize_for_dedup(url: str) -> str:
+    """Normalize URL for deterministic merge dedup."""
+    return _normalize_url(url)
+
+
+def merge_feed_sources(
+    discovered: tuple[FeedDiscoveryHit, ...],
+    seeds: tuple[FeedSeed, ...],
+) -> tuple[MergedFeedSource, ...]:
+    """
+    Merge discovered feed hits with curated seeds.
+
+    Rules:
+    1. Seeds have their own priority; discovered hits get priority 0.
+    2. Dedup by normalized feed URL — seed URL wins over discovered URL
+       when they resolve to the same normalized URL.
+    3. Result is sorted: higher priority first; preserve-first for ties.
+    4. All metadata (label, origin, priority) is preserved — never returns
+       only a tuple of URLs.
+    """
+    seen_urls: dict[str, dict[str, Any]] = {}
+
+    # Process seeds first so they take precedence on collision
+    for seed in seeds:
+        norm = _normalize_for_dedup(seed.feed_url)
+        if norm and norm not in seen_urls:
+            seen_urls[norm] = {
+                "feed_url": seed.feed_url,
+                "label": seed.label,
+                "origin": "seed",
+                "priority": seed.priority,
+            }
+
+    # Process discovered hits (seed wins on collision)
+    for hit in discovered:
+        norm = _normalize_for_dedup(hit.feed_url)
+        if norm and norm not in seen_urls:
+            label = hit.title if hit.title else norm
+            seen_urls[norm] = {
+                "feed_url": hit.feed_url,
+                "label": label,
+                "origin": "discovered",
+                "priority": 0,
+            }
+
+    # Sort: higher priority first, preserve-first (dict insertion order) for ties
+    sorted_items = sorted(seen_urls.values(), key=lambda x: -x["priority"])
+
+    return tuple(
+        MergedFeedSource(
+            feed_url=item["feed_url"],
+            label=item["label"],
+            origin=item["origin"],
+            priority=item["priority"],
+        )
+        for item in sorted_items
+    )

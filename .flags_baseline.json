@@ -1,0 +1,345 @@
+{
+  "enhanced_research.py": [
+    "INTELLIGENCE_AVAILABLE"
+  ],
+  "autonomous_orchestrator.py": [
+    "AIOHTTP_AVAILABLE",
+    "AUTONOMOUS_ANALYZER_AVAILABLE",
+    "HINTS_AVAILABLE",
+    "METADATA_EXTRACTOR_AVAILABLE",
+    "MLX_AVAILABLE",
+    "PATTERN_MINING_AVAILABLE",
+    "PSUTIL_AVAILABLE",
+    "TOT_INTEGRATION_AVAILABLE"
+  ],
+  "resource_allocator.py": [
+    "MLX_AVAILABLE"
+  ],
+  "tool_registry.py": [
+    "DNS_TUNNEL_AVAILABLE"
+  ],
+  "__init__.py": [
+    "BUDGET_MANAGER_AVAILABLE",
+    "ENHANCED_ORCHESTRATOR_AVAILABLE",
+    "INTEGRATED_ORCHESTRATOR_AVAILABLE",
+    "SUPREME_INTEGRATION_AVAILABLE",
+    "UNIFIED_RESEARCH_AVAILABLE"
+  ],
+  "orchestrator_integration.py": [
+    "MEMORY_COORD_AVAILABLE",
+    "META_REASONING_AVAILABLE",
+    "MONITORING_AVAILABLE",
+    "QUANTUM_AVAILABLE",
+    "SECURITY_COORD_AVAILABLE",
+    "SWARM_AVAILABLE",
+    "VALIDATION_AVAILABLE"
+  ],
+  "capabilities.py": [
+    "MLX_AVAILABLE"
+  ],
+  "tot_integration.py": [
+    "TOT_AVAILABLE"
+  ],
+  "research/spike_priority.py": [
+    "MLX_AVAILABLE"
+  ],
+  "research/task_prioritizer.py": [
+    "MLX_AVAILABLE"
+  ],
+  "research/branch_manager.py": [
+    "ANE_AVAILABLE"
+  ],
+  "coordinators/memory_coordinator.py": [
+    "HNSWLIB_AVAILABLE",
+    "SCIPY_AVAILABLE"
+  ],
+  "coordinators/resource_allocator.py": [
+    "SKLEARN_AVAILABLE"
+  ],
+  "coordinators/fetch_coordinator.py": [
+    "AIOHTTP_AVAILABLE",
+    "HINTS_AVAILABLE",
+    "SESSION_AVAILABLE",
+    "ZSTD_AVAILABLE"
+  ],
+  "coordinators/performance_coordinator.py": [
+    "PSUTIL_AVAILABLE"
+  ],
+  "coordinators/multimodal_coordinator.py": [
+    "MLX_AVAILABLE"
+  ],
+  "coordinators/benchmark_coordinator.py": [
+    "PSUTIL_AVAILABLE"
+  ],
+  "tools/content_extractor.py": [
+    "BS4_AVAILABLE"
+  ],
+  "tools/lmdb_kv.py": [
+    "AIOLMDB_AVAILABLE",
+    "LMDB_AVAILABLE"
+  ],
+  "tools/document_metadata_extractor.py": [
+    "DOCX_AVAILABLE",
+    "FITZ_AVAILABLE",
+    "OPENPYXL_AVAILABLE",
+    "PIL_AVAILABLE"
+  ],
+  "tools/deep_web_hints.py": [
+    "BS4_AVAILABLE"
+  ],
+  "tools/reranker.py": [
+    "FLASHRANK_AVAILABLE"
+  ],
+  "tools/content_miner.py": [
+    "LXML_AVAILABLE",
+    "SELECTOLAX_AVAILABLE"
+  ],
+  "tools/hnsw_builder.py": [
+    "HNSWLIB_AVAILABLE"
+  ],
+  "tools/session_manager.py": [
+    "USE_ORJSON"
+  ],
+  "tools/source_bandit.py": [
+    "MSGPACK_AVAILABLE"
+  ],
+  "tools/darknet.py": [
+    "AIOHTTP_SOCKS_AVAILABLE",
+    "LIBOQS_AVAILABLE",
+    "STEM_AVAILABLE"
+  ],
+  "tools/searxng_client.py": [
+    "AIOHTTP_AVAILABLE"
+  ],
+  "tools/ftp_explorer.py": [
+    "FTP_AVAILABLE"
+  ],
+  "tools/url_dedup.py": [
+    "PROBABLES_AVAILABLE"
+  ],
+  "memory/shared_memory_manager.py": [
+    "ORJSON_AVAILABLE",
+    "PYARROW_AVAILABLE"
+  ],
+  "layers/coordination_layer.py": [
+    "NEUROMORPHIC_AVAILABLE",
+    "UNIVERSAL_COORDINATORS_AVAILABLE"
+  ],
+  "intelligence/pattern_mining.py": [
+    "MLX_AVAILABLE"
+  ],
+  "intelligence/cryptographic_intelligence.py": [
+    "CRYPTOGRAPHY_AVAILABLE"
+  ],
+  "intelligence/data_leak_hunter.py": [
+    "AIOHTTP_AVAILABLE",
+    "SECURITY_AVAILABLE"
+  ],
+  "intelligence/advanced_image_osint.py": [
+    "MLX_AVAILABLE",
+    "PIL_AVAILABLE"
+  ],
+  "intelligence/document_intelligence.py": [
+    "DOCUMENT_INTELLIGENCE_AVAILABLE",
+    "MLX_AVAILABLE",
+    "MPS_AVAILABLE",
+    "PIL_AVAILABLE",
+    "PYMUPDF_AVAILABLE"
+  ],
+  "intelligence/__init__.py": [
+    "ACADEMIC_SEARCH_AVAILABLE",
+    "ARCHIVE_AVAILABLE",
+    "BLOCKCHAIN_FORENSICS_AVAILABLE",
+    "CRAWLER_AVAILABLE",
+    "CRYPTO_AVAILABLE",
+    "DATA_LEAK_HUNTER_AVAILABLE",
+    "DECISION_ENGINE_AVAILABLE",
+    "DOCUMENT_INTELLIGENCE_AVAILABLE",
+    "EXPOSED_SERVICE_HUNTER_AVAILABLE",
+    "IDENTITY_STITCHING_AVAILABLE",
+    "INPUT_DETECTOR_AVAILABLE",
+    "PATTERN_MINING_AVAILABLE",
+    "RELATIONSHIP_DISCOVERY_AVAILABLE",
+    "TEMPORAL_ARCHAEOLOGIST_AVAILABLE",
+    "TEMPORAL_AVAILABLE",
+    "WEB_INTEL_AVAILABLE",
+    "WORKFLOW_ORCHESTRATOR_AVAILABLE"
+  ],
+  "intelligence/blockchain_analyzer.py": [
+    "HTTP_UTILS_AVAILABLE"
+  ],
+  "intelligence/archive_discovery.py": [
+    "BS4_AVAILABLE",
+    "SECURITY_AVAILABLE"
+  ],
+  "intelligence/identity_stitching.py": [
+    "NETWORKX_AVAILABLE",
+    "RAPIDFUZZ_AVAILABLE",
+    "RELATIONSHIP_AVAILABLE",
+    "SKLEARN_AVAILABLE"
+  ],
+  "intelligence/dark_web_intelligence.py": [
+    "TOR_AVAILABLE"
+  ],
+  "intelligence/stealth_crawler.py": [
+    "CURL_AVAILABLE"
+  ],
+  "intelligence/relationship_discovery.py": [
+    "IGRAPH_AVAILABLE",
+    "LOUVAIN_AVAILABLE",
+    "LSH_AVAILABLE",
+    "MLX_AVAILABLE",
+    "NETWORKX_AVAILABLE",
+    "SCIPY_AVAILABLE"
+  ],
+  "security/__init__.py": [
+    "GHOST_AVAILABLE",
+    "STEGO_AVAILABLE"
+  ],
+  "security/vault_manager.py": [
+    "CRYPTO_AVAILABLE",
+    "PYZIPPER_AVAILABLE"
+  ],
+  "security/stego_detector.py": [
+    "MPS_AVAILABLE"
+  ],
+  "network/open_storage_scanner.py": [
+    "AIOHTTP_AVAILABLE"
+  ],
+  "network/__init__.py": [
+    "DNS_TUNNEL_DETECTOR_AVAILABLE"
+  ],
+  "network/js_source_map_extractor.py": [
+    "AIOHTTP_AVAILABLE"
+  ],
+  "network/tor_manager.py": [
+    "CIRCUIT_REUSE_SECONDS",
+    "STEM_AVAILABLE"
+  ],
+  "network/favicon_hasher.py": [
+    "MMH3_AVAILABLE"
+  ],
+  "network/ct_log_scanner.py": [
+    "AIOHTTP_AVAILABLE"
+  ],
+  "graph/__init__.py": [
+    "QUANTUM_PATHFINDER_AVAILABLE"
+  ],
+  "graph/quantum_pathfinder.py": [
+    "MLX_AVAILABLE",
+    "QUANTUM_PATHFINDER_AVAILABLE",
+    "SCIPY_AVAILABLE"
+  ],
+  "planning/slm_decomposer.py": [
+    "MLX_LM_AVAILABLE"
+  ],
+  "utils/bloom_filter.py": [
+    "XXHASH_AVAILABLE"
+  ],
+  "utils/sketches.py": [
+    "LMDB_AVAILABLE",
+    "MLX_AVAILABLE"
+  ],
+  "utils/shared_tensor.py": [
+    "MLX_AVAILABLE"
+  ],
+  "utils/language.py": [
+    "FAST_LANGDETECT_AVAILABLE"
+  ],
+  "forensics/__init__.py": [
+    "METADATA_EXTRACTOR_AVAILABLE"
+  ],
+  "multimodal/vision_encoder.py": [
+    "COREML_AVAILABLE"
+  ],
+  "autonomy/__init__.py": [
+    "AGENT_META_OPTIMIZER_AVAILABLE"
+  ],
+  "autonomy/agent_meta_optimizer.py": [
+    "AGENT_META_OPTIMIZER_AVAILABLE"
+  ],
+  "knowledge/atomic_storage.py": [
+    "DELTA_AVAILABLE",
+    "LMDB_AVAILABLE"
+  ],
+  "knowledge/pq_index.py": [
+    "MLX_AVAILABLE"
+  ],
+  "knowledge/persistent_layer.py": [
+    "C2PA_AVAILABLE",
+    "CACHE_AVAILABLE",
+    "HNSWLIB_AVAILABLE",
+    "MLX_AVAILABLE"
+  ],
+  "knowledge/graph_rag.py": [
+    "NUMPY_AVAILABLE"
+  ],
+  "knowledge/entity_linker.py": [
+    "AIOHTTP_AVAILABLE",
+    "GLINER_AVAILABLE",
+    "RAPIDFUZZ_AVAILABLE"
+  ],
+  "knowledge/rag_engine.py": [
+    "COREML_AVAILABLE",
+    "RANK_BM25_AVAILABLE"
+  ],
+  "knowledge/explainer/deep.py": [
+    "USE_NATIVE"
+  ],
+  "brain/dynamic_model_manager.py": [
+    "MLX_AVAILABLE"
+  ],
+  "brain/inference_engine.py": [
+    "MLX_AVAILABLE"
+  ],
+  "brain/hermes3_engine.py": [
+    "KV_CACHE_AVAILABLE",
+    "OUTLINES_AVAILABLE"
+  ],
+  "brain/ane_embedder.py": [
+    "ANE_AVAILABLE"
+  ],
+  "brain/__init__.py": [
+    "DISTILLATION_AVAILABLE",
+    "HYPOTHESIS_AVAILABLE",
+    "INFERENCE_AVAILABLE",
+    "INSIGHT_AVAILABLE",
+    "MODEL_MANAGER_AVAILABLE",
+    "MOE_AVAILABLE",
+    "NER_ENGINE_AVAILABLE"
+  ],
+  "brain/model_manager.py": [
+    "MLX_AVAILABLE"
+  ],
+  "brain/gnn_predictor.py": [
+    "MLX_AVAILABLE"
+  ],
+  "brain/moe_router.py": [
+    "MLX_AVAILABLE"
+  ],
+  "brain/distillation_engine.py": [
+    "DISTILLATION_AVAILABLE",
+    "MLX_AVAILABLE"
+  ],
+  "brain/paged_attention_cache.py": [
+    "MLX_AVAILABLE"
+  ],
+  "loops/fetch_loop.py": [
+    "AIOHTTP_AVAILABLE",
+    "SELECTOLAX_AVAILABLE"
+  ],
+  "text/__init__.py": [
+    "ENCODING_DETECTOR_AVAILABLE",
+    "HASH_IDENTIFIER_AVAILABLE",
+    "UNICODE_ANALYZER_AVAILABLE"
+  ],
+  "federated/sketches.py": [
+    "MLX_AVAILABLE"
+  ],
+  "federated/__init__.py": [
+    "FEDERATED_AVAILABLE"
+  ],
+  "federated/post_quantum.py": [
+    "OQS_AVAILABLE"
+  ]
+}

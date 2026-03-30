@@ -1,0 +1,4 @@
+# torch and torchvision are optional — install via:
+#   pip install -r requirements-optional.txt
+# or for Apple Silicon MPS:
+#   pip install torch torchvision

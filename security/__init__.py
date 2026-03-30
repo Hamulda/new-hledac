@@ -1,0 +1,92 @@
+"""
+Universal Security - PII Detection, Encryption, and Vault Management
+
+Security components optimized for M1 8GB RAM with MLX acceleration.
+Includes steganography detection from deep_research integration.
+"""
+
+from .pii_gate import (
+    SecurityGate,
+    PIICategory,
+    PIIMatch,
+    SanitizationResult,
+    create_security_gate,
+    quick_sanitize
+)
+from .vault_manager import (
+    LootManager
+)
+from .ram_vault import (
+    RamDiskVault
+)
+
+# Encryption and Key Management (Sprint 61)
+from .encryption import encrypt_aes_gcm, decrypt_aes_gcm
+from .key_manager import KeyManager
+
+# Steganography Detector (from deep_research/steganography_watermark_detector.py)
+try:
+    from .stego_detector import (
+        StegoDetector,
+        StatisticalStegoDetector,
+        StegoAnalysisResult,
+        StegoResult,
+        StegoConfig,
+        ChiSquareResult,
+        RSResult,
+        DCTResult,
+        create_stego_detector,
+        quick_stego_check,
+    )
+    STEGO_AVAILABLE = True
+except ImportError:
+    STEGO_AVAILABLE = False
+
+# Digital Ghost Detector (from deep_research/next_gen_enhancements.py)
+try:
+    from .digital_ghost_detector import (
+        DigitalGhostDetector,
+        DigitalGhostAnalysis,
+        GhostSignal,
+        RecoveredContent,
+        detect_digital_ghosts,
+    )
+    GHOST_AVAILABLE = True
+except ImportError:
+    GHOST_AVAILABLE = False
+
+__all__ = [
+    # PII Gate
+    'SecurityGate',
+    'PIICategory',
+    'PIIMatch',
+    'SanitizationResult',
+    'create_security_gate',
+    'quick_sanitize',
+    # Vault
+    'LootManager',
+    'RamDiskVault',
+    # Encryption & Key Management
+    'encrypt_aes_gcm',
+    'decrypt_aes_gcm',
+    'KeyManager',
+    # Stego
+    'StegoDetector',
+    'StatisticalStegoDetector',
+    'StegoAnalysisResult',
+    'StegoResult',
+    'StegoConfig',
+    'ChiSquareResult',
+    'RSResult',
+    'DCTResult',
+    'create_stego_detector',
+    'quick_stego_check',
+    'STEGO_AVAILABLE',
+    # Ghost
+    'DigitalGhostDetector',
+    'DigitalGhostAnalysis',
+    'GhostSignal',
+    'RecoveredContent',
+    'detect_digital_ghosts',
+    'GHOST_AVAILABLE',
+]
