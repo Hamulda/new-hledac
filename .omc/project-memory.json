@@ -1,0 +1,628 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1774900242517,
+  "projectRoot": "/Users/vojtechhamada/PycharmProjects/Hledac/hledac/universal",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Python",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "requirements.txt"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "pip",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "scripts",
+      "tests"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "MagicMock": {
+      "path": "MagicMock",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1774900242466,
+      "keyFiles": []
+    },
+    "__pycache__": {
+      "path": "__pycache__",
+      "purpose": null,
+      "fileCount": 18,
+      "lastAccessed": 1774900242466,
+      "keyFiles": [
+        "__init__.cpython-311.pyc",
+        "__main__.cpython-311.pyc",
+        "autonomous_analyzer.cpython-311.pyc",
+        "autonomous_orchestrator.cpython-311.pyc",
+        "capabilities.cpython-311.pyc"
+      ]
+    },
+    "autonomy": {
+      "path": "autonomy",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1774900242467,
+      "keyFiles": [
+        "__init__.py",
+        "agent_meta_optimizer.py",
+        "planner.py",
+        "research_engine.py"
+      ]
+    },
+    "benchmark_results": {
+      "path": "benchmark_results",
+      "purpose": null,
+      "fileCount": 170,
+      "lastAccessed": 1774900242474,
+      "keyFiles": [
+        "benchmark_20260311_004339.json",
+        "benchmark_20260311_004339.txt",
+        "benchmark_20260311_005054.json",
+        "benchmark_20260311_005054.txt",
+        "benchmark_20260311_005250.json"
+      ]
+    },
+    "benchmarks": {
+      "path": "benchmarks",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1774900242479,
+      "keyFiles": [
+        "__init__.py",
+        "research_effectiveness.py",
+        "run_sprint82j_benchmark.py"
+      ]
+    },
+    "brain": {
+      "path": "brain",
+      "purpose": null,
+      "fileCount": 23,
+      "lastAccessed": 1774900242480,
+      "keyFiles": [
+        "__init__.py",
+        "ane_embedder.py",
+        "apple_fm_probe.py",
+        "decision_engine.py",
+        "distillation_engine.py"
+      ]
+    },
+    "cache": {
+      "path": "cache",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1774900242481,
+      "keyFiles": [
+        "budget_manager.py"
+      ]
+    },
+    "config": {
+      "path": "config",
+      "purpose": "Configuration files",
+      "fileCount": 0,
+      "lastAccessed": 1774900242481,
+      "keyFiles": []
+    },
+    "context_optimization": {
+      "path": "context_optimization",
+      "purpose": null,
+      "fileCount": 5,
+      "lastAccessed": 1774900242482,
+      "keyFiles": [
+        "__init__.py",
+        "context_cache.py",
+        "context_compressor.py",
+        "dynamic_context_manager.py"
+      ]
+    },
+    "coordinators": {
+      "path": "coordinators",
+      "purpose": null,
+      "fileCount": 25,
+      "lastAccessed": 1774900242483,
+      "keyFiles": [
+        "__init__.py",
+        "advanced_research_coordinator.py",
+        "agent_coordination_engine.py",
+        "archive_coordinator.py",
+        "base.py"
+      ]
+    },
+    "core": {
+      "path": "core",
+      "purpose": null,
+      "fileCount": 5,
+      "lastAccessed": 1774900242483,
+      "keyFiles": [
+        "__init__.py",
+        "__main__.py",
+        "mlx_embeddings.py",
+        "resource_governor.py"
+      ]
+    },
+    "data": {
+      "path": "data",
+      "purpose": "Data files",
+      "fileCount": 0,
+      "lastAccessed": 1774900242484,
+      "keyFiles": []
+    },
+    "deep_research": {
+      "path": "deep_research",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1774900242484,
+      "keyFiles": [
+        "__init__.py",
+        "path_discovery.py",
+        "utils.py"
+      ]
+    },
+    "dht": {
+      "path": "dht",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1774900242485,
+      "keyFiles": [
+        "__init__.py",
+        "kademlia_node.py",
+        "local_graph.py",
+        "sketch_exchange.py"
+      ]
+    },
+    "discovery": {
+      "path": "discovery",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1774900242485,
+      "keyFiles": [
+        "duckduckgo_adapter.py",
+        "rss_atom_adapter.py",
+        "source_registry.py",
+        "ti_feed_adapter.py"
+      ]
+    },
+    "execution": {
+      "path": "execution",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1774900242485,
+      "keyFiles": [
+        "__init__.py",
+        "ghost_executor.py"
+      ]
+    },
+    "export": {
+      "path": "export",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1774900242486,
+      "keyFiles": [
+        "__init__.py",
+        "jsonld_exporter.py",
+        "markdown_reporter.py",
+        "stix_exporter.py"
+      ]
+    },
+    "federated": {
+      "path": "federated",
+      "purpose": null,
+      "fileCount": 14,
+      "lastAccessed": 1774900242486,
+      "keyFiles": [
+        "__init__.py",
+        "differential_privacy.py",
+        "evidence_log.py",
+        "federated_coordinator_v2.py",
+        "model_store.py"
+      ]
+    },
+    "fetching": {
+      "path": "fetching",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1774900242486,
+      "keyFiles": [
+        "public_fetcher.py"
+      ]
+    },
+    "forensics": {
+      "path": "forensics",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1774900242486,
+      "keyFiles": [
+        "__init__.py",
+        "metadata_extractor.py"
+      ]
+    },
+    "graph": {
+      "path": "graph",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1774900242487,
+      "keyFiles": [
+        "__init__.py",
+        "quantum_pathfinder.py"
+      ]
+    },
+    "hypothesis": {
+      "path": "hypothesis",
+      "purpose": null,
+      "fileCount": 6,
+      "lastAccessed": 1774900242487,
+      "keyFiles": [
+        "__init__.py",
+        "beta_binomial.py",
+        "dempster_shafer.py",
+        "eig.py",
+        "generator.py"
+      ]
+    },
+    "infrastructure": {
+      "path": "infrastructure",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1774900242488,
+      "keyFiles": [
+        "__init__.py",
+        "plugin_manager.py",
+        "system_monitor.py"
+      ]
+    },
+    "intelligence": {
+      "path": "intelligence",
+      "purpose": null,
+      "fileCount": 26,
+      "lastAccessed": 1774900242488,
+      "keyFiles": [
+        "__init__.py",
+        "academic_search.py",
+        "advanced_image_osint.py",
+        "archive_discovery.py",
+        "blockchain_analyzer.py"
+      ]
+    },
+    "knowledge": {
+      "path": "knowledge",
+      "purpose": null,
+      "fileCount": 17,
+      "lastAccessed": 1774900242491,
+      "keyFiles": [
+        "__init__.py",
+        "analytics_hook.py",
+        "atomic_storage.py",
+        "context_graph.py",
+        "duckdb_store.py"
+      ]
+    },
+    "layers": {
+      "path": "layers",
+      "purpose": null,
+      "fileCount": 14,
+      "lastAccessed": 1774900242492,
+      "keyFiles": [
+        "__init__.py",
+        "communication_layer.py",
+        "content_layer.py",
+        "coordination_layer.py",
+        "ghost_layer.py"
+      ]
+    },
+    "legacy": {
+      "path": "legacy",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1774900242493,
+      "keyFiles": []
+    },
+    "logs": {
+      "path": "logs",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1774900242493,
+      "keyFiles": []
+    },
+    "loops": {
+      "path": "loops",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1774900242494,
+      "keyFiles": [
+        "__init__.py",
+        "fetch_loop.py",
+        "graph_loop.py",
+        "inference_loop.py"
+      ]
+    },
+    "memory": {
+      "path": "memory",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1774900242494,
+      "keyFiles": [
+        "__init__.py",
+        "shared_memory_manager.py"
+      ]
+    },
+    "models": {
+      "path": "models",
+      "purpose": "Data models",
+      "fileCount": 0,
+      "lastAccessed": 1774900242495,
+      "keyFiles": []
+    },
+    "multimodal": {
+      "path": "multimodal",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1774900242495,
+      "keyFiles": [
+        "__init__.py",
+        "fusion.py",
+        "vision_encoder.py"
+      ]
+    },
+    "network": {
+      "path": "network",
+      "purpose": null,
+      "fileCount": 10,
+      "lastAccessed": 1774900242495,
+      "keyFiles": [
+        "__init__.py",
+        "ct_log_scanner.py",
+        "dns_tunnel_detector.py",
+        "favicon_hasher.py",
+        "jarm_fingerprinter.py"
+      ]
+    },
+    "orchestrator": {
+      "path": "orchestrator",
+      "purpose": null,
+      "fileCount": 10,
+      "lastAccessed": 1774900242496,
+      "keyFiles": [
+        "__init__.py",
+        "global_scheduler.py",
+        "lane_state.py",
+        "memory_pressure_broker.py",
+        "phase_controller.py"
+      ]
+    },
+    "patterns": {
+      "path": "patterns",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1774900242497,
+      "keyFiles": [
+        "pattern_matcher.py"
+      ]
+    },
+    "pipeline": {
+      "path": "pipeline",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1774900242497,
+      "keyFiles": [
+        "__init__.py",
+        "live_feed_pipeline.py",
+        "live_public_pipeline.py"
+      ]
+    },
+    "planning": {
+      "path": "planning",
+      "purpose": null,
+      "fileCount": 6,
+      "lastAccessed": 1774900242498,
+      "keyFiles": [
+        "__init__.py",
+        "cost_model.py",
+        "htn_planner.py",
+        "search.py",
+        "slm_decomposer.py"
+      ]
+    },
+    "policy": {
+      "path": "policy",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1774900242498,
+      "keyFiles": [
+        "__init__.py",
+        "nym_policy.py"
+      ]
+    },
+    "prefetch": {
+      "path": "prefetch",
+      "purpose": null,
+      "fileCount": 5,
+      "lastAccessed": 1774900242499,
+      "keyFiles": [
+        "__init__.py",
+        "budget_tracker.py",
+        "prefetch_cache.py",
+        "prefetch_oracle.py",
+        "ssm_reranker.py"
+      ]
+    },
+    "research": {
+      "path": "research",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1774900242500,
+      "keyFiles": [
+        "branch_manager.py",
+        "parallel_scheduler.py",
+        "spike_priority.py",
+        "task_prioritizer.py"
+      ]
+    },
+    "rl": {
+      "path": "rl",
+      "purpose": null,
+      "fileCount": 6,
+      "lastAccessed": 1774900242500,
+      "keyFiles": [
+        "__init__.py",
+        "actions.py",
+        "marl_coordinator.py",
+        "qmix.py",
+        "replay_buffer.py"
+      ]
+    },
+    "runs": {
+      "path": "runs",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1774900242500,
+      "keyFiles": []
+    },
+    "runtime": {
+      "path": "runtime",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1774900242501,
+      "keyFiles": [
+        "sprint_lifecycle.py",
+        "sprint_scheduler.py"
+      ]
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 3,
+      "lastAccessed": 1774900242501,
+      "keyFiles": [
+        "check_torrc.py",
+        "mount_ramdisk.sh",
+        "unmount_ramdisk.sh"
+      ]
+    },
+    "security": {
+      "path": "security",
+      "purpose": null,
+      "fileCount": 14,
+      "lastAccessed": 1774900242502,
+      "keyFiles": [
+        "__init__.py",
+        "audit.py",
+        "deep_research_security.py",
+        "destruction.py",
+        "digital_ghost_detector.py"
+      ]
+    },
+    "stealth": {
+      "path": "stealth",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1774900242502,
+      "keyFiles": [
+        "__init__.py",
+        "stealth_manager.py"
+      ]
+    },
+    "temp": {
+      "path": "temp",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1774900242502,
+      "keyFiles": []
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 147,
+      "lastAccessed": 1774900242503,
+      "keyFiles": [
+        "FINAL_REPORT.md",
+        "FINAL_REPORT_8L.md",
+        "FINAL_REPORT_8N.md",
+        "MEGA_SUITE_ANALYSIS.md",
+        "PHASE_GATES.py"
+      ]
+    },
+    "text": {
+      "path": "text",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1774900242504,
+      "keyFiles": [
+        "__init__.py",
+        "encoding_detector.py",
+        "hash_identifier.py",
+        "unicode_analyzer.py"
+      ]
+    },
+    "tools": {
+      "path": "tools",
+      "purpose": null,
+      "fileCount": 38,
+      "lastAccessed": 1774900242504,
+      "keyFiles": [
+        "__init__.py",
+        "audit_flags.py",
+        "checkpoint.py",
+        "commoncrawl_adapter.py",
+        "content_extractor.py"
+      ]
+    },
+    "transport": {
+      "path": "transport",
+      "purpose": null,
+      "fileCount": 7,
+      "lastAccessed": 1774900242505,
+      "keyFiles": [
+        "__init__.py",
+        "base.py",
+        "inmemory_transport.py",
+        "nym_transport.py",
+        "tor_transport.py"
+      ]
+    },
+    "utils": {
+      "path": "utils",
+      "purpose": "Utility functions",
+      "fileCount": 47,
+      "lastAccessed": 1774900242505,
+      "keyFiles": [
+        "__init__.py",
+        "action_result.py",
+        "aho_extractor.py",
+        "ane_pipelines.py",
+        "async_helpers.py"
+      ]
+    },
+    "knowledge/config": {
+      "path": "knowledge/config",
+      "purpose": "Configuration files",
+      "fileCount": 0,
+      "lastAccessed": 1774900242510,
+      "keyFiles": []
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}

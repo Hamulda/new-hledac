@@ -681,7 +681,18 @@ class ModelLifecycle:
                 formatted = full_prompt
 
             def _mlx_generate_raw() -> str:
-                return mlx_lm.generate(model, tokenizer, prompt=formatted, max_tokens=max_tokens, verbose=False)
+                result = ""
+                try:
+                    result = mlx_lm.generate(model, tokenizer, prompt=formatted, max_tokens=max_tokens, verbose=False)
+                finally:
+                    # Sprint 8UD B.2: Clear MLX Metal cache after inference
+                    try:
+                        import mlx.core as _mx
+                        if _mx.metal.is_available():
+                            _mx.metal.clear_cache()
+                    except Exception:
+                        pass  # Non-fatal
+                return result
 
             raw = await loop.run_in_executor(CPU_EXECUTOR, _mlx_generate_raw)
             start = raw.find("{")

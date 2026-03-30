@@ -785,14 +785,23 @@ class Hermes3Engine:
                 import mlx_lm
 
                 def _prefill():
-                    for _ in mlx_lm.stream_generate(
-                        model=self._model,
-                        tokenizer=self._tokenizer,
-                        prompt=self._system_prompt,
-                        prompt_cache=self._system_prompt_cache,
-                        max_tokens=1
-                    ):
-                        pass
+                    try:
+                        for _ in mlx_lm.stream_generate(
+                            model=self._model,
+                            tokenizer=self._tokenizer,
+                            prompt=self._system_prompt,
+                            prompt_cache=self._system_prompt_cache,
+                            max_tokens=1
+                        ):
+                            pass
+                    finally:
+                        # Sprint 8UD B.2: Clear MLX Metal cache after inference
+                        try:
+                            import mlx.core as _mx
+                            if _mx.metal.is_available():
+                                _mx.metal.clear_cache()
+                        except Exception:
+                            pass  # Non-fatal
 
                 await asyncio.to_thread(_prefill)
                 self._kv_cache_stats['cache_prefills'] = 1
