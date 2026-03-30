@@ -1,7 +1,7 @@
 {
   "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"git reset --soft HEAD~1\",\"description\":\"Undo last commit to recommit with gitignore\"}",
-  "error": "Exit code 128\nfatal: ambiguous argument 'HEAD~1': unknown revision or path not in the working tree.\nUse '--' to separate paths from revisions, like this:\n'git <command> [<revision>...] -- [<file>...]'",
-  "timestamp": "2026-03-30T17:14:02.029Z",
-  "retry_count": 2
+  "tool_input_preview": "{\"command\":\"unset GITHUB_TOKEN && git remote set-url origin https://github.com/Hamulda/new-hledac.git && git push origin main 2>&1\",\"timeout\":60000}",
+  "error": "Exit code 1\nTo https://github.com/Hamulda/new-hledac.git\n ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs to 'https://github.com/Hamulda/new-hledac.git'\nhint: Updates were rejected because the remote contains work that you do not\nhint: have locally. This is usually caused by another repository pushing to\nhint: the same ref. If you want to integrate the remote changes, use\nhint: 'git pull' before pushing again.\nhint: See the 'Note about fast-forwards' in 'git push -...",
+  "timestamp": "2026-03-30T17:21:27.338Z",
+  "retry_count": 1
 }
