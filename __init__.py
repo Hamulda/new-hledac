@@ -444,17 +444,7 @@ from .security import (
     RamDiskVault,
 )
 
-# Brain (from Supreme)
-from .autonomy.planner import (
-    SerializedTreePlanner,
-    TreeNodeStatus,
-    Thought,
-    TreeNode,
-    PlannerState,
-    create_tree_planner,
-)
-
-SUPREME_INTEGRATION_AVAILABLE = True
+SUPREME_INTEGRATION_AVAILABLE = False
 
 # =============================================================================
 # PEP 562 LAZY EXPORTS - Defer heavy subpackage imports

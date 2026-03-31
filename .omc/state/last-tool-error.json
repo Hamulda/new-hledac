@@ -1,7 +1,7 @@
 {
   "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"cd /Users/vojtechhamada/PycharmProjects/Hledac/hledac/universal && grep -rn \\\"^async def handle_\\\\|^def handle_\\\" transport/i2p_transport.py transport/ipfs_transport.py transport/gopher_tr...",
-  "error": "Exit code 2",
-  "timestamp": "2026-03-31T08:42:36.353Z",
+  "tool_input_preview": "{\"command\":\"python3 -c \\\"\\nimport sys; sys.path.insert(0, '.')\\n\\n# Direct import without package path\\nimport hledac.universal.discovery.ti_feed_adapter\\nprint('✅ Přímý import uspěl')\\nprint(f'ti_fee...",
+  "error": "Exit code 1\nfast-langdetect not available, using fallback detection\nWARNING:hledac.universal.intelligence.document_intelligence:PIL not available - image analysis disabled\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.intelligence.relationship_discovery:[LSH] datasketch not installed, LSH prediction disabled\nINFO:legacy.autonomous_orchestrator:[Metal] Heap capped at 4.8GB\nTraceback (most recent call las...",
+  "timestamp": "2026-03-31T09:32:41.858Z",
   "retry_count": 1
 }

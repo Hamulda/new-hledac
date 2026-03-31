@@ -1136,8 +1136,10 @@ def get_task_handler(task_type: str) -> Callable | None:
     if not _HANDLERS_LOADED:
         _HANDLERS_LOADED = True
         try:
-            from hledac.universal.discovery import ti_feed_adapter  # noqa: F401
+            import importlib
+            importlib.import_module("hledac.universal.discovery.ti_feed_adapter")
         except Exception as e:
+            import logging
             logging.getLogger(__name__).warning(
                 f"[REGISTRY] Handler load warning: {e}"
             )

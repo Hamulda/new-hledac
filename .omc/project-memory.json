@@ -626,8 +626,14 @@
   "hotPaths": [
     {
       "path": "__init__.py",
+      "accessCount": 15,
+      "lastAccessed": 1774949517632,
+      "type": "file"
+    },
+    {
+      "path": "legacy/autonomous_orchestrator.py",
       "accessCount": 14,
-      "lastAccessed": 1774908540291,
+      "lastAccessed": 1774948878520,
       "type": "file"
     },
     {
@@ -649,16 +655,16 @@
       "type": "file"
     },
     {
+      "path": "",
+      "accessCount": 7,
+      "lastAccessed": 1774949259941,
+      "type": "directory"
+    },
+    {
       "path": "__main__.py",
       "accessCount": 4,
       "lastAccessed": 1774908164126,
       "type": "file"
-    },
-    {
-      "path": "",
-      "accessCount": 4,
-      "lastAccessed": 1774917654080,
-      "type": "directory"
     },
     {
       "path": "tests/probe_8vh/test_prompt_bandit_select_and_reward.py",
@@ -706,12 +712,6 @@
       "path": "tests/probe_8vh/test_gnn_accepts_edge_list.py",
       "accessCount": 3,
       "lastAccessed": 1774918114574,
-      "type": "file"
-    },
-    {
-      "path": "legacy/autonomous_orchestrator.py",
-      "accessCount": 3,
-      "lastAccessed": 1774943023463,
       "type": "file"
     },
     {
@@ -793,6 +793,12 @@
       "type": "file"
     },
     {
+      "path": "runtime/sprint_scheduler.py",
+      "accessCount": 2,
+      "lastAccessed": 1774949032226,
+      "type": "directory"
+    },
+    {
       "path": "legacy/atomic_storage.py",
       "accessCount": 1,
       "lastAccessed": 1774908316926,
@@ -827,12 +833,6 @@
       "accessCount": 1,
       "lastAccessed": 1774914817821,
       "type": "file"
-    },
-    {
-      "path": "runtime/sprint_scheduler.py",
-      "accessCount": 1,
-      "lastAccessed": 1774914874110,
-      "type": "directory"
     },
     {
       "path": "knowledge/duckdb_store.py",

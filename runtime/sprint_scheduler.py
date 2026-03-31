@@ -481,7 +481,9 @@ class SprintScheduler:
 
         try:
             # Sprint 8VD §C: Start memory pressure monitoring loop
-            asyncio.create_task(self._memory_pressure_loop())
+            _t = asyncio.create_task(self._memory_pressure_loop())
+            self._bg_tasks.add(_t)
+            _t.add_done_callback(self._bg_tasks.discard)
 
             while not adapter.is_terminal():
                 if self._stop_requested:
@@ -545,12 +547,16 @@ class SprintScheduler:
                 # Sprint 8UC B.4: Speculative prefetch every 15s
                 now_mono = _time.monotonic()
                 if (now_mono - self._last_speculative) >= 15.0:
-                    asyncio.create_task(self._speculative_prefetch(None, n=3))
+                    _t = asyncio.create_task(self._speculative_prefetch(None, n=3))
+                    self._bg_tasks.add(_t)
+                    _t.add_done_callback(self._bg_tasks.discard)
                     self._last_speculative = now_mono
 
                 # Sprint 8UC B.5: OODA cycle every 60s
                 if (now_mono - self._last_ooda) >= self._ooda_interval:
-                    asyncio.create_task(self._run_ooda_cycle(self._pivot_ioc_graph, None))
+                    _t = asyncio.create_task(self._run_ooda_cycle(self._pivot_ioc_graph, None))
+                    self._bg_tasks.add(_t)
+                    _t.add_done_callback(self._bg_tasks.discard)
                     self._last_ooda = now_mono
 
         except Exception as exc:
@@ -714,6 +720,12 @@ class SprintScheduler:
                 for key, _ in cursor:
                     self._dedup_seen.add(key.decode())
                     count += 1
+            # Sprint 8RA: Bound dedup set to prevent unbounded growth
+            if len(self._dedup_seen) > 500_000:
+                # Trim to 400k to leave headroom
+                excess = list(self._dedup_seen)
+                self._dedup_seen = set(excess[-400_000:])
+                log.warning(f"Dedup set trimmed to 400k entries (was {count})")
             log.info(f"Dedup LMDB loaded: {count} existing hashes")
         except Exception as exc:
             log.warning(f"Dedup LMDB open failed: {exc} — continuing without persistence")
@@ -741,6 +753,13 @@ class SprintScheduler:
             except Exception as exc:
                 log.warning(f"Dedup LMDB close failed: {exc}")
             self._dedup_env = None
+        # Sprint 8RA: Close DuckDB read connection
+        if self._duckdb_read_con is not None:
+            try:
+                self._duckdb_read_con.close()
+            except Exception:
+                pass
+            self._duckdb_read_con = None
 
     def is_duplicate(self, source_type: str, url: str, title: str = "") -> bool:
         """Check if (source_type, url, title) was already seen in any sprint."""
@@ -1163,10 +1182,25 @@ class SprintScheduler:
         if self._pivot_queue.empty():
             return
 
+        # Sprint 8RA: Bound _speculative_results to prevent unbounded growth
+        if len(self._speculative_results) > 500:
+            keys = list(self._speculative_results.keys())
+            for k in keys[:250]:
+                del self._speculative_results[k]
+
         # Peek top-n z heap (min-heap: nejnižší = nejvyšší priorita)
         peeked = []
-        with self._pivot_queue.mutex:
-            peeked = list(self._pivot_queue.queue)[:n]
+        try:
+            with self._pivot_queue.mutex:
+                peeked = list(self._pivot_queue.queue)[:n]
+        except AttributeError:
+            # Fallback for queues without mutex
+            peeked = []
+            for _ in range(min(n, self._pivot_queue.qsize())):
+                try:
+                    peeked.append(self._pivot_queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
 
         for pivot_task in peeked[:n]:
             task_key = f"{pivot_task.task_type}:{pivot_task.ioc_value}"
@@ -1293,7 +1327,9 @@ class SprintScheduler:
         self._arrow_batch.append(finding)
         # Kick off async flush without awaiting
         try:
-            asyncio.create_task(self._maybe_flush_to_parquet())
+            _t = asyncio.create_task(self._maybe_flush_to_parquet())
+            self._bg_tasks.add(_t)
+            _t.add_done_callback(self._bg_tasks.discard)
         except RuntimeError:
             pass  # No running loop in sync context
         # Sprint 8VF §B.3: IOC extraction — regex PRIMARY, spaCy SECONDARY
@@ -1341,7 +1377,9 @@ class SprintScheduler:
 
         self._arrow_batch.append(ioc_entry)
         try:
-            asyncio.create_task(self._maybe_flush_to_parquet())
+            _t = asyncio.create_task(self._maybe_flush_to_parquet())
+            self._bg_tasks.add(_t)
+            _t.add_done_callback(self._bg_tasks.discard)
         except RuntimeError:
             pass
 
@@ -1426,6 +1464,13 @@ class SprintScheduler:
         # Sprint 8VD: Clear Arrow batch state
         self._arrow_batch.clear()
         self._arrow_last_flush = 0.0
+        # Sprint 8RA: Close DuckDB read connection
+        if self._duckdb_read_con is not None:
+            try:
+                self._duckdb_read_con.close()
+            except Exception:
+                pass
+            self._duckdb_read_con = None
 
 
 # ---------------------------------------------------------------------------
