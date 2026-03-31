@@ -734,3 +734,155 @@ def reset_ner_engine() -> None:
     if _default_engine is not None:
         _default_engine.unload()
         _default_engine = None
+
+
+# ============================================================================
+# Sprint 8VF + 8VG: IOC Extraction — kanonické místo pro NER/IOC
+# ============================================================================
+
+import re as _re
+import math as _math
+
+# ── Regex patterns — PRIMARY for technical IOC ──────────────────────────
+_IOC_PATTERNS: list[tuple[str, _re.Pattern]] = [
+    ("cve",    _re.compile(r'\bCVE-\d{4}-\d{4,7}\b')),
+    ("sha256", _re.compile(r'\b[0-9a-fA-F]{64}\b')),
+    ("md5",    _re.compile(r'\b[0-9a-fA-F]{32}\b')),
+    ("sha1",   _re.compile(r'\b[0-9a-fA-F]{40}\b')),
+    ("email",  _re.compile(
+        r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Z|a-z]{2,}\b'
+    )),
+    ("url",    _re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')),
+    ("ipv4",   _re.compile(
+        r'\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}'
+        r'(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b'
+    )),
+    ("ipv6",   _re.compile(r'\b[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){7}\b')),
+    ("domain", _re.compile(
+        r'\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+'
+        r'(?:com|net|org|io|ru|cn|de|onion|xyz|info|biz|cc|tv|gov|edu)\b'
+    )),
+]
+
+_IOC_CONFIDENCE: dict[str, float] = {
+    "cve": 0.98, "sha256": 0.97, "sha1": 0.96, "md5": 0.95,
+    "email": 0.90, "url": 0.85, "ipv4": 0.85,
+    "ipv6": 0.80, "domain": 0.70,
+}
+
+_SPACY_NLP = None
+
+
+def _get_spacy():
+    """Lazy spaCy loader."""
+    global _SPACY_NLP
+    if _SPACY_NLP is None:
+        try:
+            import spacy
+            _SPACY_NLP = spacy.load("en_core_web_sm")
+        except Exception:
+            pass
+    return _SPACY_NLP
+
+
+def extract_iocs_from_text(text: str) -> list[dict]:
+    """
+    Extract IOCs from arbitrary text.
+    Strategy: regex primary → spaCy secondary (attribution entities).
+    Returns: [{"value": str, "ioc_type": str, "confidence": float}]
+    Never raises.
+    """
+    if not text:
+        return []
+    results: list[dict] = []
+    seen:    set[str]   = set()
+
+    def _add(value: str, ioc_type: str, conf: float):
+        v = value.strip()
+        if v and v not in seen and len(v) > 3:
+            seen.add(v)
+            results.append({"value": v, "ioc_type": ioc_type,
+                             "confidence": conf})
+
+    # Primary: regex pass (cap at 10KB for RAM safety)
+    for ioc_type, pattern in _IOC_PATTERNS:
+        try:
+            for m in pattern.findall(text[:10_000]):
+                _add(m, ioc_type, _IOC_CONFIDENCE.get(ioc_type, 0.7))
+        except Exception:
+            pass
+
+    # Secondary: spaCy for attribution entities (ORG, PERSON, GPE)
+    nlp = _get_spacy()
+    if nlp is not None:
+        try:
+            doc = nlp(text[:5_000])
+            for ent in doc.ents:
+                if ent.label_ in ("ORG", "PERSON", "GPE", "PRODUCT"):
+                    _add(ent.text, ent.label_.lower(), 0.65)
+        except Exception:
+            pass
+
+    return results
+
+
+# ============================================================================
+# Sprint 8VG C.3: IOCScorer — confidence pipeline
+# ============================================================================
+
+class IOCScorer:
+    """
+    Skóruje IOC záznamy podle zdroje a koroborace.
+    Výsledné skóre vždy v [0.0, 1.0].
+    """
+    SOURCE_WEIGHTS: dict[str, float] = {
+        "abuse_ch":       0.96,
+        "circl_pdns":     0.92,
+        "crtsh":          0.88,
+        "taxii":          0.90,
+        "shodan":         0.82,
+        "github_dork":    0.75,
+        "multi_engine":   0.65,
+        "ner_extracted":  0.58,
+        "dht_crawl":      0.52,
+        "regex_fallback": 0.50,
+    }
+
+    @classmethod
+    def score_by_source(cls, source: str) -> float:
+        """Lookup weight pro zdroj, fallback 0.5."""
+        for key, weight in cls.SOURCE_WEIGHTS.items():
+            if key in source.lower():
+                return weight
+        return 0.50
+
+    @staticmethod
+    def score_by_corroboration(hit_count: int) -> float:
+        """
+        Log-scale bonus za opakovaný výskyt.
+        hit_count=1 → 0.0 bonus, hit_count=10 → ~0.23, hit_count=100 → ~0.46
+        """
+        return min(0.5, _math.log1p(hit_count - 1) / _math.log1p(99))
+
+    @classmethod
+    def final_score(cls, ioc_entry: dict) -> float:
+        """
+        Kombinuje source weight + corroboration bonus.
+        Clamp na [0.0, 1.0].
+        """
+        base   = cls.score_by_source(ioc_entry.get("source", ""))
+        bonus  = cls.score_by_corroboration(ioc_entry.get("hit_count", 1))
+        existing = float(ioc_entry.get("confidence", 0.5))
+        combined = max(base, existing) * 0.7 + bonus * 0.3
+        return round(min(1.0, max(0.0, combined)), 4)
+
+
+__all__ = [
+    "extract_iocs_from_text",
+    "_IOC_PATTERNS",
+    "_IOC_CONFIDENCE",
+    "IOCScorer",
+    "NEREngine",
+    "get_ner_engine",
+    "reset_ner_engine",
+]

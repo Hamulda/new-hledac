@@ -19,13 +19,26 @@ __all__ = [
     "RUNS_ROOT",
     "SOCKETS_ROOT",
     "SPRINT_STORE_ROOT",
+    "IOC_DB_PATH",
     "get_sprint_parquet_dir",
+    "get_ioc_db_path",
     "assert_ramdisk_alive",
     "cleanup_fallback_artifacts",
     "lmdb_map_size",
     "get_lmdb_max_size_mb",
     "open_lmdb",
 ]
+
+# Sprint 8VG A.3: Warn if 'None' file exists on disk
+import pathlib as _pl
+_NONE_PATH = _pl.Path("None")
+if _NONE_PATH.exists():
+    import warnings
+    warnings.warn(
+        f"[P0] Soubor 'None' existuje na disku ({_NONE_PATH.resolve()}) "
+        f"— spusť: git rm --cached None",
+        RuntimeWarning, stacklevel=2
+    )
 
 import os
 import pathlib
@@ -248,6 +261,18 @@ def get_sprint_parquet_dir(sprint_id: str) -> Path:
     p = SPRINT_STORE_ROOT / sprint_id
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+# Sprint 8VG B.1: Persistent DuckDB IOC graph store
+IOC_DB_PATH: Path = (
+    SPRINT_STORE_ROOT.parent / "ioc_graph.duckdb"
+)
+IOC_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+def get_ioc_db_path() -> pathlib.Path:
+    """Vrátí cestu k persistentnímu DuckDB IOC store."""
+    return IOC_DB_PATH
 
 
 # ---------------------------------------------------------------------------

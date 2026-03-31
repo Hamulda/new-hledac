@@ -973,11 +973,86 @@ class DuckPGQGraph:
     Fallback: recursive CTE pokud duckpgq extension nedostupná.
     Výhody: vectorized Arrow IPC, zero-copy, zvládne 10M+ hran.
     """
-    def __init__(self, db_path: str = ":memory:"):
+    def __init__(self, db_path: str | None = None):
         import duckdb
+        if db_path is None:
+            from paths import get_ioc_db_path
+            db_path = str(get_ioc_db_path())
+        self.db_path = db_path
         self.con = duckdb.connect(db_path)
         _ensure_duckpgq(self.con)
         self._init_schema()
+
+    def checkpoint(self) -> None:
+        """
+        Flush WAL do hlavního DuckDB souboru.
+        Volat po každém WINDUP aby data přežila restart.
+        """
+        try:
+            self.con.execute("CHECKPOINT;")
+            logger.info(f"[GRAPH] DuckDB checkpoint → {self.db_path}")
+        except Exception as e:
+            logger.warning(f"[GRAPH] Checkpoint failed: {e}")
+
+    def merge_from_parquet(self, parquet_glob: str) -> int:
+        """
+        Importuje IOC data z Arrow/Parquet souborů do DuckDB grafu.
+        Volat na začátku sprintu pro načtení dat z předchozích sprintů.
+        Vrátí počet importovaných záznamů.
+        """
+        try:
+            result = self.con.execute(f"""
+                INSERT OR IGNORE INTO ioc_nodes (id, value, ioc_type, confidence, source)
+                SELECT
+                    hash(ioc) & 9223372036854775807,
+                    ioc,
+                    ioc_type,
+                    MAX(confidence),
+                    MAX(source)
+                FROM read_parquet('{parquet_glob}')
+                WHERE ioc IS NOT NULL AND length(ioc) > 3
+                GROUP BY ioc, ioc_type
+            """).fetchone()
+            count = result[0] if result else 0
+            logger.info(f"[GRAPH] Merged {count} IOC nodes from {parquet_glob}")
+            return count
+        except Exception as e:
+            logger.warning(f"[GRAPH] merge_from_parquet failed: {e}")
+            return 0
+
+    def export_edge_list(self) -> list[tuple[str, str, str, float]]:
+        """
+        Exportuje hrany grafu jako list tuplů pro GNN inference.
+        Formát: [(src_value, dst_value, rel_type, weight), ...]
+        """
+        try:
+            rows = self.con.execute("""
+                SELECT s.value, d.value, e.rel_type, e.weight
+                FROM ioc_edges e
+                JOIN ioc_nodes s ON s.id = e.src_id
+                JOIN ioc_nodes d ON d.id = e.dst_id
+                ORDER BY e.weight DESC
+                LIMIT 50000
+            """).fetchall()
+            return rows
+        except Exception as e:
+            logger.warning(f"[GRAPH] export_edge_list failed: {e}")
+            return []
+
+    def get_top_nodes_by_degree(self, n: int = 20) -> list[dict]:
+        """Top N IOC nodes seřazených podle out-degree (nejpropojeno)."""
+        try:
+            return self.con.execute(f"""
+                SELECT n.value, n.ioc_type, n.confidence,
+                       COUNT(e.dst_id) as degree
+                FROM ioc_nodes n
+                LEFT JOIN ioc_edges e ON e.src_id = n.id
+                GROUP BY n.id, n.value, n.ioc_type, n.confidence
+                ORDER BY degree DESC
+                LIMIT {n}
+            """).fetchdf().to_dict("records")
+        except Exception:
+            return []
 
     def _init_schema(self):
         self.con.execute("""
@@ -1096,5 +1171,6 @@ __all__ = [
     "QuantumInspiredPathFinder",
     "QuantumPathConfig",
     "create_quantum_pathfinder",
-    "QUANTUM_PATHFINDER_AVAILABLE"
+    "QUANTUM_PATHFINDER_AVAILABLE",
+    "DuckPGQGraph",
 ]

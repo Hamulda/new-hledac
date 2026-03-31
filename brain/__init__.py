@@ -108,12 +108,15 @@ except ImportError:
     MODEL_MANAGER_AVAILABLE = False
 
 # NER Engine (GLiNER-X for entity extraction)
+# Sprint 8VG: kanonické místo pro NER/IOC je brain.ner_engine
 try:
     from .ner_engine import (
         NEREngine,
         Entity,
         get_ner_engine,
         reset_ner_engine,
+        extract_iocs_from_text,
+        IOCScorer,
     )
     NER_ENGINE_AVAILABLE = True
 except ImportError:
@@ -184,4 +187,7 @@ __all__ = [
     "get_model_manager",
     "reset_model_manager",
     "MODEL_MANAGER_AVAILABLE",
+    # NER/IOC (Sprint 8VG)
+    "extract_iocs_from_text",
+    "IOCScorer",
 ]
