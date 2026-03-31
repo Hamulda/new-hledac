@@ -443,6 +443,10 @@ async def _run_public_passive_once(
         from .pipeline.live_public_pipeline import async_run_live_public_pipeline
         from .pipeline.live_feed_pipeline import async_run_default_feed_batch
 
+        # Sprint 8SA: Configure bootstrap patterns before pipeline runs
+        from .patterns.pattern_matcher import configure_default_bootstrap_patterns_if_empty
+        configure_default_bootstrap_patterns_if_empty()
+
         # Use the SAME store instance for both pipelines
         web_result = await async_run_live_public_pipeline(
             query="public passive OSINT",
@@ -2485,6 +2489,11 @@ async def _run_sprint_mode(
             store_instance = None
 
         last_pipeline_time = 0.0
+
+        # Sprint 8SA: Configure bootstrap patterns ONCE before first pipeline run
+        from .patterns.pattern_matcher import configure_default_bootstrap_patterns_if_empty
+        configure_default_bootstrap_patterns_if_empty()
+
         while lifecycle.state == SprintLifecycleState.ACTIVE:
             await asyncio.sleep(1.0)
 
@@ -2497,10 +2506,6 @@ async def _run_sprint_mode(
             if _sprint_frontier_stopped:
                 await asyncio.sleep(5)
                 continue
-
-            # Sprint 8SA: Configure bootstrap patterns before first pipeline run
-            from .patterns.pattern_matcher import configure_default_bootstrap_patterns_if_empty
-            configure_default_bootstrap_patterns_if_empty()
 
             # Run pipeline every 60s
             now = time.monotonic()
