@@ -454,6 +454,7 @@ async def _run_public_passive_once(
         feed_result = await async_run_default_feed_batch(
             store=store_instance,
             max_entries_per_feed=10,
+            query_context="public passive OSINT",
         )
         _boot_record("pipeline_feed", "completed", sources=feed_result.total_sources)
 
@@ -2497,6 +2498,10 @@ async def _run_sprint_mode(
                 await asyncio.sleep(5)
                 continue
 
+            # Sprint 8SA: Configure bootstrap patterns before first pipeline run
+            from .patterns.pattern_matcher import configure_default_bootstrap_patterns_if_empty
+            configure_default_bootstrap_patterns_if_empty()
+
             # Run pipeline every 60s
             now = time.monotonic()
             if now - last_pipeline_time >= 60.0:
@@ -2505,6 +2510,7 @@ async def _run_sprint_mode(
                         await async_run_default_feed_batch(
                             store=store_instance,
                             max_entries_per_feed=10,
+                            query_context=target,
                         )
                         _boot_record("sprint_mode", "pipeline_run_ok")
                     except Exception as e:

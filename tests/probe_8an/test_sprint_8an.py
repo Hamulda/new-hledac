@@ -865,13 +865,13 @@ def test_entry_deduper_by_label_pattern_value():
 
 def test_max_feed_text_chars_cap():
     """Assembled text is capped at MAX_FEED_TEXT_CHARS in the pipeline."""
-    long_title = "A" * 3000
+    long_title = "A" * 5000
     # _assemble_clean_feed_text itself does NOT cap (cap is in pipeline step)
     text = _assemble_clean_feed_text(long_title, "")
     # The cap is applied in _entry_to_pattern_findings via slice
     # Here we just verify MAX_FEED_TEXT_CHARS constant exists and title is long
     assert len(text) > MAX_FEED_TEXT_CHARS
-    assert MAX_FEED_TEXT_CHARS == 2000
+    assert MAX_FEED_TEXT_CHARS == 4000
 
 
 def test_script_style_blocks_removed_first():

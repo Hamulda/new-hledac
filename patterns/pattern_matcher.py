@@ -8,12 +8,16 @@ No AO imports, no transport imports, no network access.
 
 from __future__ import annotations
 
+import logging
+import logging
 import re
 import sys
 import time
 from typing import NamedTuple
 
 import ahocorasick
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "PatternHit",
@@ -611,6 +615,8 @@ def configure_default_bootstrap_patterns_if_empty() -> bool:
     try:
         configure_patterns(_BOOTSTRAP_PATTERNS)
         _matcher_state._bootstrap_applied = True
+        n = len(_BOOTSTRAP_PATTERNS)
+        logger.info(f"[PATTERNS] configured {n} bootstrap patterns")
         return True
     except Exception:
         return False

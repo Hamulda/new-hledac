@@ -33,8 +33,10 @@ from __future__ import annotations
 import asyncio
 import html
 import hashlib
+import logging
 import re
 import time
+from collections import Counter
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -49,7 +51,7 @@ if TYPE_CHECKING:
 # Constants
 # ---------------------------------------------------------------------------
 
-MAX_FEED_TEXT_CHARS: int = 2000
+MAX_FEED_TEXT_CHARS: int = 4000
 FEED_PAYLOAD_CONTEXT_CHARS: int = 200
 MAX_FEED_PATTERN_TASKS: int = 4
 
@@ -176,6 +178,7 @@ class FeedSourceRunResult(msgspec.Struct, frozen=True, gc=False):
     stored_findings: int
     elapsed_ms: float = 0.0
     error: str | None = None
+    signal_stage: str = "unknown"
 
 
 class FeedSourceBatchRunResult(msgspec.Struct, frozen=True, gc=False):
@@ -187,6 +190,8 @@ class FeedSourceBatchRunResult(msgspec.Struct, frozen=True, gc=False):
     stored_findings: int
     sources: tuple[FeedSourceRunResult, ...]
     error: str | None = None
+    # Sprint 8BE Phase 3: dominant signal stage across all sources (mode)
+    dominant_signal_stage: str = "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -588,17 +593,89 @@ def _pattern_hit_to_finding(
 # ---------------------------------------------------------------------------
 
 
+_MIN_ARTICLE_FALLBACK_CHARS: int = 400
+_MAX_ARTICLE_FALLBACK_TIMEOUT: float = 8.0
+_MAX_ARTICLE_FALLBACK_KB: int = 150
+
+
+async def _fetch_article_text(entry_url: str) -> tuple[str, bool]:
+    """
+    Fetch article body via direct aiohttp GET and strip HTML.
+
+    Returns (article_text, success).
+    NEVER raises — all exceptions are caught, success=False on any failure.
+    CancelledError is NOT caught (propagated).
+    """
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(entry_url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return ("", False)
+    except Exception:
+        return ("", False)
+
+    try:
+        from hledac.universal.network.session_runtime import async_get_aiohttp_session
+    except Exception:
+        return ("", False)
+
+    try:
+        session = await async_get_aiohttp_session()
+    except Exception:
+        return ("", False)
+
+    try:
+        import aiohttp as _aiohttp
+    except Exception:
+        return ("", False)
+
+    try:
+        async with asyncio.timeout(_MAX_ARTICLE_FALLBACK_TIMEOUT):
+            try:
+                async with session.get(entry_url, timeout=_aiohttp.ClientTimeout(total=_MAX_ARTICLE_FALLBACK_TIMEOUT)) as resp:
+                    if resp.status != 200:
+                        return ("", False)
+                    raw = await resp.read()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return ("", False)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return ("", False)
+
+    # Decode with fallback, cap at MAX_ARTICLE_FALLBACK_KB
+    try:
+        raw = raw[: _MAX_ARTICLE_FALLBACK_KB * 1024]
+        try:
+            text = raw.decode("utf-8", errors="replace")
+        except Exception:
+            try:
+                text = raw.decode("latin-1", errors="replace")
+            except Exception:
+                return ("", False)
+    except Exception:
+        return ("", False)
+
+    article_text = _strip_html_tags_from_text(text)
+    if not article_text:
+        return ("", False)
+    return (article_text.strip(), True)
+
+
 async def _entry_to_pattern_findings(
     feed_url: str,
     entry: Any,
     query_context: str | None,
-) -> tuple[list[dict], int, int, int, str, str]:
+) -> tuple[list[dict], int, int, int, str, str, bool, bool]:
     """
     Entry -> pattern-backed CanonicalFinding dicts.
 
-    Returns (findings, patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase).
+    Returns (findings, patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted).
     Empty registry = valid zero-findings state (patterns_configured=0, matched=0).
-    enrichment_phase: "feed_rich_content" | "none"
+    enrichment_phase: "feed_rich_content" | "article_fallback" | "none"
+    article_fallback_used: True if article was fetched and enriched
     """
     title = getattr(entry, "title", "") or ""
     summary = getattr(entry, "summary", "") or ""
@@ -611,8 +688,34 @@ async def _entry_to_pattern_findings(
     # Sprint 8BE PHASE 1: use enriched assembly (title + summary + rich_content)
     clean_text, enrichment_phase = _assemble_enriched_feed_text(title, summary, rich_content)
     assembled_text_len = len(clean_text)
+    article_fallback_used = False
 
-    # Hard cap on assembled text
+    # Sprint 8BE PHASE 2: article fallback when assembled text is too short
+    # Invariant: only fetch if assembled_len < 400 and entry_url is valid http/https
+    article_fallback_attempted = False
+    if assembled_text_len < _MIN_ARTICLE_FALLBACK_CHARS:
+        article_text = ""
+        article_success = False
+        try:
+            article_text, article_success = await _fetch_article_text(entry_url)
+        except asyncio.CancelledError:
+            raise  # never swallow
+        except Exception:
+            pass
+
+        article_fallback_attempted = True
+        if article_success and article_text:
+            # Append article text to existing clean_text
+            combined = f"{clean_text}\n\n{article_text}"
+            # Hard cap on combined text
+            if len(combined) > MAX_FEED_TEXT_CHARS:
+                combined = combined[:MAX_FEED_TEXT_CHARS]
+            clean_text = combined
+            assembled_text_len = len(clean_text)
+            enrichment_phase = "article_fallback"
+            article_fallback_used = True
+
+    # Hard cap on assembled text (redundant but defensive)
     if assembled_text_len > MAX_FEED_TEXT_CHARS:
         clean_text = clean_text[:MAX_FEED_TEXT_CHARS]
         assembled_text_len = len(clean_text)
@@ -634,7 +737,7 @@ async def _entry_to_pattern_findings(
     matched_patterns = len(hits)
 
     if not hits:
-        return ([], patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase)
+        return ([], patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted)
 
     # Per-entry dedup by (label, pattern, value)
     entry_deduper = _EntryDeduper()
@@ -653,7 +756,7 @@ async def _entry_to_pattern_findings(
         )
         findings.append(finding)
 
-    return (findings, patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase)
+    return (findings, patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted)
 
 
 # ---------------------------------------------------------------------------
@@ -848,7 +951,7 @@ async def async_run_live_feed_pipeline(
 
         # Pattern scan + mapping — fail-soft per entry
         try:
-            findings, patterns_cfg, matched, assembled_len, clean_text, enrichment_phase = await _entry_to_pattern_findings(
+            findings, patterns_cfg, matched, assembled_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted = await _entry_to_pattern_findings(
                 feed_url, entry, query_context
             )
         except asyncio.CancelledError:
@@ -897,6 +1000,12 @@ async def async_run_live_feed_pipeline(
             # Sprint 8BE: track enrichment phase
             if enrichment_phase == "feed_rich_content":
                 entries_with_rich_feed_content += 1
+            elif enrichment_phase == "article_fallback":
+                entries_with_article_fallback += 1
+            if article_fallback_attempted:
+                article_fallback_fetch_attempts += 1
+            if article_fallback_used:
+                article_fallback_fetch_successes += 1
             enriched_text_chars_total += assembled_len
             if matched > 0:
                 entries_with_hits += 1
@@ -1003,7 +1112,7 @@ async def async_run_live_feed_pipeline(
             else 0.0
         ),
         sample_enriched_texts=tuple(_sample_texts),
-        enrichment_phase_used="feed_rich_content" if entries_with_rich_feed_content > 0 else "none",
+        enrichment_phase_used="article_fallback" if entries_with_article_fallback > 0 else ("feed_rich_content" if entries_with_rich_feed_content > 0 else "none"),
         temporal_feed_vocabulary_mismatch=False,
     )
 
@@ -1169,6 +1278,7 @@ async def async_run_feed_source_batch(
             stored_findings=result.stored_findings,
             elapsed_ms=elapsed_ms,
             error=result.error,
+            signal_stage=result.signal_stage,
         )
 
     results: list[FeedSourceRunResult] = []
@@ -1212,6 +1322,16 @@ async def async_run_feed_source_batch(
         any(r.error == "per_feed_timeout" for r in results)
     ) else None
 
+    # Sprint 8BE Phase 3: dominant signal stage (mode) across all sources
+    stage_counter: Counter[str] = Counter()
+    for r in results:
+        if r.signal_stage and r.signal_stage != "unknown":
+            stage_counter[r.signal_stage] += 1
+    dominant_stage = stage_counter.most_common(1)[0][0] if stage_counter else "unknown"
+
+    _logger = logging.getLogger(__name__)
+    _logger.info(f"[BATCH] dominant_signal_stage={dominant_stage}")
+
     return FeedSourceBatchRunResult(
         total_sources=len(normalized),
         completed_sources=completed,
@@ -1220,6 +1340,7 @@ async def async_run_feed_source_batch(
         stored_findings=total_stored,
         sources=tuple(results),
         error=batch_error,
+        dominant_signal_stage=dominant_stage,
     )
 
 
@@ -1227,6 +1348,7 @@ async def async_run_default_feed_batch(
     store: Any | None = None,
     max_entries_per_feed: int = 20,
     feed_concurrency: int = 3,
+    query_context: str | None = None,
     per_feed_timeout_s: float = 45.0,
     batch_timeout_s: float = 300.0,
 ) -> FeedSourceBatchRunResult:
@@ -1243,7 +1365,7 @@ async def async_run_default_feed_batch(
         store=store,
         max_entries_per_feed=max_entries_per_feed,
         feed_concurrency=feed_concurrency,
-        query_context=None,
+        query_context=query_context,
         per_feed_timeout_s=per_feed_timeout_s,
         batch_timeout_s=batch_timeout_s,
     )
