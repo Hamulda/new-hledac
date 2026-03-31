@@ -31,3 +31,7 @@ xxhash>=3.4.0       # pro ID generování (deterministické hashování)
 spacy>=3.7.0        # SECONDARY attribution NER (en_core_web_sm ~8MB)
 coremltools>=8.0    # ANE CoreML MiniLM-L6-v2 (~22MB, <5ms/embed)
 # mlx>=0.16.0        # already in requirements (MLX LM inference)
+
+# Sprint 8VG-B: Dark/Hidden Internet + Extended OSINT Sources
+aiodns>=3.1.0        # Team Cymru DNS TXT (fallback: nslookup subprocess na macOS)
+websockets>=12.0     # certstream_monitor() — již v ti_feed_adapter.py

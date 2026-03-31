@@ -1021,3 +1021,532 @@ def _register_structured_adapters() -> None:
 
 
 _register_structured_adapters()
+
+
+# =============================================================================
+# Sprint 8VG-B: Dark/Hidden Internet + Extended OSINT Sources
+# =============================================================================
+
+# ── I2P EEPSITES ─────────────────────────────────────────────────────────────
+
+async def fetch_i2p_eepsite(url: str, proxy_url: str = "http://127.0.0.1:4444") -> dict:
+    """
+    Fetch I2P eepsite přes lokální HTTP proxy (port 4444).
+    Graceful fallback — pokud proxy neběží, vrátí error dict (nekrachne).
+    Timeout 60s — I2P je inherentně pomalé.
+    M1 cap: content ořezán na 50KB.
+    """
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                url,
+                proxy=proxy_url,
+                timeout=aiohttp.ClientTimeout(total=60),
+                headers={"User-Agent": "Mozilla/5.0 (compatible; research)"},
+                ssl=False,
+            ) as r:
+                content = await r.text(errors="replace")
+                return {
+                    "url":    url,
+                    "status": r.status,
+                    "content": content[:50_000],
+                    "source": "i2p_eepsite",
+                    "error":  None,
+                }
+    except Exception as e:
+        logger.debug(f"[I2P] {e}")
+        return {"url": url, "status": 0, "content": "", "source": "i2p_eepsite", "error": str(e)}
+
+
+async def search_i2p_directory(query: str, max_results: int = 20) -> list[dict]:
+    """
+    I2P eepsite discovery přes stats.i2p directory.
+    Vrátí seznam {url, title, source} dostupných eepsites.
+    Pokud proxy neběží → vrátí [] bez výjimky.
+    """
+    import re as _re
+    page = await fetch_i2p_eepsite("http://stats.i2p/cgi-bin/netstats.cgi")
+    if page["error"] or not page["content"]:
+        return []
+    links = _re.findall(r'href="(http://[^\s"]+\.i2p[^"]*)"', page["content"])
+    return [
+        {"url": link, "title": link, "source": "i2p_directory"}
+        for link in links[:max_results]
+    ]
+
+
+@register_task("i2p_eepsite_fetch")
+async def _handle_i2p_eepsite_fetch(task, scheduler):
+    """Fetch I2P eepsite nebo search I2P directory."""
+    ioc = task.ioc_value
+    if ".i2p" in ioc:
+        url = ioc if ioc.startswith("http") else f"http://{ioc}"
+        result = await fetch_i2p_eepsite(url)
+        if result["status"] > 0:
+            await scheduler._buffer_ioc_pivot("url", url, 0.60)
+    else:
+        results = await search_i2p_directory(ioc)
+        for r in results:
+            await scheduler._buffer_ioc_pivot("url", r["url"], 0.55)
+
+
+# ── IPFS CONTENT ──────────────────────────────────────────────────────────────
+
+import re as _cid_re_mod
+_CID_PATTERN = _cid_re_mod.compile(r'\b(Qm[1-9A-HJ-NP-Za-km-z]{44}|b[a-z2-7]{58})\b')
+
+_IPFS_GATEWAYS = [
+    "https://ipfs.io/ipfs/",
+    "https://cloudflare-ipfs.com/ipfs/",
+    "https://gateway.pinata.cloud/ipfs/",
+]
+
+
+async def fetch_ipfs_cid(cid: str) -> dict:
+    """
+    Fetch IPFS content přes CID.
+    Pokus 1: lokální daemon (127.0.0.1:5001/api/v0/cat).
+    Pokus 2: public gateways (ipfs.io, cloudflare, pinata).
+    M1 cap: content ořezán na 100KB.
+    """
+    # Lokální daemon
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=5)
+        ) as s:
+            async with s.post(
+                "http://127.0.0.1:5001/api/v0/cat",
+                params={"arg": cid}
+            ) as r:
+                if r.status == 200:
+                    data = await r.read()
+                    return {
+                        "cid": cid, "source": "ipfs_local_daemon",
+                        "content": data[:100_000].decode("utf-8", errors="replace"),
+                        "size": len(data), "error": None,
+                    }
+    except Exception:
+        pass
+    # Public gateways
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=30)
+    ) as s:
+        for gw in _IPFS_GATEWAYS:
+            try:
+                async with s.get(f"{gw}{cid}") as r:
+                    if r.status == 200:
+                        data = await r.read()
+                        return {
+                            "cid": cid, "source": gw,
+                            "content": data[:100_000].decode("utf-8", errors="replace"),
+                            "size": len(data), "error": None,
+                        }
+            except Exception:
+                continue
+    return {"cid": cid, "source": None, "content": "", "size": 0,
+            "error": "IPFS nedostupný (daemon + všechny gateways selhaly)"}
+
+
+async def search_ipfs(query: str, max_results: int = 10) -> list[dict]:
+    """ipfs-search.com REST API — index veřejného IPFS obsahu."""
+    results = []
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as s:
+            async with s.get(
+                "https://api.ipfs-search.com/v1/search",
+                params={"q": query, "type": "any"},
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    for hit in data.get("hits", {}).get("hits", [])[:max_results]:
+                        results.append({
+                            "cid":    hit.get("_id", ""),
+                            "title":  hit.get("_source", {}).get("title", ""),
+                            "score":  hit.get("_score", 0),
+                            "source": "ipfs_search",
+                        })
+    except Exception as e:
+        logger.debug(f"[IPFS search] {e}")
+    return results
+
+
+@register_task("ipfs_fetch")
+async def _handle_ipfs_fetch(task, scheduler):
+    """Fetch IPFS content — CID nebo keyword search."""
+    ioc = task.ioc_value
+    m = _CID_PATTERN.search(ioc)
+    if m:
+        result = await fetch_ipfs_cid(m.group(1))
+        if result.get("content"):
+            await scheduler._buffer_ioc_pivot("url", f"ipfs://{m.group(1)}", 0.65)
+    else:
+        for r in await search_ipfs(ioc):
+            await scheduler._buffer_ioc_pivot("url", f"ipfs://{r['cid']}", 0.55)
+
+
+# ── GOPHER PROTOCOL ──────────────────────────────────────────────────────────
+
+async def fetch_gopher(host: str, selector: str = "/", port: int = 70) -> dict:
+    """
+    Gopher protocol client — RFC 1436, raw async TCP.
+    Zero extra deps — asyncio.open_connection nativně na M1.
+    M1 cap: content ořezán na 500KB (Gopher nemá binární payload limit).
+    Timeout 15s.
+    """
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=15.0,
+        )
+        writer.write(f"{selector}\r\n".encode())
+        await writer.drain()
+        data = b""
+        while True:
+            chunk = await asyncio.wait_for(reader.read(8192), timeout=15.0)
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > 500_000:
+                break
+        writer.close()
+        try:
+            await asyncio.wait_for(writer.wait_closed(), timeout=2.0)
+        except Exception:
+            pass
+        content = data.decode("utf-8", errors="replace")
+        return {
+            "host": host, "selector": selector,
+            "content": content[:10_000],
+            "items": _parse_gophermap(content),
+            "source": "gopher",
+            "error": None,
+        }
+    except asyncio.TimeoutError:
+        return {"host": host, "selector": selector, "content": "",
+                "items": [], "source": "gopher", "error": "timeout"}
+    except Exception as e:
+        logger.debug(f"[Gopher] {host}{selector}: {e}")
+        return {"host": host, "selector": selector, "content": "",
+                "items": [], "source": "gopher", "error": str(e)}
+
+
+def _parse_gophermap(content: str) -> list[dict]:
+    """Parsuje Gopher menu (tab-separated RFC 1436 format)."""
+    items = []
+    for line in content.split("\n"):
+        line = line.rstrip("\r")
+        if not line.strip() or line.strip() == ".":
+            continue
+        item_type = line[0]
+        parts = line[1:].split("\t")
+        if len(parts) >= 3:
+            items.append({
+                "type":     item_type,
+                "text":     parts[0].strip(),
+                "selector": parts[1] if len(parts) > 1 else "/",
+                "host":     parts[2] if len(parts) > 2 else "",
+                "port":     int(parts[3]) if len(parts) > 3
+                            and parts[3].strip().isdigit() else 70,
+            })
+    return items
+
+
+@register_task("gopher_fetch")
+async def _handle_gopher_fetch(task, scheduler):
+    """Gopher fetch — floodgap.com Veronica-2 search nebo přímý selector."""
+    from urllib.parse import urlparse
+    ioc = task.ioc_value
+    if ioc.startswith("gopher://"):
+        p = urlparse(ioc)
+        result = await fetch_gopher(p.hostname or "gopher.floodgap.com",
+                                    p.path or "/", p.port or 70)
+    else:
+        result = await fetch_gopher(
+            "gopher.floodgap.com",
+            f"/v2/vs?query={ioc.replace(' ', '+')}",
+        )
+    for item in result.get("items", []):
+        if item.get("host") and item.get("type") in ("1", "0", "7"):
+            gopher_url = f"gopher://{item['host']}:{item['port']}{item['selector']}"
+            await scheduler._buffer_ioc_pivot("url", gopher_url, 0.50)
+
+
+# ── NNTP / USENET ─────────────────────────────────────────────────────────────
+
+_NNTP_DEFAULT_SERVER = "news.gmane.io"
+_NNTP_DEFAULT_GROUPS = [
+    "alt.security", "alt.privacy",
+    "comp.security.misc", "sci.crypt",
+]
+
+
+def _nntp_sync_search(server: str, port: int, group: str,
+                      keyword: str, max_articles: int = 15) -> list[dict]:
+    """
+    Synchronní NNTP vyhledávání — MUSÍ být voláno přes run_in_executor.
+    NIKDY nevolat přímo z async kódu — nntplib je blocking IO.
+    """
+    import nntplib
+    results = []
+    try:
+        with nntplib.NNTP(server, port=port, timeout=30) as conn:
+            _resp, count, first, last, name = conn.group(group)
+            start = max(int(first), int(last) - 200)
+            _, articles = conn.over(f"{start}-{last}")
+            for num, overview in articles[:max_articles]:
+                subject = overview.get("subject", "")
+                if keyword.lower() in subject.lower():
+                    results.append({
+                        "group":      group,
+                        "num":        num,
+                        "subject":    subject,
+                        "from":       overview.get("from", ""),
+                        "date":       overview.get("date", ""),
+                        "message_id": overview.get("message-id", ""),
+                        "source":     "nntp_usenet",
+                    })
+    except Exception as e:
+        logger.debug(f"[NNTP] {server}/{group}: {e}")
+    return results
+
+
+async def search_usenet(
+    keyword: str,
+    groups: list[str] | None = None,
+    server: str = _NNTP_DEFAULT_SERVER,
+    port: int = 119,
+    max_per_group: int = 10,
+) -> list[dict]:
+    """
+    Usenet/NNTP article search — wraps synchronní nntplib v run_in_executor.
+    Max 3 skupiny souběžně — respektuje M1 ProcessPool limit.
+    """
+    if groups is None:
+        groups = _NNTP_DEFAULT_GROUPS
+    loop = asyncio.get_running_loop()
+    tasks_coro = [
+        loop.run_in_executor(
+            None, _nntp_sync_search, server, port, grp, keyword, max_per_group
+        )
+        for grp in groups[:3]
+    ]
+    results_nested = await asyncio.gather(*tasks_coro, return_exceptions=True)
+    results = []
+    for r in results_nested:
+        if isinstance(r, list):
+            results.extend(r)
+    return results
+
+
+@register_task("usenet_search")
+async def _handle_usenet_search(task, scheduler):
+    """Usenet NNTP newsgroup full-text search."""
+    for r in await search_usenet(task.ioc_value):
+        await scheduler._buffer_ioc_pivot(
+            "url",
+            f"nntp://{_NNTP_DEFAULT_SERVER}/{r['group']}/{r['num']}",
+            0.50,
+        )
+
+
+# ── BGP ROUTING + ASN LOOKUP ─────────────────────────────────────────────────
+
+import re as _ip_re_mod
+_IP_PATTERN = _ip_re_mod.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
+
+
+def _is_valid_ip(s: str) -> bool:
+    return bool(_IP_PATTERN.match(s))
+
+
+async def query_ripe_stat_asn(ip: str) -> dict:
+    """
+    RIPE Stat REST API — ASN a prefix pro IP adresu.
+    Free, no API key, M1 native.
+    """
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as s:
+            async with s.get(
+                "https://stat.ripe.net/data/prefix-overview/data.json",
+                params={"resource": ip},
+            ) as r:
+                if r.status == 200:
+                    data = (await r.json()).get("data", {})
+                    asns = data.get("asns", [])
+                    return {
+                        "ip":     ip,
+                        "asn":    asns[0].get("asn") if asns else None,
+                        "holder": asns[0].get("holder") if asns else None,
+                        "prefix": data.get("resource", ip),
+                        "source": "ripe_stat",
+                    }
+    except Exception as e:
+        logger.debug(f"[RIPE Stat] {e}")
+    return {"ip": ip, "asn": None, "holder": None, "source": "ripe_stat",
+            "error": "RIPE Stat nedostupný"}
+
+
+async def query_team_cymru_asn(ip: str) -> dict:
+    """
+    Team Cymru ASN lookup přes DNS TXT record.
+    Pokus 1: aiodns (pokud nainstalován).
+    Pokus 2: nslookup subprocess — vždy dostupný na macOS.
+    Free, no API key.
+    """
+    import re as _re
+    reversed_ip = ".".join(reversed(ip.split(".")))
+    query_name = f"{reversed_ip}.origin.asn.cymru.com"
+    # aiodns pokus
+    try:
+        import aiodns  # type: ignore[import]
+        resolver = aiodns.DNSResolver()
+        result = await resolver.query(query_name, "TXT")
+        txt = result[0].text if result else ""
+        parts = txt.split("|")
+        return {
+            "ip": ip,
+            "asn":      parts[0].strip() if parts else None,
+            "country":  parts[2].strip() if len(parts) > 2 else None,
+            "registry": parts[3].strip() if len(parts) > 3 else None,
+            "source":   "team_cymru_aiodns",
+        }
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.debug(f"[Cymru aiodns] {e}")
+    # nslookup fallback
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "nslookup", "-type=TXT", query_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        output = stdout.decode()
+        asn_match = _re.search(r'"(\d+)\s*\|', output)
+        return {
+            "ip":  ip,
+            "asn": f"AS{asn_match.group(1)}" if asn_match else None,
+            "source": "team_cymru_nslookup",
+        }
+    except Exception as e:
+        logger.debug(f"[Cymru nslookup] {e}")
+    return {"ip": ip, "asn": None, "source": "team_cymru", "error": "lookup failed"}
+
+
+@register_task("bgp_asn_lookup")
+async def _handle_bgp_asn_lookup(task, scheduler):
+    """BGP ASN lookup pro IP — RIPE Stat + Team Cymru."""
+    ioc = task.ioc_value
+    if not _is_valid_ip(ioc):
+        return
+    ripe, cymru = await asyncio.gather(
+        query_ripe_stat_asn(ioc),
+        query_team_cymru_asn(ioc),
+    )
+    if ripe.get("asn") or cymru.get("asn"):
+        await scheduler._buffer_ioc_pivot("ipv4", ioc, 0.80)
+
+
+# ── RIPE ROUTING HISTORY ──────────────────────────────────────────────────────
+
+async def query_bgp_routing_history(resource: str, max_rows: int = 20) -> dict:
+    """
+    RIPE Stat BGP routing history — prefix nebo ASN.
+    Ukazuje historické routing changes — užitečné pro infrastructure tracking.
+    """
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as s:
+            async with s.get(
+                "https://stat.ripe.net/data/routing-history/data.json",
+                params={"resource": resource, "max_rows": max_rows},
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    return {
+                        "resource": resource,
+                        "history":  data.get("data", {}).get("by_origin", [])[:max_rows],
+                        "source":   "ripe_bgp_history",
+                        "error":    None,
+                    }
+    except Exception as e:
+        logger.debug(f"[BGP history] {e}")
+    return {"resource": resource, "history": [], "source": "ripe_bgp_history",
+            "error": "RIPE BGP history nedostupná"}
+
+
+@register_task("bgp_routing_history")
+async def _handle_bgp_routing_history(task, scheduler):
+    """BGP routing history pro prefix nebo ASN číslo."""
+    result = await query_bgp_routing_history(task.ioc_value)
+    if result.get("history"):
+        await scheduler._buffer_ioc_pivot("ipv4", task.ioc_value, 0.70)
+
+
+# ── MALWAREBAZAAR ─────────────────────────────────────────────────────────────
+
+async def fetch_malwarebazaar_recent(tag: str | None = None,
+                                     max_items: int = 25) -> list[dict]:
+    """
+    MalwareBazaar — recent malware sample feed.
+    Public API, no key required. abuse.ch infrastruktura.
+    Vrátí hash, malware family, tags, first_seen.
+    """
+    payload: dict = {"query": "get_recent", "selector": "time"}
+    if tag:
+        payload = {"query": "get_taginfo", "tag": tag, "limit": max_items}
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(
+                "https://mb-api.abuse.ch/api/v1/",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as r:
+                data = await r.json()
+                return [
+                    {
+                        "sha256":         e.get("sha256_hash", ""),
+                        "malware_family": e.get("signature", ""),
+                        "file_type":      e.get("file_type", ""),
+                        "first_seen":     e.get("first_seen", ""),
+                        "tags":           e.get("tags", []),
+                        "ioc":            e.get("sha256_hash", ""),
+                        "ioc_type":       "sha256",
+                        "title":          f"MalwareBazaar: {e.get('signature','?')}",
+                        "source":         "malwarebazaar",
+                    }
+                    for e in data.get("data", [])[:max_items]
+                ]
+    except Exception as e:
+        logger.debug(f"[MalwareBazaar] {e}")
+    return []
+
+
+@register_task("malwarebazaar_search")
+async def _handle_malwarebazaar_search(task, scheduler):
+    """MalwareBazaar malware sample lookup — hash nebo tag."""
+    ioc = task.ioc_value
+    # Pokud 64-char hex → SHA256 hash lookup
+    if len(ioc) == 64 and all(c in "0123456789abcdefABCDEF" for c in ioc):
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    "https://mb-api.abuse.ch/api/v1/",
+                    json={"query": "get_info", "hash": ioc},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as r:
+                    data = await r.json()
+                    if data.get("data"):
+                        await scheduler._buffer_ioc_pivot("sha256", ioc, 0.85)
+        except Exception as e:
+            logger.debug(f"[MalwareBazaar hash] {e}")
+    else:
+        # Tag search
+        for item in await fetch_malwarebazaar_recent(tag=ioc):
+            await scheduler._buffer_ioc_pivot("sha256", item["sha256"], 0.75)
