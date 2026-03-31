@@ -1,4 +1,4 @@
-from brain.ner_engine import extract_iocs_from_text
+from hledac.universal.brain.ner_engine import extract_iocs_from_text
 
 def test_ner_canonical_location():
     iocs = extract_iocs_from_text("C2 at 185.220.101.47, CVE-2024-3400")

@@ -1,4 +1,4 @@
-from brain.ner_engine import IOCScorer
+from hledac.universal.brain.ner_engine import IOCScorer
 
 def test_ioc_scorer_corroboration_monotonic():
     b1 = IOCScorer.score_by_corroboration(1)

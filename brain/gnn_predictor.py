@@ -383,6 +383,193 @@ class GNNPredictor:
             _CPU.shutdown(wait=False)
 
 
+# ---------------------------------------------------------------------------
+# Sprint 8VH: GNN ↔ DuckPGQGraph Bridge Functions
+# ---------------------------------------------------------------------------
+
+
+def predict_from_edge_list(
+    edge_list: list[tuple[str, str, str, float]],
+    top_k: int = 10,
+) -> list[dict]:
+    """
+    Bridge mezi DuckPGQGraph.export_edge_list() a GNN inference.
+
+    edge_list formát: [(src_value, dst_value, rel_type, weight), ...]
+
+    Vrátí: list dicts s poli:
+      - "src": str  — zdrojový IOC
+      - "dst": str  — predikovaný cílový IOC (nová hrana)
+      - "score": float  — confidence predikce [0, 1]
+      - "rel_type": str — predikovaný typ vztahu
+
+    Pokud GNN není dostupný (MLX/torch chybí):
+      → Fallback: vrátí top-k nejčastější dst nodes z edge_list
+        seřazené podle frekvence (heuristika bez modelu).
+    """
+    from collections import Counter
+
+    if not edge_list:
+        return []
+
+    try:
+        # Primární: skutečný GNN inference
+        # GNNPredictor.score_ioc_batch() bere (value, type) tuples
+        # Importujeme zde pro lazy loading
+        try:
+            from brain.gnn_predictor import GNNPredictor
+        except ImportError:
+            GNNPredictor = None
+
+        if GNNPredictor is not None:
+            predictor = GNNPredictor()
+
+            # Build IOC nodes from edge_list (unique dst nodes as candidates)
+            dst_nodes = [(dst, _infer_rel_type(rel))
+                         for _, dst, rel, _ in edge_list]
+            # Deduplicate by value
+            seen = set()
+            unique_dsts = []
+            for val, typ in dst_nodes:
+                if val not in seen:
+                    seen.add(val)
+                    unique_dsts.append((val, typ))
+
+            if unique_dsts:
+                scores = predictor.score_ioc_batch(unique_dsts, ioc_graph=None)
+                # Sort by score descending
+                sorted_scores = sorted(
+                    scores.items(), key=lambda x: x[1], reverse=True
+                )
+                results = []
+                for val, score in sorted_scores[:top_k]:
+                    rel = _most_common_rel(edge_list, val)
+                    results.append({
+                        "src": "graph",
+                        "dst": val,
+                        "score": float(score),
+                        "rel_type": rel,
+                    })
+                return results
+
+    except Exception:
+        pass
+
+    # Fallback: frequency heuristic
+    freq = Counter(dst for _, dst, _, _ in edge_list)
+    seen_src = {src for src, _, _, _ in edge_list}
+    results = []
+    for dst, count in freq.most_common(top_k):
+        if dst not in seen_src:  # predikuj pouze nové nodes
+            results.append({
+                "src": "graph",
+                "dst": dst,
+                "score": float(count / max(1, len(edge_list))),
+                "rel_type": "predicted",
+            })
+    return results
+
+
+def _infer_rel_type(rel: str) -> str:
+    """Infer IOC type from relationship string."""
+    rel_lower = rel.lower()
+    if "resolv" in rel_lower or "dns" in rel_lower:
+        return "domain"
+    if "links_to" in rel_lower or "connects" in rel_lower:
+        return "domain"
+    if "communicat" in rel_lower or "contact" in rel_lower:
+        return "email"
+    if "hosts" in rel_lower or "serves" in rel_lower:
+        return "ipv4"
+    return "domain"
+
+
+def _most_common_rel(edge_list: list[tuple[str, str, str, float]], dst: str) -> str:
+    """Return most common relationship type for a given dst node."""
+    from collections import Counter
+    rels = [rel for _, d, rel, _ in edge_list if d == dst]
+    if not rels:
+        return "observed"
+    return Counter(rels).most_common(1)[0][0]
+
+
+def get_anomaly_scores(
+    edge_list: list[tuple[str, str, str, float]],
+) -> list[dict]:
+    """
+    Detekuje anomální IOC nodes (high betweenness centrality nebo
+    náhlý spike v degree).
+
+    Fallback: nodes s degree > mean + 2*std.
+
+    Vrátí: [{"value": str, "anomaly_score": float}]
+    """
+    if not edge_list:
+        return []
+
+    from collections import Counter
+    import statistics
+
+    try:
+        # Primární: GNN anomaly detection
+        # Use GNNPredictor's scoring if available
+        try:
+            from brain.gnn_predictor import GNNPredictor
+        except ImportError:
+            GNNPredictor = None
+
+        if GNNPredictor is not None:
+            predictor = GNNPredictor()
+            # Build all unique nodes with inferred types
+            all_nodes = set()
+            for src, dst, rel, _ in edge_list:
+                all_nodes.add(src)
+                all_nodes.add(dst)
+            # Infer types
+            node_types = {}
+            for node in all_nodes:
+                # Infer from edges
+                node_types[node] = _infer_rel_type(
+                    _most_common_rel(edge_list, node)
+                )
+            # Score batch
+            nodes_with_types = [(n, node_types.get(n, "domain")) for n in all_nodes]
+            scores = predictor.score_ioc_batch(nodes_with_types, ioc_graph=None)
+            # High-scoring nodes are anomalous
+            threshold = 0.7
+            anomalies = [
+                {"value": n, "anomaly_score": float(s)}
+                for n, s in scores.items()
+                if s >= threshold
+            ]
+            if anomalies:
+                return sorted(anomalies, key=lambda x: x["anomaly_score"], reverse=True)
+    except Exception:
+        pass
+
+    # Fallback: statistický outlier (degree > mean + 2*std)
+    degree = Counter(src for src, _, _, _ in edge_list)
+    degree.update(Counter(dst for _, dst, _, _ in edge_list))
+
+    if len(degree) < 3:
+        return []
+
+    vals = list(degree.values())
+    mean = statistics.mean(vals)
+    stdev = statistics.stdev(vals) if len(vals) > 1 else 1.0
+    threshold_val = mean + 2 * stdev
+
+    return [
+        {"value": node, "anomaly_score": min(1.0, count / max(1, threshold_val))}
+        for node, count in degree.most_common()
+        if count > threshold_val
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Original train_gnn_task
+# ---------------------------------------------------------------------------
+
 def train_gnn_task(predictor: 'GNNPredictor',
                    edges: List[Tuple[int, int]],
                    features,

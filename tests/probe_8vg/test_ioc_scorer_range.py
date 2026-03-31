@@ -1,4 +1,4 @@
-from brain.ner_engine import IOCScorer
+from hledac.universal.brain.ner_engine import IOCScorer
 
 def test_ioc_scorer_range():
     for source in ["abuse_ch", "dht_crawl", "unknown_xyz"]:

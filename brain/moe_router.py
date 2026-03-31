@@ -794,6 +794,52 @@ class MoERouter:
         }
 
 
+# ---------------------------------------------------------------------------
+# Sprint 8VH: MoE Router Activation Functions
+# ---------------------------------------------------------------------------
+
+
+def route_synthesis(
+    findings_count: int,
+    has_gnn: bool,
+    memory_pressure: str,
+    sprint_query: str,
+) -> str:
+    """
+    Vybírá synthesis engine dle aktuálních podmínek.
+
+    Vrací jeden z: "hermes3", "inference", "heuristic".
+
+    Strategie:
+      - critical memory     → "heuristic" (nulový RAM overhead)
+      - findings_count < 5  → "heuristic" (málo dat pro LLM)
+      - has_gnn            → prefer "hermes3" (richer context)
+      - default            → "inference"
+    """
+    if memory_pressure == "critical":
+        return "heuristic"
+    if findings_count < 5:
+        return "heuristic"
+    if has_gnn:
+        return "hermes3"
+    return "inference"
+
+
+def route_embedding(memory_pressure: str) -> str:
+    """
+    Vybírá embedding engine.
+
+    Vrací: "ane_minilm" | "hash_fallback"
+    """
+    if memory_pressure in ("warn", "critical"):
+        return "hash_fallback"
+    return "ane_minilm"
+
+
+# ---------------------------------------------------------------------------
+# Original create_moe_router
+# ---------------------------------------------------------------------------
+
 async def create_moe_router(config: Optional[MoERouterConfig] = None) -> Optional[MoERouter]:
     """
     Factory funkce pro vytvoření MoE routeru.

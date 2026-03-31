@@ -637,9 +637,33 @@
       "type": "file"
     },
     {
+      "path": "paths.py",
+      "accessCount": 7,
+      "lastAccessed": 1774917494994,
+      "type": "file"
+    },
+    {
+      "path": "graph/quantum_pathfinder.py",
+      "accessCount": 7,
+      "lastAccessed": 1774917551944,
+      "type": "file"
+    },
+    {
       "path": "__main__.py",
       "accessCount": 4,
       "lastAccessed": 1774908164126,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 4,
+      "lastAccessed": 1774917654080,
+      "type": "directory"
+    },
+    {
+      "path": "tests/probe_8vh/test_prompt_bandit_select_and_reward.py",
+      "accessCount": 4,
+      "lastAccessed": 1774918055577,
       "type": "file"
     },
     {
@@ -661,6 +685,30 @@
       "type": "file"
     },
     {
+      "path": "brain/ner_engine.py",
+      "accessCount": 3,
+      "lastAccessed": 1774917600912,
+      "type": "file"
+    },
+    {
+      "path": "brain/ane_embedder.py",
+      "accessCount": 3,
+      "lastAccessed": 1774917636208,
+      "type": "file"
+    },
+    {
+      "path": "brain/__init__.py",
+      "accessCount": 3,
+      "lastAccessed": 1774917679693,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vh/test_gnn_accepts_edge_list.py",
+      "accessCount": 3,
+      "lastAccessed": 1774918114574,
+      "type": "file"
+    },
+    {
       "path": "knowledge/__init__.py",
       "accessCount": 2,
       "lastAccessed": 1774908235030,
@@ -676,6 +724,60 @@
       "path": "tests/probe_8vc/test_legacy_burial.py",
       "accessCount": 2,
       "lastAccessed": 1774908739747,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vg/test_ner_canonical_location.py",
+      "accessCount": 2,
+      "lastAccessed": 1774917769320,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vg/test_ioc_scorer_range.py",
+      "accessCount": 2,
+      "lastAccessed": 1774917769722,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vg/test_ioc_scorer_corroboration_monotonic.py",
+      "accessCount": 2,
+      "lastAccessed": 1774917772383,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vh/test_gnn_anomaly_detection.py",
+      "accessCount": 2,
+      "lastAccessed": 1774918115545,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vh/test_moe_router_returns_engine.py",
+      "accessCount": 2,
+      "lastAccessed": 1774918116333,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vh/test_dspy_prompts_loadable.py",
+      "accessCount": 2,
+      "lastAccessed": 1774918116924,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vh/test_synthesis_meta_has_required_fields.py",
+      "accessCount": 2,
+      "lastAccessed": 1774918118284,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vh/test_dynamic_token_budget.py",
+      "accessCount": 2,
+      "lastAccessed": 1774918118901,
+      "type": "file"
+    },
+    {
+      "path": "runtime/sprint_lifecycle.py",
+      "accessCount": 2,
+      "lastAccessed": 1774918491115,
       "type": "file"
     },
     {
@@ -731,6 +833,84 @@
       "accessCount": 1,
       "lastAccessed": 1774914874110,
       "type": "directory"
+    },
+    {
+      "path": "knowledge/duckdb_store.py",
+      "accessCount": 1,
+      "lastAccessed": 1774917429110,
+      "type": "file"
+    },
+    {
+      "path": "scripts/pre_commit_guard.py",
+      "accessCount": 1,
+      "lastAccessed": 1774917445637,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vg/test_none_truly_gone_from_git.py",
+      "accessCount": 1,
+      "lastAccessed": 1774917720161,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vg/test_ioc_db_path_is_persistent.py",
+      "accessCount": 1,
+      "lastAccessed": 1774917720618,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vg/test_duckpgq_survives_restart.py",
+      "accessCount": 1,
+      "lastAccessed": 1774917721081,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vg/test_duckpgq_export_edge_list.py",
+      "accessCount": 1,
+      "lastAccessed": 1774917721639,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vg/test_ane_embedder_no_duplicate_patterns.py",
+      "accessCount": 1,
+      "lastAccessed": 1774917723415,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vg/test_merge_from_parquet.py",
+      "accessCount": 1,
+      "lastAccessed": 1774917723832,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vg/test_top_nodes_by_degree.py",
+      "accessCount": 1,
+      "lastAccessed": 1774917724202,
+      "type": "file"
+    },
+    {
+      "path": "tests",
+      "accessCount": 1,
+      "lastAccessed": 1774917757860,
+      "type": "directory"
+    },
+    {
+      "path": "tests/probe_8v/test_sprint_context.py",
+      "accessCount": 1,
+      "lastAccessed": 1774917958389,
+      "type": "file"
+    },
+    {
+      "path": "utils/sprint_lifecycle.py",
+      "accessCount": 1,
+      "lastAccessed": 1774918402604,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vi/test_rl_record_outcome_monotonic.py",
+      "accessCount": 1,
+      "lastAccessed": 1774918516729,
+      "type": "file"
     }
   ],
   "userDirectives": []

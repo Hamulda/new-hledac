@@ -367,6 +367,54 @@ class SprintScheduler:
         # Sprint 8VD §F: Scorecard tracking
         self._finding_count: int = 0
         self._synthesis_engine: str = "unknown"
+        # Sprint 8VI §B: RL adaptive pivot — task_type → reward history
+        self._pivot_rewards: dict[str, list[float]] = {}
+        # Sprint 8VI §C: Recent IOC ring buffer for hypothesis feedback
+        self._recent_iocs: list[dict] = []
+        # Sprint 8VI §D: IOCScorer reference (set during WARMUP)
+        self._ioc_scorer: Any = None
+        # Sprint 8VI §D: DuckPGQGraph reference (set during WARMUP)
+        self._ioc_graph: Any = None
+        # Sprint 8VI §C: All findings collected during sprint
+        self._all_findings: list[dict] = []
+
+    # ── Sprint 8VI §B: RL Adaptive Pivot ────────────────────────────────
+
+    def record_pivot_outcome(
+        self, task_type: str, found_count: int, elapsed_s: float
+    ) -> None:
+        """
+        Zaznamenej výsledek pivot tasku jako reward signal pro RL.
+        reward = findings per second (FPS) — normalizovaný na [0, 1].
+        """
+        import math
+        if elapsed_s <= 0:
+            return
+        fps = found_count / elapsed_s
+        # log1p pro sub-lineární scaling, max 1.0
+        reward = min(1.0, math.log1p(fps) / math.log1p(10))
+        history = self._pivot_rewards.setdefault(task_type, [])
+        history.append(reward)
+        # Udržuj pouze posledních 20 epizod
+        if len(history) > 20:
+            self._pivot_rewards[task_type] = history[-20:]
+
+    def _get_adaptive_priority(
+        self, task_type: str, base_priority: float = 0.5
+    ) -> float:
+        """
+        Vrátí EMA reward jako priority modifikátor.
+        Task types s vyšší historickou yield dostávají vyšší prioritu.
+        """
+        history = self._pivot_rewards.get(task_type, [])
+        if not history:
+            return base_priority
+        # EMA with alpha=0.3 (recent weighted)
+        ema = history[0]
+        for r in history[1:]:
+            ema = 0.3 * r + 0.7 * ema
+        # Mix: 70% EMA reward + 30% base priority
+        return round(0.7 * ema + 0.3 * base_priority, 4)
 
     # ── Public API ─────────────────────────────────────────────────────────
 
@@ -926,33 +974,48 @@ class SprintScheduler:
         ioc_type: str,
         confidence: float,
         degree: float = 1.0,
+        task_type: str | None = None,
     ) -> None:
         """
         Enqueue a pivot task. Called on every new IOC hit from buffer_ioc.
         Silently drops if queue is full (M1 8GB constraint).
+
+        Sprint 8VI §B.4: RL-adaptive priority — for generic_pivot task types,
+        blend EMA reward with base priority.
         """
         if self._pivot_queue.full():
             return
         # Multi-pivot: enqueue ALL applicable task types per IOC
-        task_types = {
-            # Sprint 8TB original
-            "cve": ["cve_to_github", "cve_to_academic"],
-            "ipv4": ["ip_to_ct", "ip_to_greynoise", "shodan_enrich"],
-            "ipv6": ["ip_to_ct"],
-            "domain": ["domain_to_dns", "domain_to_wayback", "domain_to_pdns",
-                       "domain_to_ct", "ahmia_search", "rdap_lookup"],
-            "md5": ["hash_to_mb"],
-            "sha256": ["hash_to_mb"],
-            "sha1": ["hash_to_mb"],
-            # Sprint 8VB: Maximum OSINT Coverage
-            "url": ["wayback_search", "commoncrawl_search", "paste_keyword_search",
-                    "github_dork", "multi_engine_search"],
-        }.get(ioc_type, [])
-        if not task_types:
+        task_types_list: list[str]
+        if task_type is not None:
+            # Single explicit task type
+            task_types_list = [task_type]
+        else:
+            task_types_list = {
+                # Sprint 8TB original
+                "cve": ["cve_to_github", "cve_to_academic"],
+                "ipv4": ["ip_to_ct", "ip_to_greynoise", "shodan_enrich"],
+                "ipv6": ["ip_to_ct"],
+                "domain": ["domain_to_dns", "domain_to_wayback", "domain_to_pdns",
+                           "domain_to_ct", "ahmia_search", "rdap_lookup"],
+                "md5": ["hash_to_mb"],
+                "sha256": ["hash_to_mb"],
+                "sha1": ["hash_to_mb"],
+                # Sprint 8VB: Maximum OSINT Coverage
+                "url": ["wayback_search", "commoncrawl_search", "paste_keyword_search",
+                        "github_dork", "multi_engine_search"],
+                # Sprint 8VI §C: hypothesis feedback
+                "hypothesis": ["multi_engine_search", "rdap_lookup"],
+            }.get(ioc_type, [])
+        if not task_types_list:
             return
-        priority = -(confidence * max(1.0, float(degree)))
-        for task_type in task_types:
-            task = PivotTask(priority, ioc_type, ioc_value, task_type)
+
+        base_priority = confidence * max(1.0, float(degree))
+        for tt in task_types_list:
+            # Sprint 8VI §B.4: RL-adaptive priority blend
+            effective = self._get_adaptive_priority(tt, base_priority=base_priority)
+            priority = -effective
+            task = PivotTask(priority, ioc_type, ioc_value, tt)
             try:
                 self._pivot_queue.put_nowait(task)
                 self._pivot_stats["total"] += 1
@@ -1011,18 +1074,37 @@ class SprintScheduler:
 
             # Sprint 8VF: Inline lifecycle handlers only (max 5 branches)
             # Sprint 8VF §E.3: hypothesis_probe — keyword extraction from natural language
+            # Sprint 8VI §C: Hypothesis → DuckPGQ confirmed_by feedback
             elif task.task_type == "hypothesis_probe":
                 words = task.ioc_value.split()
                 queries = sorted(
                     {w.lower() for w in words if len(w) > 5},
                     key=len, reverse=True
                 )[:3]
+                count_before = getattr(self, "_finding_count", 0)
                 for sq in queries:
-                    await self.enqueue_pivot(
+                    self.enqueue_pivot(
                         ioc_value=sq,
                         ioc_type="url",
                         confidence=0.7,
                     )
+                count_after = getattr(self, "_finding_count", 0)
+                hyp_found = count_after - count_before
+                # Sprint 8VI §C: Feedback — successful hypotheses strengthen edges
+                if hyp_found > 0 and hasattr(self, "_ioc_graph") and self._ioc_graph is not None:
+                    try:
+                        for ioc_entry in self._recent_iocs[-hyp_found:]:
+                            ioc_val = ioc_entry.get("value") or ioc_entry.get("ioc", "")
+                            if ioc_val:
+                                self._ioc_graph.add_relation(
+                                    task.ioc_value[:100],
+                                    ioc_val,
+                                    rel_type="confirmed_by",
+                                    weight=0.8,
+                                    evidence="hypothesis_probe",
+                                )
+                    except Exception:
+                        pass
 
             # Sprint 8VF §C: Sprint lifecycle inline handlers (only these stay as elif)
             elif task.task_type == "sprint_windup":
@@ -1105,17 +1187,6 @@ class SprintScheduler:
             self._bg_tasks.add(task)
             task.add_done_callback(self._bg_tasks.discard)
 
-    async def _execute_pivot(self, task: PivotTask, session=None) -> dict:
-        """Execute a single pivot task. Checks speculative cache first."""
-        task_key = f"{task.task_type}:{task.ioc_value}"
-        if task_key in self._speculative_results:
-            result = self._speculative_results.pop(task_key)
-            log.debug(f"Speculative cache hit: {task_key}")
-            self._pivot_stats["speculative_hits"] = self._pivot_stats.get("speculative_hits", 0) + 1
-            return result
-        # Placeholder — real implementation would do actual pivot work
-        return {"task_type": task.task_type, "ioc_value": task.ioc_value, "status": "executed"}
-
     # ── Sprint 8UC B.5: OODA agentic loop ────────────────────────────────
 
     async def _run_ooda_cycle(
@@ -1155,11 +1226,11 @@ class SprintScheduler:
                 confidence = min(0.95, 0.75 + pr_score)
                 decided_seeds.append((value, ioc_type, confidence))
 
-        # ACT — enqueue pivot tasks
+        # ACT — enqueue pivot tasks (sync, no await needed)
         acted = 0
         for value, ioc_type, confidence in decided_seeds:
             try:
-                await self.enqueue_pivot(value, ioc_type, confidence, degree=2)
+                self.enqueue_pivot(value, ioc_type, confidence, degree=2)
                 acted += 1
             except Exception as e:
                 log.debug(f"OODA Act enqueue {value}: {e}")
@@ -1167,23 +1238,6 @@ class SprintScheduler:
         self._pivot_stats["ooda_cycles"] = self._pivot_stats.get("ooda_cycles", 0) + 1
         self._pivot_stats["ooda_last_acted"] = acted
         log.info(f"OODA: acted on {acted} nodes")
-
-    async def enqueue_pivot(
-        self,
-        ioc_value: str,
-        ioc_type: str,
-        confidence: float = 0.7,
-        degree: int = 1,
-    ) -> None:
-        """Enqueue a pivot task for agentic exploration."""
-        task = PivotTask(
-            priority=-(confidence * degree),
-            ioc_type=ioc_type,
-            ioc_value=ioc_value,
-            task_type="generic_pivot",
-        )
-        await self._pivot_queue.put(task)
-        self._pivot_stats["total"] = self._pivot_stats.get("total", 0) + 1
 
     # ── Sprint 8VD §B: Arrow / Parquet columnar buffer ────────────────────
 
@@ -1262,8 +1316,30 @@ class SprintScheduler:
                 pass  # NER is enrichment — never crashes the pipeline
 
     def buffer_ioc(self, ioc: dict) -> None:
-        """Buffer an IOC into the Arrow batch."""
-        self._arrow_batch.append(ioc)
+        """
+        Buffer an IOC into the Arrow batch.
+
+        Sprint 8VI §D: IOCScorer final_score zapojeno.
+        Sprint 8VI §C: Recent IOC ring buffer pro hypothesis feedback.
+        """
+        # Sprint 8VI §D: IOCScorer zapojení
+        ioc_entry = dict(ioc)
+        if hasattr(self, "_ioc_scorer") and self._ioc_scorer is not None:
+            try:
+                score = self._ioc_scorer.final_score(ioc_entry)
+                ioc_entry["confidence"] = score
+            except Exception:
+                pass
+
+        # Sprint 8VI §C: Ring buffer — max 100 recent IOCs
+        recent = getattr(self, "_recent_iocs", [])
+        recent.append(ioc_entry)
+        self._recent_iocs = recent[-100:]
+
+        # Sprint 8VI §C: Hypothesis → DuckPGQ confirmed_by hrany
+        # (handled in _execute_pivot after finding confirmation)
+
+        self._arrow_batch.append(ioc_entry)
         try:
             asyncio.create_task(self._maybe_flush_to_parquet())
         except RuntimeError:

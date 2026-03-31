@@ -335,6 +335,33 @@ Output as structured JSON with confidence scores.""",
         if hasattr(self._brain._orch, '_bg_tasks'):
             self._brain._orch._bg_tasks.add(self._task)
 
+
+# ---------------------------------------------------------------------------
+# Sprint 8VH: DSPy Lazy Load Helper
+# ---------------------------------------------------------------------------
+
+
+def load_optimized_prompts() -> dict:
+    """
+    Lazy load DSPy optimalizované prompty z cache.
+
+    Vrací:
+        dict: {task_key: prompt_string} — prázdný dict pokud cache neexistuje
+              nebo optimalizace neproběhla.
+    """
+    cache_path = Path.home() / '.hledac' / 'dspy_cache.pkl'
+    if not cache_path.exists():
+        return {}
+    try:
+        import pickle
+        with open(cache_path, 'rb') as f:
+            data = pickle.load(f)
+            prompts = data.get('prompts', {})
+            # Filter only valid non-empty prompts
+            return {k: v for k, v in prompts.items() if v and isinstance(v, str)}
+    except Exception:
+        return {}
+
     async def stop(self):
         self._stop.set()
         if self._task:

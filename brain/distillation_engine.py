@@ -709,6 +709,69 @@ def _load_distillation():
         DISTILLATION_AVAILABLE = False
 
 
+# ---------------------------------------------------------------------------
+# Sprint 8VH: Distillation Wrapper (findings → compressed text)
+# ---------------------------------------------------------------------------
+
+
+async def distil(
+    findings: list[dict],
+    max_tokens: int = 2000,
+) -> str:
+    """
+    Předprocesuje findings přes DistillationEngine před synthesis.
+
+    Výstup: komprimovaná esence ve formátu vhodném pro LLM kontext.
+    Fallback: first N findings jako plaintext pokud engine není dostupný.
+
+    Args:
+        findings: List of finding dicts s poli text/snippet/title/source
+        max_tokens: Cílový počet tokenů (přibližně)
+
+    Returns:
+        Komprimovaný text
+    """
+    if not findings:
+        return ""
+
+    try:
+        engine = await create_distillation_engine()
+        if engine is not None:
+            # Extract chains from findings
+            chains = []
+            for f in findings:
+                text = f.get("text", "") or f.get("snippet", "") or f.get("title", "")
+                if text:
+                    # Each finding = one reasoning step
+                    chains.append([text[:500]])  # limit each to 500 chars
+            if chains:
+                # Score and select best chains
+                query = findings[0].get("query", "summarize") if findings else ""
+                best_chain = max(chains, key=lambda c: engine._heuristic_score(query, c))
+                return best_chain[0] if best_chain else _findings_to_text(findings)
+            await engine.cleanup()
+    except Exception:
+        pass
+
+    # Fallback: serialize top findings as text
+    return _findings_to_text(findings)
+
+
+def _findings_to_text(findings: list[dict], max_items: int = 20) -> str:
+    """Helper: convert findings list to plain text."""
+    lines = []
+    for f in findings[:max_items]:
+        source = f.get("source", "?")
+        title = f.get("title", "")
+        snippet = (f.get("text", "") or f.get("snippet", ""))[:200]
+        lines.append(f"[{source}] {title} — {snippet}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Original create_distillation_engine
+# ---------------------------------------------------------------------------
+
 async def create_distillation_engine(
     embedding_model: Optional[Any] = None,
     db_path: Optional[Union[str, Path]] = None,

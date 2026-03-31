@@ -104,6 +104,70 @@ def _infer_ioc_type(text: str) -> str:
     return "domain"
 
 # ---------------------------------------------------------------------------
+# Sprint 8VH: Brain Intelligence Layer Integration State
+# ---------------------------------------------------------------------------
+
+_DSPY_PROMPTS: dict | None = None
+_PROMPT_BANDIT = None
+
+
+def _get_dspy_prompts() -> dict:
+    """
+    Lazy load DSPy optimalizované prompty.
+    Fallback: prázdný dict (synthesis použije hardcoded templates).
+    """
+    global _DSPY_PROMPTS
+    if _DSPY_PROMPTS is not None:
+        return _DSPY_PROMPTS
+    try:
+        from brain.dspy_optimizer import load_optimized_prompts
+        _DSPY_PROMPTS = load_optimized_prompts()
+    except Exception:
+        _DSPY_PROMPTS = {}
+    return _DSPY_PROMPTS
+
+
+def _get_prompt_bandit():
+    """Lazy init PromptBandit."""
+    global _PROMPT_BANDIT
+    if _PROMPT_BANDIT is not None:
+        return _PROMPT_BANDIT
+    try:
+        from brain.prompt_bandit import PromptBandit
+        _PROMPT_BANDIT = PromptBandit(
+            brain_manager=None,
+            alpha=1.0,
+            lambda_reg=0.01,
+            context_dim=9,
+        )
+    except Exception:
+        _PROMPT_BANDIT = None
+    return _PROMPT_BANDIT
+
+
+async def _distill_findings(
+    findings: list[dict],
+    max_tokens: int = 2000,
+) -> str:
+    """
+    Předprocesuje findings přes DistillationEngine před synthesis.
+    Fallback: serialize top findings jako plaintext.
+    """
+    try:
+        from brain.distillation_engine import distil
+        return await distil(findings, max_tokens=max_tokens)
+    except Exception:
+        # Fallback: serialize top findings jako text
+        lines = []
+        for f in findings[:20]:
+            lines.append(
+                f"[{f.get('source', '?')}] {f.get('title', '')} "
+                f"— {f.get('snippet', f.get('text', ''))[:200]}"
+            )
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # OSINTReport Schema — msgspec.Struct for JSON constrained generation
 # ---------------------------------------------------------------------------
 
@@ -169,7 +233,7 @@ class SynthesisRunner:
 
     __slots__ = ("_lifecycle", "_ioc_graph", "_cached_model_path", "_last_outlines_used",
                  "_custom_synthesis_prompt", "_prompt_modifier", "_duckdb_store",
-                 "_last_synthesis_engine")
+                 "_last_synthesis_engine", "_last_arm", "_bandit_rewards")
 
     def __init__(self, lifecycle: "ModelLifecycle") -> None:
         self._lifecycle = lifecycle
@@ -184,6 +248,9 @@ class SynthesisRunner:
         # Sprint 8UC B.3: Last synthesis engine used
         self._last_synthesis_engine: str = "none"
         self._prompt_modifier: str = ""
+        # Sprint 8VH: Bandit tracking
+        self._last_arm: str | None = None
+        self._bandit_rewards: dict = {}
 
     def inject_graph(self, graph: Any) -> None:
         """Inject IOCGraph instance from 8QA for STIX context injection."""
@@ -202,6 +269,25 @@ class SynthesisRunner:
         """Sprint 8TD: Set prompt modifier from bandit arm selection."""
         self._prompt_modifier = modifier
         logger.info(f"SynthesisRunner: prompt modifier set ({len(modifier)} chars)")
+
+    @property
+    def last_synthesis_meta(self) -> dict:
+        """Vrátí metadata posledního synthesis volání pro scorecard."""
+        return {
+            "synthesis_engine": getattr(self, "_last_synthesis_engine", "unknown"),
+            "dspy_prompt_version": len(_get_dspy_prompts()),
+            "bandit_arm_used": getattr(self, "_last_arm", None),
+            "bandit_arm_rewards": self._get_bandit_rewards(),
+        }
+
+    def _get_bandit_rewards(self) -> dict:
+        bandit = _get_prompt_bandit()
+        if bandit is None:
+            return {}
+        try:
+            return getattr(bandit, "arm_rewards", {})
+        except Exception:
+            return {}
 
     # ------------------------------------------------------------------
     # Public synthesis API

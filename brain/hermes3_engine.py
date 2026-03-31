@@ -18,6 +18,11 @@ Features:
 - ChatML formátování
 - AI-driven query analysis
 - Research synthesis
+
+NOTE (Sprint 8VH): brain/inference_engine.py je FUNKČNĚ ODLIŠNÝ:
+  - inference_engine: abductive reasoning, evidence chaining, entity resolution, inference rules
+  - hermes3_engine: LLM-based decision making, ChatML, structured generation
+  Obě jsou kanonické pro své domain — žádná deduplikace není nutná.
 """
 
 from __future__ import annotations
