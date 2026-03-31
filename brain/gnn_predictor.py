@@ -382,6 +382,191 @@ class GNNPredictor:
         finally:
             _CPU.shutdown(wait=False)
 
+    # ---------------------------------------------------------------------------
+    # Sprint 8VG-C: GNN IOC Link Prediction
+    # ---------------------------------------------------------------------------
+
+    async def predict_ioc_links(
+        self,
+        graph_nodes: list[dict],
+        graph_edges: list[dict],
+        query_node_id: str,
+        top_k: int = 10,
+    ) -> list[dict]:
+        """
+        Predict pravděpodobné linky z query_node na neznámé uzly.
+        Vstup: graph uzly a hrany z graph/ modulu, ID dotazovaného uzlu.
+        Výstup: list {"node_id", "predicted_link_probability", "node_type", "node_value"}
+
+        Implementace: MLX-native 2-vrstvý GCN (Graph Convolutional Network).
+        ŽÁDNÝ PyTorch — čistý mlx.core.
+        """
+        if not MLX_AVAILABLE:
+            return []
+
+        if not graph_nodes:
+            return []
+
+        # Zkontroluj memory před allokací
+        try:
+            from hledac.universal.resource_allocator import get_memory_pressure_level
+            pressure = get_memory_pressure_level()
+            if pressure == "critical":
+                return []  # graceful skip při high memory pressure
+        except Exception:
+            pass
+
+        try:
+            # Sestavení adjacency matrix z graph_edges
+            n = len(graph_nodes)
+            node_index = {node["id"]: i for i, node in enumerate(graph_nodes)}
+
+            # Sparse adjacency matrix jako dense (pro malé grafy — OSINT grafy jsou <1000 uzlů)
+            adj_data = [[0.0] * n for _ in range(n)]
+            for edge in graph_edges:
+                src_i = node_index.get(edge.get("source", ""))
+                dst_i = node_index.get(edge.get("target", ""))
+                if src_i is not None and dst_i is not None:
+                    adj_data[src_i][dst_i] = 1.0
+                    adj_data[dst_i][src_i] = 1.0  # undirected
+
+            # Feature matrix: jednoduché one-hot encoding typu uzlu
+            node_types = list(set(n.get("type", "unknown") for n in graph_nodes))
+            type_to_idx = {t: i for i, t in enumerate(node_types)}
+            feat_dim = max(len(node_types), 4)
+
+            features_data = []
+            for node in graph_nodes:
+                feat = [0.0] * feat_dim
+                type_idx = type_to_idx.get(node.get("type", "unknown"), 0)
+                feat[type_idx] = 1.0
+                features_data.append(feat)
+
+            # MLX tensory
+            A = mx.array(adj_data, dtype=mx.float32)  # [n, n]
+            X = mx.array(features_data, dtype=mx.float32)  # [n, feat_dim]
+
+            # Normalizovaná Laplacian: D^(-1/2) * A * D^(-1/2)
+            degree = mx.sum(A, axis=1, keepdims=True)  # [n, 1]
+            degree_inv_sqrt = mx.where(degree > 0, 1.0 / mx.sqrt(degree + 1e-8), mx.zeros_like(degree))
+            A_norm = degree_inv_sqrt * A * mx.transpose(degree_inv_sqrt)
+
+            # 2-vrstvý GCN forward pass (jednoduché váhy — není trénovaný, ale topologie funguje)
+            hidden_dim = 16
+            # Layer 1: W1 ∈ R^(feat_dim × hidden_dim) — náhodná inicializace (fixní seed)
+            mx.random.seed(42)
+            W1 = mx.random.normal((feat_dim, hidden_dim)) * 0.1
+            H1 = mx.maximum(A_norm @ X @ W1, 0)  # ReLU activation, [n, hidden_dim]
+
+            # Layer 2: link prediction = H1 @ H1.T (dot product similarity)
+            scores_matrix = H1 @ mx.transpose(H1)  # [n, n] — link probability scores
+            mx.eval(scores_matrix)
+
+            # Extrahuj predikce pro query_node
+            query_idx = node_index.get(query_node_id)
+            if query_idx is None:
+                return []
+
+            query_scores = scores_matrix[query_idx].tolist()
+
+            # Vyřaď existující hrany a samotný uzel
+            existing_neighbors = set()
+            for edge in graph_edges:
+                if edge.get("source") == query_node_id:
+                    existing_neighbors.add(edge.get("target"))
+                elif edge.get("target") == query_node_id:
+                    existing_neighbors.add(edge.get("source"))
+
+            predictions = []
+            for i, (node, score) in enumerate(zip(graph_nodes, query_scores)):
+                if node["id"] == query_node_id:
+                    continue
+                if node["id"] in existing_neighbors:
+                    continue
+                predictions.append({
+                    "node_id": node["id"],
+                    "predicted_link_probability": float(score),
+                    "node_type": node.get("type", "unknown"),
+                    "node_value": node.get("value", node["id"]),
+                })
+
+            # Sort by probability descending
+            predictions.sort(key=lambda x: x["predicted_link_probability"], reverse=True)
+
+            # Uvolni MLX cache — M1 critical
+            if hasattr(mx.metal, "clear_cache"):
+                mx.metal.clear_cache()
+
+            return predictions[:top_k]
+
+        except Exception as e:
+            logger.warning(f"GNN prediction failed: {e}")
+            return []
+
+    async def enrich_graph_from_research(
+        self,
+        research_results: list[dict],
+        existing_graph_nodes: list[dict],
+        existing_graph_edges: list[dict],
+    ) -> dict:
+        """
+        Přidej nové uzly/hrany z výzkumných výsledků do IOC grafu.
+        Volej po každém výzkumném sprintu pro kontinuální grafové obohacení.
+        """
+        import re
+
+        new_nodes = []
+        new_edges = []
+
+        domain_pattern = re.compile(r'\b(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b')
+        ip_pattern = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')
+        hash_pattern = re.compile(r'\b[0-9a-f]{64}\b', re.I)  # SHA256
+
+        existing_ids = {n["id"] for n in existing_graph_nodes}
+
+        for result in research_results:
+            text = str(result)
+            source_action = result.get("action", "unknown")
+
+            # Extrahuj entity a vytvoř uzly
+            for match in domain_pattern.findall(text)[:20]:
+                node_id = f"domain:{match}"
+                if node_id not in existing_ids:
+                    new_nodes.append({"id": node_id, "type": "domain", "value": match})
+                    existing_ids.add(node_id)
+
+            for match in ip_pattern.findall(text)[:20]:
+                if match not in ("127.0.0.1", "0.0.0.0"):
+                    node_id = f"ip:{match}"
+                    if node_id not in existing_ids:
+                        new_nodes.append({"id": node_id, "type": "ip", "value": match})
+                        existing_ids.add(node_id)
+
+            for match in hash_pattern.findall(text)[:10]:
+                node_id = f"sha256:{match}"
+                if node_id not in existing_ids:
+                    new_nodes.append({"id": node_id, "type": "hash", "value": match})
+                    existing_ids.add(node_id)
+
+        # Vytvoř hrany mezi entitami z téhož výsledku (ko-occurrence)
+        result_nodes_list = [[n for n in new_nodes if n["value"] in str(r)] for r in research_results]
+        for rn in result_nodes_list:
+            for i in range(len(rn)):
+                for j in range(i + 1, min(i + 3, len(rn))):
+                    new_edges.append({
+                        "source": rn[i]["id"],
+                        "target": rn[j]["id"],
+                        "type": "co_occurrence",
+                        "weight": 1.0,
+                    })
+
+        return {
+            "new_nodes": new_nodes,
+            "new_edges": new_edges,
+            "total_nodes": len(existing_graph_nodes) + len(new_nodes),
+            "total_edges": len(existing_graph_edges) + len(new_edges),
+        }
+
 
 # ---------------------------------------------------------------------------
 # Sprint 8VH: GNN ↔ DuckPGQGraph Bridge Functions

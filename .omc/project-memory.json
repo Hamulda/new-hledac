@@ -632,8 +632,8 @@
     },
     {
       "path": "autonomous_orchestrator.py",
-      "accessCount": 8,
-      "lastAccessed": 1774908102015,
+      "accessCount": 9,
+      "lastAccessed": 1774942979049,
       "type": "file"
     },
     {
@@ -709,6 +709,12 @@
       "type": "file"
     },
     {
+      "path": "legacy/autonomous_orchestrator.py",
+      "accessCount": 3,
+      "lastAccessed": 1774943023463,
+      "type": "file"
+    },
+    {
       "path": "knowledge/__init__.py",
       "accessCount": 2,
       "lastAccessed": 1774908235030,
@@ -781,6 +787,12 @@
       "type": "file"
     },
     {
+      "path": "brain/_lazy.py",
+      "accessCount": 2,
+      "lastAccessed": 1774942963131,
+      "type": "file"
+    },
+    {
       "path": "legacy/atomic_storage.py",
       "accessCount": 1,
       "lastAccessed": 1774908316926,
@@ -790,18 +802,6 @@
       "path": "knowledge/graph_layer.py",
       "accessCount": 1,
       "lastAccessed": 1774908438680,
-      "type": "file"
-    },
-    {
-      "path": "legacy/autonomous_orchestrator.py",
-      "accessCount": 1,
-      "lastAccessed": 1774908480345,
-      "type": "file"
-    },
-    {
-      "path": "brain/_lazy.py",
-      "accessCount": 1,
-      "lastAccessed": 1774908640576,
       "type": "file"
     },
     {
@@ -910,6 +910,18 @@
       "path": "tests/probe_8vi/test_rl_record_outcome_monotonic.py",
       "accessCount": 1,
       "lastAccessed": 1774918516729,
+      "type": "file"
+    },
+    {
+      "path": "brain/dynamic_model_manager.py",
+      "accessCount": 1,
+      "lastAccessed": 1774942963079,
+      "type": "file"
+    },
+    {
+      "path": "brain/inference_engine.py",
+      "accessCount": 1,
+      "lastAccessed": 1774942979101,
       "type": "file"
     }
   ],

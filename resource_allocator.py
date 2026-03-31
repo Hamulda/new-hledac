@@ -256,3 +256,111 @@ def get_recommended_concurrency() -> Dict[str, int]:
         "warn":     {"fetch": 8,  "parse_workers": 2, "ml_jobs": 0, "browser": 0},
         "critical": {"fetch": 2,  "parse_workers": 1, "ml_jobs": 0, "browser": 0},
     }[level]
+
+
+# ── Sprint 8VG-C: Adaptive Concurrency ─────────────────────────────────────────
+
+import asyncio
+import platform
+import time
+
+_CONCURRENCY_FLOOR = 1
+_CONCURRENCY_CEILING = 3  # M1 8GB hard limit
+
+
+def get_adaptive_concurrency() -> int:
+    """
+    Dynamicky vypočítej optimální concurrency based on memory pressure.
+    M1 8GB: max 3, min 1.
+    """
+    pressure_str = get_memory_pressure_level()
+    # Map string level to numeric 0-1 range
+    pressure_map = {"normal": 0.0, "warn": 0.6, "critical": 0.9}
+    pressure = pressure_map.get(pressure_str, 0.0)
+
+    if pressure < 0.4:
+        return _CONCURRENCY_CEILING      # 3 paralelní tasks
+    elif pressure < 0.6:
+        return 2                          # 2 tasks
+    elif pressure < 0.75:
+        return 1                          # 1 task — opatrně
+    else:
+        return _CONCURRENCY_FLOOR         # memory critical — force sequential
+
+
+class AdaptiveSemaphore:
+    """
+    Semaphore jehož limit se adaptivně mění podle memory pressure.
+    Drop-in replacement pro asyncio.Semaphore v orchestrátoru.
+    """
+
+    def __init__(self, initial_limit: int = _CONCURRENCY_CEILING):
+        self._limit = initial_limit
+        self._semaphore = asyncio.Semaphore(initial_limit)
+        self._last_check = time.monotonic()
+        self._check_interval = 5.0  # přehodnoť každých 5s
+
+    async def _maybe_update_limit(self) -> None:
+        """Aktualizuj limit pokud uplynulo dost času od posledního checku."""
+        now = time.monotonic()
+        if now - self._last_check < self._check_interval:
+            return
+        self._last_check = now
+
+        new_limit = get_adaptive_concurrency()
+        if new_limit != self._limit:
+            self._limit = new_limit
+            # Vytvoř nový semaphore s novým limitem
+            # POZOR: existující holders zůstanou — nový limit se projeví až po release
+            self._semaphore = asyncio.Semaphore(new_limit)
+
+    async def __aenter__(self):
+        await self._maybe_update_limit()
+        await self._semaphore.acquire()
+        return self
+
+    async def __aexit__(self, *args):
+        self._semaphore.release()
+
+    @property
+    def current_limit(self) -> int:
+        return self._limit
+
+
+def get_mlx_memory_mb() -> float:
+    """
+    Vrátí aktuální MLX cache usage v MB.
+    Funguje pouze na macOS/Darwin s MLX.
+    """
+    if platform.system() != "Darwin":
+        return 0.0
+    try:
+        import mlx.core as mx
+        if hasattr(mx.metal, "get_cache_memory"):
+            return mx.metal.get_cache_memory() / (1024 * 1024)
+        elif hasattr(mx.metal, "get_active_memory"):
+            return mx.metal.get_active_memory() / (1024 * 1024)
+    except Exception:
+        pass
+    return 0.0
+
+
+def clear_mlx_cache_if_needed(threshold_mb: float = 500.0) -> bool:
+    """
+    Uvolni MLX cache pokud přesahuje threshold.
+    Vrací True pokud byl cache vyčištěn.
+    M1: cache > 500MB = čas uklidit.
+    """
+    if platform.system() != "Darwin":
+        return False
+    try:
+        import mlx.core as mx
+        cache_mb = get_mlx_memory_mb()
+        if cache_mb > threshold_mb:
+            if hasattr(mx.metal, "clear_cache"):
+                mx.metal.clear_cache()
+                return True
+    except Exception:
+        pass
+    return False
+
