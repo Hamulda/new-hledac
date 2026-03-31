@@ -655,6 +655,12 @@
       "type": "file"
     },
     {
+      "path": "tests/probe_8vd/test_arrow_buffer_flush.py",
+      "accessCount": 3,
+      "lastAccessed": 1774914880840,
+      "type": "file"
+    },
+    {
       "path": "knowledge/__init__.py",
       "accessCount": 2,
       "lastAccessed": 1774908235030,
@@ -707,6 +713,24 @@
       "accessCount": 1,
       "lastAccessed": 1774908712568,
       "type": "file"
+    },
+    {
+      "path": "tests/probe_8vd/test_polars_dedup_removes_duplicates.py",
+      "accessCount": 1,
+      "lastAccessed": 1774914759912,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vd/test_preflight_returns_dict.py",
+      "accessCount": 1,
+      "lastAccessed": 1774914817821,
+      "type": "file"
+    },
+    {
+      "path": "runtime/sprint_scheduler.py",
+      "accessCount": 1,
+      "lastAccessed": 1774914874110,
+      "type": "directory"
     }
   ],
   "userDirectives": []

@@ -356,6 +356,17 @@ class SprintScheduler:
         _TIMEOUT_MIN: float = 5.0
         _TIMEOUT_MAX: float = 30.0
         _TIMEOUT_MULT: float = 3.0
+        # Sprint 8VD §B: Arrow columnar buffer
+        self._arrow_batch: list[dict] = []
+        self._arrow_last_flush: float = 0.0
+        self._duckdb_read_con: Optional[Any] = None
+        self._ARROW_FLUSH_N: int = 1000
+        self._ARROW_FLUSH_S: float = 60.0
+        self._fetch_semaphore: asyncio.Semaphore = asyncio.Semaphore(20)
+        self.sprint_id: str = ""
+        # Sprint 8VD §F: Scorecard tracking
+        self._finding_count: int = 0
+        self._synthesis_engine: str = "unknown"
 
     # ── Public API ─────────────────────────────────────────────────────────
 
@@ -381,6 +392,12 @@ class SprintScheduler:
         # Start lifecycle via adapter (runtime: start(), utils: begin_sprint())
         adapter.start()
         self._reset_result()
+
+        # Sprint 8VD: Set sprint_id from lifecycle if available
+        try:
+            self.sprint_id = getattr(lifecycle, "sprint_id", "") or ""
+        except Exception:
+            self.sprint_id = ""
 
         # Sprint 8RA: Store lifecycle ref for callbacks
         self._lifecycle = lifecycle
@@ -415,6 +432,9 @@ class SprintScheduler:
         )
 
         try:
+            # Sprint 8VD §C: Start memory pressure monitoring loop
+            asyncio.create_task(self._memory_pressure_loop())
+
             while not adapter.is_terminal():
                 if self._stop_requested:
                     break
@@ -623,6 +643,8 @@ class SprintScheduler:
         self._result.hits_per_source[feed_url] = self._hits_per_source[feed_url]
         self._result.total_pattern_hits += result.matched_patterns
         self._result.accepted_findings += result.accepted_findings
+        # Sprint 8VD §F: Track finding count for scorecard
+        self._finding_count += result.accepted_findings
 
     # ── Dedup ─────────────────────────────────────────────────────────────
 
@@ -974,171 +996,44 @@ class SprintScheduler:
             PassiveDNSClient,
         )
         from hledac.universal.paths import CACHE_ROOT
+        from hledac.universal.tool_registry import get_task_handler
 
         session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=15),
             headers={"User-Agent": "curl/7.0"},
         )
         try:
-            if task.task_type == "cve_to_github":
-                gh = GitHubCodeSearchClient(cache_dir=CACHE_ROOT / "github")
-                results = await gh.search_cve(task.ioc_value, session)
-                for r in results[:5]:
-                    url = r.get("url", "")
-                    if url:
-                        await self._buffer_ioc_pivot("url", url, 0.65)
-                    repo = r.get("repo", "")
-                    if repo and "." in repo:
-                        domain = repo.split("/")[0] + ".github.io"
-                        await self._buffer_ioc_pivot("domain", domain, 0.50)
-                await gh.close()
+            # Sprint 8VF: Registry dispatch — OSINT handlers registered via @register_task
+            handler = get_task_handler(task.task_type)
+            if handler is not None:
+                await handler(task, self)
+                return
 
-            elif task.task_type == "ip_to_ct":
-                from hledac.universal.intelligence.ct_log_client import CTLogClient
-                ct = CTLogClient(cache_dir=CACHE_ROOT / "ct")
-                result = await ct.pivot_domain(task.ioc_value, session)
-                for san in (result.get("san_names") or [])[:10]:
-                    await self._buffer_ioc_pivot("domain", san, 0.70)
-                await ct.close()
-
-            elif task.task_type == "domain_to_dns":
-                dns_client = PassiveDNSClient()
-                ips = await dns_client.resolve_domain(task.ioc_value)
-                for ip in ips[:5]:
-                    await self._buffer_ioc_pivot("ipv4", ip, 0.72)
-                await dns_client.close()
-
-            elif task.task_type == "hash_to_mb":
-                mb = MalwareBazaarClient(cache_dir=CACHE_ROOT / "mb")
-                data = await mb.query_hash(task.ioc_value, session)
-                for val, typ in mb.extract_iocs(data):
-                    await self._buffer_ioc_pivot(typ, val, 0.80)
-                await mb.close()
-
-            elif task.task_type == "domain_to_wayback":
-                from hledac.universal.intelligence.archive_discovery import WaybackCDXClient
-                wb = WaybackCDXClient(cache_dir=CACHE_ROOT / "wayback")
-                snaps = await wb.get_snapshots(task.ioc_value, session, limit=20)
-                for snap in sorted(snaps, key=lambda x: x.get("timestamp", ""))[:5]:
-                    text = await wb.fetch_snapshot_text(
-                        snap["original"], snap["timestamp"], session
-                    )
-                    if text:
-                        for hit in match_text(text[:8000]):
-                            if hit.label and hit.value:
-                                await self._buffer_ioc_pivot(hit.label, hit.value, 0.68)
-
-            elif task.task_type == "cve_to_academic":
-                from hledac.universal.intelligence.academic_search import SemanticScholarClient
-                scholar = SemanticScholarClient(cache_dir=CACHE_ROOT / "scholar")
-                papers = await scholar.search_ss(task.ioc_value, session)
-                for p in papers[:5]:
-                    text = f"{p['title']} {p['abstract']}"
-                    for hit in match_text(text):
-                        if hit.label and hit.value:
-                            await self._buffer_ioc_pivot(hit.label, hit.value, 0.78)
-                arxiv = await scholar.search_arxiv(task.ioc_value, session)
-                for a in arxiv[:3]:
-                    for hit in match_text(a.get("summary", "")):
-                        if hit.label and hit.value:
-                            await self._buffer_ioc_pivot(hit.label, hit.value, 0.75)
-
-            elif task.task_type == "ip_to_greynoise":
-                from hledac.universal.intelligence.exposure_clients import GreyNoiseClient
-                gn = GreyNoiseClient(cache_dir=CACHE_ROOT / "greynoise")
-                result = await gn.classify_ip(task.ioc_value, session)
-                classification = result.get("classification", "unknown")
-                if classification == "malicious":
-                    await self._buffer_ioc_pivot("ipv4", task.ioc_value, 0.92)
-                    log.info(
-                        f"GreyNoise: {task.ioc_value} = MALICIOUS "
-                        f"({result.get('name', '')})"
+            # Sprint 8VF: Inline lifecycle handlers only (max 5 branches)
+            # Sprint 8VF §E.3: hypothesis_probe — keyword extraction from natural language
+            elif task.task_type == "hypothesis_probe":
+                words = task.ioc_value.split()
+                queries = sorted(
+                    {w.lower() for w in words if len(w) > 5},
+                    key=len, reverse=True
+                )[:3]
+                for sq in queries:
+                    await self.enqueue_pivot(
+                        ioc_value=sq,
+                        ioc_type="url",
+                        confidence=0.7,
                     )
 
-            # Sprint 8VB: Maximum OSINT Coverage dispatch
-            elif task.task_type == "domain_to_pdns":
-                from hledac.universal.discovery.ti_feed_adapter import query_circl_pdns
-                for r in await query_circl_pdns(task.ioc_value):
-                    await self._buffer_ioc_pivot(
-                        r.get("ioc_type", "domain"), r.get("ioc", ""), 0.75
-                    )
+            # Sprint 8VF §C: Sprint lifecycle inline handlers (only these stay as elif)
+            elif task.task_type == "sprint_windup":
+                # Signal windup — nothing to do in pivot
+                pass
 
-            elif task.task_type == "domain_to_ct":
-                from hledac.universal.discovery.ti_feed_adapter import search_crtsh
-                for r in await search_crtsh(task.ioc_value):
-                    await self._buffer_ioc_pivot("domain", r.get("ioc", ""), 0.70)
-
-            elif task.task_type == "ct_live_monitor":
-                from hledac.universal.discovery.ti_feed_adapter import certstream_monitor
-                for r in await certstream_monitor(task.ioc_value, duration_s=120):
-                    await self._buffer_ioc_pivot("domain", r.get("ioc", ""), 0.65)
-
-            elif task.task_type == "paste_keyword_search":
-                from hledac.universal.discovery.ti_feed_adapter import scrape_pastebin_for_keyword
-                for r in await scrape_pastebin_for_keyword(task.ioc_value):
-                    await self._buffer_ioc_pivot("url", r.get("url", ""), 0.60)
-
-            elif task.task_type == "github_dork":
-                from hledac.universal.discovery.ti_feed_adapter import github_dork
-                for r in await github_dork(task.ioc_value):
-                    await self._buffer_ioc_pivot("url", r.get("url", ""), 0.70)
-                await asyncio.sleep(2.0)
-
-            elif task.task_type == "ahmia_search":
-                from hledac.universal.discovery.ti_feed_adapter import search_ahmia
-                for r in await search_ahmia(task.ioc_value, use_onion=False):
-                    await self._buffer_ioc_pivot("url", r.get("url", ""), 0.65)
-
-            elif task.task_type == "shodan_enrich":
-                from hledac.universal.discovery.ti_feed_adapter import enrich_ip_internetdb
-                r = await enrich_ip_internetdb(task.ioc_value)
-                if r:
-                    await self._buffer_ioc_pivot("ipv4", task.ioc_value, 0.80)
-
-            elif task.task_type == "rdap_lookup":
-                from hledac.universal.discovery.ti_feed_adapter import query_rdap
-                r = await query_rdap(task.ioc_value)
-                if r:
-                    await self._buffer_ioc_pivot("domain", task.ioc_value, 0.75)
-
-            elif task.task_type == "multi_engine_search":
-                from hledac.universal.discovery.duckduckgo_adapter import search_multi_engine
-                for r in await search_multi_engine(task.ioc_value):
-                    await self._buffer_ioc_pivot("url", r.get("url", ""), 0.70)
-
-            elif task.task_type == "wayback_search":
-                from hledac.universal.discovery.duckduckgo_adapter import _search_wayback_cdx
-                for r in await _search_wayback_cdx(task.ioc_value):
-                    await self._buffer_ioc_pivot("url", r.get("url", ""), 0.65)
-
-            elif task.task_type == "commoncrawl_search":
-                from hledac.universal.discovery.duckduckgo_adapter import _search_commoncrawl_cdx
-                for r in await _search_commoncrawl_cdx(task.ioc_value):
-                    await self._buffer_ioc_pivot("url", r.get("url", ""), 0.65)
-
-            elif task.task_type == "dht_lookup":
-                # Sprint 8VB D.10: DHT integration via KademliaNode
-                try:
-                    from dht.kademlia_node import KademliaNode
-                    from hledac.universal.core.resource_governor import ResourceGovernor
-                    node = KademliaNode(
-                        node_id=f"hledac-{task.ioc_value[:8]}",
-                        governor=ResourceGovernor(),
-                    )
-                    result = await node.find_value(task.ioc_value)
-                    if result:
-                        await self._buffer_ioc_pivot("domain", task.ioc_value, 0.75)
-                except Exception as e:
-                    log.debug(f"[DHT lookup] {e}")
-
-            elif task.task_type == "taxii_fetch":
-                # TAXII 2.1 fetch via discovery.ti_feed_adapter
-                try:
-                    from hledac.universal.discovery.ti_feed_adapter import fetch_taxii
-                    for entry in await fetch_taxii(task.ioc_value):
-                        await self._buffer_ioc_pivot("url", entry.get("url", ""), 0.70)
-                except ImportError:
-                    pass  # TAXII not available
+            else:
+                # Sprint 8VF: OSINT handlers moved to @register_task registry
+                # (ti_feed_adapter, duckduckgo_adapter). Remaining types are either
+                # unregistered or lifecycle-only.
+                log.debug(f"[DISPATCH] Unknown task type: {task.task_type}")
         finally:
             await session.close()
 
@@ -1146,10 +1041,33 @@ class SprintScheduler:
         self, ioc_type: str, ioc_value: str, confidence: float
     ) -> None:
         """Wrapper: buffer IOC to graph and enqueue for further pivoting."""
+        # Sprint 8VE B.3: Lazy IOC graph init
+        if not hasattr(self, "_ioc_graph"):
+            from hledac.universal.graph.quantum_pathfinder import DuckPGQGraph
+            self._ioc_graph = DuckPGQGraph()
+
+        entry = {"ioc": ioc_value, "ioc_type": ioc_type, "source": "pivot"}
+        domain = None
+        try:
+            from urllib.parse import urlparse
+            domain = urlparse(ioc_value).netloc
+        except Exception:
+            pass
+        if domain:
+            entry["domain"] = domain
+            entry["rel_type"] = "seen_at"
+        if entry.get("ioc"):
+            self._ioc_graph.add_relation(
+                entry["ioc"], domain or ioc_value,
+                rel_type=entry.get("rel_type", "pivot"),
+                evidence=entry.get("source", "")
+            )
+
+        # Also buffer to pivot_ioc_graph if set
         if self._pivot_ioc_graph is not None:
             await self._pivot_ioc_graph.buffer_ioc(ioc_type, ioc_value, confidence)
             # Re-enqueue for further pivot (with degree+1)
-            degree = 2.0
+            degree = 2
             self.enqueue_pivot(ioc_value, ioc_type, confidence * 0.9, degree)
 
     # ── Sprint 8UC B.4: Speculative prefetch ─────────────────────────────
@@ -1267,6 +1185,160 @@ class SprintScheduler:
         await self._pivot_queue.put(task)
         self._pivot_stats["total"] = self._pivot_stats.get("total", 0) + 1
 
+    # ── Sprint 8VD §B: Arrow / Parquet columnar buffer ────────────────────
+
+    async def _maybe_flush_to_parquet(self) -> None:
+        """Flush Arrow batch to Parquet when N or S threshold is hit."""
+        import time as _time
+        now = _time.monotonic()
+        if (
+            len(self._arrow_batch) < self._ARROW_FLUSH_N
+            and now - self._arrow_last_flush < self._ARROW_FLUSH_S
+        ):
+            return
+        if not self._arrow_batch:
+            return
+
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+        except ImportError:
+            log.warning("[8VD-PARQUET] pyarrow not available — skipping flush")
+            return
+
+        batch = self._arrow_batch[:]
+        self._arrow_batch.clear()
+        self._arrow_last_flush = now
+
+        schema = pa.schema([
+            ("url",        pa.string()),
+            ("title",      pa.string()),
+            ("snippet",    pa.string()),
+            ("source",     pa.string()),
+            ("ioc",        pa.string()),
+            ("ioc_type",   pa.string()),
+            ("confidence", pa.float32()),
+            ("timestamp",  pa.timestamp("ms", tz="UTC")),
+            ("sprint_id",  pa.string()),
+        ])
+        rows = {k: [r.get(k) for r in batch] for k in schema.names}
+        table = pa.table(rows, schema=schema)
+
+        from hledac.universal.paths import get_sprint_parquet_dir
+        sid = self.sprint_id or getattr(self, "sprint_id", "unknown")
+        path = get_sprint_parquet_dir(sid) / f"batch_{int(now * 1000)}.parquet"
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, lambda: pq.write_table(table, path, compression="snappy")
+        )
+        log.info(f"[8VD-PARQUET] flushed {len(batch)} rows → {path}")
+
+    def buffer_finding(self, finding: dict) -> None:
+        """Buffer a finding into the Arrow batch."""
+        self._arrow_batch.append(finding)
+        # Kick off async flush without awaiting
+        try:
+            asyncio.create_task(self._maybe_flush_to_parquet())
+        except RuntimeError:
+            pass  # No running loop in sync context
+        # Sprint 8VF §B.3: IOC extraction — regex PRIMARY, spaCy SECONDARY
+        _text = " ".join(filter(None, [
+            finding.get("snippet", ""),
+            finding.get("content", ""),
+            finding.get("title", ""),
+        ])).strip()
+        if len(_text) > 10:
+            try:
+                from hledac.universal.brain.ane_embedder import extract_iocs_from_text
+                for ioc in extract_iocs_from_text(_text[:2_000]):
+                    ioc_entry = {
+                        **ioc,
+                        "source": "ner_extracted",
+                        "parent_url": finding.get("url", ""),
+                    }
+                    self.buffer_ioc(ioc_entry)
+            except Exception:
+                pass  # NER is enrichment — never crashes the pipeline
+
+    def buffer_ioc(self, ioc: dict) -> None:
+        """Buffer an IOC into the Arrow batch."""
+        self._arrow_batch.append(ioc)
+        try:
+            asyncio.create_task(self._maybe_flush_to_parquet())
+        except RuntimeError:
+            pass
+
+    # ── Sprint 8VD §B.5: DuckDB singleton helpers ───────────────────────────
+
+    def _get_duckdb_con(self):
+        """Singleton DuckDB connection — initialized once."""
+        if self._duckdb_read_con is None:
+            import duckdb
+            self._duckdb_read_con = duckdb.connect()
+        return self._duckdb_read_con
+
+    def query_sprint_results(self, sql: str) -> list[dict]:
+        """DuckDB vectorized query over Parquet files. Zero-copy style."""
+        return self._get_duckdb_con().execute(sql).fetchdf().to_dict("records")
+
+    # ── Sprint 8VD §D: Polars lazy dedup + ranking ────────────────────────
+
+    def deduplicate_and_rank_findings(self, sprint_id: str | None = None) -> str:
+        """
+        Polars LazyFrame streaming dedup — M1 8GB RAM safe.
+        Uses Polars 1.x .collect(engine='streaming') API.
+        """
+        import polars as pl
+        from hledac.universal.paths import get_sprint_parquet_dir
+        sid = sprint_id or self.sprint_id or "*"
+        store_dir = get_sprint_parquet_dir(sid)
+        glob = str(store_dir / "batch_*.parquet")
+        out = str(store_dir / "ranked.parquet")
+
+        (
+            pl.scan_parquet(glob)
+            .filter(
+                pl.col("url").is_not_null() | pl.col("ioc").is_not_null()
+            )
+            .with_columns([
+                pl.col("confidence").fill_null(0.5),
+                pl.col("source").cast(pl.Categorical),
+            ])
+            .group_by(["url", "ioc"])
+            .agg([
+                pl.col("title").first(),
+                pl.col("source").first(),
+                pl.col("confidence").max(),
+                pl.len().alias("hit_count"),
+            ])
+            .sort("hit_count", descending=True)
+            .collect(engine="streaming")
+            .write_parquet(out, compression="snappy")
+        )
+        return out
+
+    # ── Sprint 8VD §C: Memory pressure loop ────────────────────────────────
+
+    async def _memory_pressure_loop(self) -> None:
+        """Background task — adjusts concurrency based on memory pressure."""
+        from hledac.universal.resource_allocator import get_recommended_concurrency
+        import asyncio as _asyncio
+
+        while True:
+            try:
+                limits = get_recommended_concurrency()
+                self._fetch_semaphore = _asyncio.Semaphore(limits["fetch"])
+                log.info(
+                    f"[MEM] fetch_limit={limits['fetch']} "
+                    f"ml_jobs={limits['ml_jobs']}"
+                )
+                interval = 10 if limits["fetch"] <= 2 else 30
+            except Exception as e:
+                log.warning(f"[MEM] pressure check failed: {e}")
+                interval = 30
+            await _asyncio.sleep(interval)
+
     # ── Internal reset ────────────────────────────────────────────────────
 
     def _reset_result(self) -> None:
@@ -1275,6 +1347,9 @@ class SprintScheduler:
         self._hits_per_source.clear()
         self._stop_requested = False
         self._result = SprintSchedulerResult()
+        # Sprint 8VD: Clear Arrow batch state
+        self._arrow_batch.clear()
+        self._arrow_last_flush = 0.0
 
 
 # ---------------------------------------------------------------------------

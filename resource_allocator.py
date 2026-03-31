@@ -213,3 +213,46 @@ class ResourceAllocator:
             "history_size": len(self.history),
             "model_ready": self.coeffs is not None,
         }
+
+
+# Sprint 8VD §C: Memory Pressure Governor
+# psutil is already imported at the top of this module
+
+def get_memory_pressure_level() -> str:
+    """
+    Read memory pressure via psutil (ARM64 native, no subprocess overhead).
+
+    Thresholds calibrated for M1 8GB UMA:
+      > 85% used  → warn      (~6.8 GB)
+      > 93% used  → critical  (~7.4 GB)
+    Swap is used as a secondary signal.
+    """
+    try:
+        vm = psutil.virtual_memory()
+        pct = vm.percent
+        sw = psutil.swap_memory()
+        if pct > 93 or sw.percent > 50:
+            return "critical"
+        if pct > 85 or sw.percent > 25:
+            return "warn"
+    except Exception:
+        pass
+    return "normal"
+
+
+def get_recommended_concurrency() -> Dict[str, int]:
+    """Return concurrency limits based on memory pressure level."""
+    level = get_memory_pressure_level()
+    if level == "critical":
+        # Sprint 8VF §C.2: Unload ANE embedder at CRITICAL to free ~22MB
+        try:
+            from hledac.universal.brain.ane_embedder import unload_ane_embedder
+            unload_ane_embedder()
+        except Exception:
+            pass
+        import gc; gc.collect()
+    return {
+        "normal":   {"fetch": 20, "parse_workers": 4, "ml_jobs": 1, "browser": 1},
+        "warn":     {"fetch": 8,  "parse_workers": 2, "ml_jobs": 0, "browser": 0},
+        "critical": {"fetch": 2,  "parse_workers": 1, "ml_jobs": 0, "browser": 0},
+    }[level]

@@ -71,6 +71,38 @@ def clear_boot_telemetry() -> None:
 
 
 # =============================================================================
+# Sprint 8VD §E: Preflight check — graceful degradation, never raises
+# =============================================================================
+
+async def _preflight_check() -> dict:
+    """
+    Check critical system capabilities before sprint starts.
+    Always returns a dict — never raises an exception.
+    """
+    results: dict = {}
+    try:
+        import mlx.core as mx
+        results["metal"] = mx.metal.is_available()
+    except Exception:
+        results["metal"] = False
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        results["free_ram_mb"] = round(vm.available / 1024 / 1024, 1)
+        results["memory_pct"] = vm.percent
+    except Exception:
+        results["free_ram_mb"] = -1
+    try:
+        import duckdb
+        duckdb.connect()
+        results["duckdb"] = True
+    except Exception:
+        results["duckdb"] = False
+    logger.info(f"[PREFLIGHT] {results}")
+    return results
+
+
+# =============================================================================
 # Sprint 8AI: Status helper — O(1), side-effect free, diagnostic only
 # Sprint 8AM C.7: Extended with owned resource tracking
 # =============================================================================
@@ -2246,11 +2278,30 @@ async def _print_scorecard_report(
         "accepted_findings": accepted,
         "ioc_nodes": ioc_nodes,
         "synthesis_engine": "unknown",
+        # Sprint 8VD §F: Extended scorecard
+        "accepted_findings_count": accepted,
+        "synthesis_engine_used": "unknown",
+        "phase_duration_seconds": phase_timings,
+        "cb_open_domains": [],
     }
+
+    # Sprint 8VD §F: Compute peak RSS
+    import resource as _resource
+    rss_bytes = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+    # macOS: ru_maxrss is in bytes (not KB like on Linux)
+    peak_rss_mb = round(rss_bytes / 1024 / 1024, 1)
+    scorecard_data["peak_rss_mb"] = peak_rss_mb
+
+    # Sprint 8VB: Circuit breaker state for scorecard
+    try:
+        from transport.circuit_breaker import get_all_breaker_states
+        scorecard_data["cb_open_domains"] = get_all_breaker_states()
+    except Exception:
+        pass
 
     # Print structured report
     print("\n" + "=" * 60)
-    print("SPRINT 8TA SCORECARD")
+    print("SPRINT 8VD SCORECARD")
     print("=" * 60)
     print(f"  Sprint ID:       {sprint_id}")
     print(f"  Target:           {target[:60]}")
@@ -2260,6 +2311,7 @@ async def _print_scorecard_report(
     print(f"  IOC density:      {ioc_density:.3f}")
     print(f"  Semantic novelty: {semantic_novelty:.3f}")
     print(f"  Outlines used:    {outlines_used}")
+    print(f"  Peak RSS (MB):    {peak_rss_mb:.1f}")
     print(f"  Phase timings:    {phase_timings}")
     print("=" * 60 + "\n")
 
@@ -2370,6 +2422,8 @@ async def _run_sprint_mode(
         _mark_phase("BOOT")
 
         # ---- WARMUP (5s) ----
+        # Sprint 8VD §E: Run preflight checks
+        await _preflight_check()
         await asyncio.sleep(5.0)
         lifecycle.mark_warmup_done()
         _boot_record("sprint_mode", "WARMUP→ACTIVE")
@@ -2471,6 +2525,25 @@ async def _run_sprint_mode(
             f"domains={_open_cb[:5]}"
         )
 
+        # Sprint 8VE B.4: DuckPGQ IOC Graph stats
+        _top_iocs = []
+        if store_instance is not None:
+            try:
+                _top_iocs = await store_instance.get_top_findings(limit=10)
+            except Exception:
+                pass
+        if hasattr(scheduler, "_ioc_graph"):
+            gs = scheduler._ioc_graph.stats()
+            logger.info(
+                f"[GRAPH] nodes={gs['nodes']} edges={gs['edges']} "
+                f"pgq={gs['pgq_active']}"
+            )
+            if _top_iocs:
+                first_ioc = _top_iocs[0].get("ioc") if isinstance(_top_iocs[0], dict) else None
+                if first_ioc:
+                    connected = scheduler._ioc_graph.find_connected(first_ioc, max_hops=2)
+                    logger.info(f"[GRAPH] {first_ioc} → {len(connected)} connected nodes")
+
         # Sprint 8QC + 8TC: E2E synthesis — runs in WINDUP, report captured for EXPORT
         windup_report = None
         if store_instance is not None:
@@ -2482,6 +2555,14 @@ async def _run_sprint_mode(
                 )
             except Exception as e:
                 logger.warning("[SPRINT] Windup synthesis failed (non-fatal): %s", e)
+
+        # Sprint 8VF §C.3: ANE embedder status log at WINDUP
+        try:
+            from hledac.universal.brain.ane_embedder import get_ane_embedder
+            engine = "ANE-MiniLM" if get_ane_embedder() else "hash-fallback"
+            logger.info(f"[ANE] synthesis_engine={engine}")
+        except Exception:
+            pass
 
         # Drain existing tasks — don't start new ones
         while lifecycle.state == SprintLifecycleState.WINDUP:

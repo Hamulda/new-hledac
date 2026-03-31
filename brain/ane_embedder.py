@@ -117,3 +117,236 @@ class ANEEmbedder:
     def is_loaded(self) -> bool:
         """Vrátí True pokud je ANE model načten."""
         return self._loaded and self.model is not None
+
+
+# ============================================================================
+# Sprint 8VF: IOC Extraction — regex PRIMARY, spaCy SECONDARY
+# ============================================================================
+
+import re as _re
+
+# ── Regex patterns — PRIMARY for technical IOC ──────────────────────────
+# Order: specific patterns before general ones
+_IOC_PATTERNS: list[tuple[str, _re.Pattern]] = [
+    ("cve",    _re.compile(r'\bCVE-\d{4}-\d{4,7}\b')),
+    ("sha256", _re.compile(r'\b[0-9a-fA-F]{64}\b')),
+    ("md5",    _re.compile(r'\b[0-9a-fA-F]{32}\b')),
+    ("sha1",   _re.compile(r'\b[0-9a-fA-F]{40}\b')),
+    ("email",  _re.compile(
+        r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Z|a-z]{2,}\b'
+    )),
+    ("url",    _re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')),
+    ("ipv4",   _re.compile(
+        r'\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}'
+        r'(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b'
+    )),
+    ("ipv6",   _re.compile(r'\b[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){7}\b')),
+    ("domain", _re.compile(
+        r'\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+'
+        r'(?:com|net|org|io|ru|cn|de|onion|xyz|info|biz|cc|tv|gov|edu)\b'
+    )),
+]
+
+# Confidence calibrated on cyber-threat relevance
+_IOC_CONFIDENCE: dict[str, float] = {
+    "cve": 0.98, "sha256": 0.97, "sha1": 0.96, "md5": 0.95,
+    "email": 0.90, "url": 0.85, "ipv4": 0.85,
+    "ipv6": 0.80, "domain": 0.70,
+}
+
+# ── spaCy — SECONDARY, only attribution entities ─────────────────────────
+_SPACY_NLP = None
+
+
+def _get_spacy():
+    """Lazy spaCy loader."""
+    global _SPACY_NLP
+    if _SPACY_NLP is None:
+        try:
+            import spacy
+            _SPACY_NLP = spacy.load("en_core_web_sm")
+        except Exception:
+            pass
+    return _SPACY_NLP
+
+
+def extract_iocs_from_text(text: str) -> list[dict]:
+    """
+    Extract IOCs from arbitrary text.
+    Strategy: regex primary → spaCy secondary (attribution entities).
+    spaCy en_core_web_sm is NOT trained on cybersecurity IOC patterns
+    and is unsuitable for IP/hash/CVE extraction — hence secondary.
+    Returns: [{"value": str, "ioc_type": str, "confidence": float}]
+    Never raises.
+    """
+    if not text:
+        return []
+    results: list[dict] = []
+    seen:    set[str]   = set()
+
+    def _add(value: str, ioc_type: str, conf: float):
+        v = value.strip()
+        if v and v not in seen and len(v) > 3:
+            seen.add(v)
+            results.append({"value": v, "ioc_type": ioc_type,
+                             "confidence": conf})
+
+    # Primary: regex pass (cap at 10KB for RAM safety)
+    for ioc_type, pattern in _IOC_PATTERNS:
+        try:
+            for m in pattern.findall(text[:10_000]):
+                _add(m, ioc_type, _IOC_CONFIDENCE.get(ioc_type, 0.7))
+        except Exception:
+            pass
+
+    # Secondary: spaCy for attribution entities (ORG, PERSON, GPE)
+    # that regex cannot capture
+    nlp = _get_spacy()
+    if nlp is not None:
+        try:
+            doc = nlp(text[:5_000])
+            for ent in doc.ents:
+                if ent.label_ in ("ORG", "PERSON", "GPE", "PRODUCT"):
+                    _add(ent.text, ent.label_.lower(), 0.65)
+        except Exception:
+            pass
+
+    return results
+
+
+# ============================================================================
+# Sprint 8VF: ANE Semantic Dedup
+# ============================================================================
+
+_ANE_EMBEDDER: "ANEEmbedder | None" = None
+
+
+def get_ane_embedder() -> "ANEEmbedder | None":
+    """Lazy init CoreML MiniLM-L6-v2 embedder."""
+    global _ANE_EMBEDDER
+    if _ANE_EMBEDDER is None:
+        _ANE_EMBEDDER = ANEEmbedder(model_name="minilm_ane", hidden_dim=384)
+    return _ANE_EMBEDDER
+
+
+def unload_ane_embedder() -> None:
+    """Called by memory pressure governor at CRITICAL state."""
+    global _ANE_EMBEDDER
+    _ANE_EMBEDDER = None
+
+
+async def semantic_dedup_findings(
+    findings: list[dict],
+    threshold: float = 0.92,
+) -> list[dict]:
+    """
+    Semantic deduplication of findings.
+    ANE path: CoreML MiniLM batch inference → cosine similarity matrix.
+    Hash fallback: url+title hash (zero RAM, always works).
+    """
+    embedder = get_ane_embedder()
+
+    # Hash fallback when no ANE model
+    if embedder is None or not embedder.is_loaded:
+        seen: set[int] = set()
+        out:  list[dict] = []
+        for f in findings:
+            key = hash((f.get("url", ""), f.get("title", "")))
+            if key not in seen:
+                seen.add(key)
+                out.append(f)
+        return out
+
+    import numpy as np
+
+    def _embed_batch_sync(texts: list[str]) -> np.ndarray:
+        """CoreML batch inference — all texts at once."""
+        if embedder is None or embedder.model is None:
+            return np.zeros((len(texts), 384), dtype=np.float32)
+        vecs = []
+        for t in texts:
+            try:
+                # Adapt input/output keys to actual CoreML model
+                pred = embedder.model.predict({"input": t[:512]})
+                vec  = list(pred.values())[0].flatten()
+                vecs.append(vec)
+            except Exception:
+                vecs.append(np.zeros(384, dtype=np.float32))
+        return np.array(vecs, dtype=np.float32)
+
+    texts = [
+        f"{f.get('title', '')} {f.get('snippet', '')}".strip()[:512]
+        for f in findings
+    ]
+    loop = asyncio.get_running_loop()
+    try:
+        vecs  = await loop.run_in_executor(None, _embed_batch_sync, texts)
+        norms = np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9
+        vecs_n = vecs / norms
+        sim    = vecs_n @ vecs_n.T
+        keep   = [True] * len(findings)
+        for i in range(len(findings)):
+            if not keep[i]:
+                continue
+            for j in range(i + 1, len(findings)):
+                if sim[i, j] >= threshold:
+                    keep[j] = False
+        return [f for f, k in zip(findings, keep) if k]
+    except Exception:
+        return findings  # fallback on any error
+
+
+# ============================================================================
+# Sprint 8VF: Cosine Reranker for Synthesis
+# ============================================================================
+
+def rerank_findings_cosine(
+    findings: list[dict],
+    query: str,
+    top_k: int = 20,
+) -> list[dict]:
+    """
+    Cosine similarity reranker over ANE MiniLM embeddings.
+    RAM: ~22MB model (CoreML), <5ms inference, ANE accelerated.
+    Fallback: confidence sort.
+
+    Why NOT phi-3-mini as reranker:
+      - phi-3-mini is generative LLM (~2GB RAM)
+      - For scoring/reranking, correct approach is cross-encoder
+        or cosine similarity with embedding model
+      - On 8GB M1, phi-3-mini + sprint pipeline = memory pressure
+    """
+    try:
+        embedder = get_ane_embedder()
+        if embedder is None or not embedder.is_loaded or embedder.model is None:
+            raise RuntimeError("ANE unavailable")
+
+        import numpy as np
+
+        def _embed(text: str) -> np.ndarray:
+            pred = embedder.model.predict({"input": text[:512]})
+            return list(pred.values())[0].flatten()
+
+        q_vec = _embed(query[:512])
+        q_norm = np.linalg.norm(q_vec) + 1e-9
+        q_vec = q_vec / q_norm
+
+        scored = []
+        for f in findings[:200]:  # cap for RAM
+            text = f"{f.get('title', '')} {f.get('snippet', '')}".strip()
+            f_vec = _embed(text[:512])
+            f_norm = np.linalg.norm(f_vec) + 1e-9
+            f_vec = f_vec / f_norm
+            score = float(np.dot(q_vec, f_vec))
+            scored.append((score, f))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [f for _, f in scored[:top_k]]
+
+    except Exception:
+        # Fallback: sort by confidence
+        return sorted(
+            findings,
+            key=lambda x: x.get("confidence", 0.5),
+            reverse=True
+        )[:top_k]

@@ -17,3 +17,17 @@ rapidfuzz
 # or full version:
 #   pip install torch torchvision
 # torch>=2.1.0
+
+# Sprint 8VD: Arrow/Parquet columnar buffer + DuckDB vectorized queries + Polars streaming
+pyarrow>=16.0.0    # ARM64 wheel, pa.timestamp tz-aware
+duckdb>=1.2.0      # ARM64 native, singleton connection
+polars>=1.0.0      # collect(engine='streaming') API
+
+# Sprint 8VE: Rust HTML parser (ARM64 native, 10-50x faster than BS4) + xxhash
+selectolax>=0.3.21  # Rust HTML parser, ARM64 native, ProcessPool optional
+xxhash>=3.4.0       # pro ID generování (deterministické hashování)
+
+# Sprint 8VF: NER + ANE CoreML embedder
+spacy>=3.7.0        # SECONDARY attribution NER (en_core_web_sm ~8MB)
+coremltools>=8.0    # ANE CoreML MiniLM-L6-v2 (~22MB, <5ms/embed)
+# mlx>=0.16.0        # already in requirements (MLX LM inference)

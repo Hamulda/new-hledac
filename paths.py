@@ -18,6 +18,8 @@ __all__ = [
     "NYM_ROOT",
     "RUNS_ROOT",
     "SOCKETS_ROOT",
+    "SPRINT_STORE_ROOT",
+    "get_sprint_parquet_dir",
     "assert_ramdisk_alive",
     "cleanup_fallback_artifacts",
     "lmdb_map_size",
@@ -234,6 +236,18 @@ TOR_ROOT: Path = RAMDISK_ROOT / "tor"
 NYM_ROOT: Path = RAMDISK_ROOT / "nym"
 RUNS_ROOT: Path = RAMDISK_ROOT / "runs"
 SOCKETS_ROOT: Path = RAMDISK_ROOT / "sockets"
+
+# Sprint 8VD: Arrow/Parquet sprint store root
+SPRINT_STORE_ROOT: Path = Path(
+    os.environ.get("HLEDAC_SPRINT_STORE", "~/.hledac/sprints")
+).expanduser()
+
+
+def get_sprint_parquet_dir(sprint_id: str) -> Path:
+    """Return sprint Parquet directory, created if needed."""
+    p = SPRINT_STORE_ROOT / sprint_id
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 # ---------------------------------------------------------------------------

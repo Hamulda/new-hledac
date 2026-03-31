@@ -918,6 +918,94 @@ async def query_rdap(target: str) -> dict:
 # ---------------------------------------------------------------------------
 # Adapter registration (module-level, fail-soft)
 # ---------------------------------------------------------------------------
+# Sprint 8VF §A.4: Task handler registration via @register_task decorator
+# ---------------------------------------------------------------------------
+
+from hledac.universal.tool_registry import register_task
+
+
+@register_task("domain_to_pdns")
+async def _handle_domain_to_pdns(task, scheduler):
+    from hledac.universal.discovery.ti_feed_adapter import query_circl_pdns
+    for r in await query_circl_pdns(task.ioc_value):
+        await scheduler._buffer_ioc_pivot(
+            r.get("ioc_type", "domain"), r.get("ioc", ""), 0.75
+        )
+
+
+@register_task("domain_to_ct")
+async def _handle_domain_to_ct(task, scheduler):
+    from hledac.universal.discovery.ti_feed_adapter import search_crtsh
+    for r in await search_crtsh(task.ioc_value):
+        await scheduler._buffer_ioc_pivot("domain", r.get("ioc", ""), 0.70)
+
+
+@register_task("ct_live_monitor")
+async def _handle_ct_live_monitor(task, scheduler):
+    from hledac.universal.discovery.ti_feed_adapter import certstream_monitor
+    for r in await certstream_monitor(task.ioc_value, duration_s=120):
+        await scheduler._buffer_ioc_pivot("domain", r.get("ioc", ""), 0.65)
+
+
+@register_task("multi_engine_search")
+async def _handle_multi_engine_search(task, scheduler):
+    from hledac.universal.discovery.duckduckgo_adapter import search_multi_engine
+    for r in await search_multi_engine(task.ioc_value):
+        await scheduler._buffer_ioc_pivot("url", r.get("url", ""), 0.70)
+
+
+@register_task("github_dork")
+async def _handle_github_dork(task, scheduler):
+    from hledac.universal.discovery.ti_feed_adapter import github_dork
+    for r in await github_dork(task.ioc_value):
+        await scheduler._buffer_ioc_pivot("url", r.get("url", ""), 0.70)
+
+
+@register_task("shodan_enrich")
+async def _handle_shodan_enrich(task, scheduler):
+    from hledac.universal.discovery.ti_feed_adapter import enrich_ip_internetdb
+    r = await enrich_ip_internetdb(task.ioc_value)
+    if r:
+        await scheduler._buffer_ioc_pivot("ipv4", task.ioc_value, 0.80)
+
+
+@register_task("rdap_lookup")
+async def _handle_rdap_lookup(task, scheduler):
+    from hledac.universal.discovery.ti_feed_adapter import query_rdap
+    r = await query_rdap(task.ioc_value)
+    if r:
+        await scheduler._buffer_ioc_pivot("domain", task.ioc_value, 0.75)
+
+
+@register_task("ahmia_search")
+async def _handle_ahmia_search(task, scheduler):
+    from hledac.universal.discovery.ti_feed_adapter import search_ahmia
+    for r in await search_ahmia(task.ioc_value, use_onion=False):
+        await scheduler._buffer_ioc_pivot("url", r.get("url", ""), 0.65)
+
+
+@register_task("paste_keyword_search")
+async def _handle_paste_keyword_search(task, scheduler):
+    from hledac.universal.discovery.ti_feed_adapter import scrape_pastebin_for_keyword
+    for r in await scrape_pastebin_for_keyword(task.ioc_value):
+        await scheduler._buffer_ioc_pivot("url", r.get("url", ""), 0.60)
+
+
+@register_task("wayback_search")
+async def _handle_wayback_search(task, scheduler):
+    from hledac.universal.discovery.duckduckgo_adapter import _search_wayback_cdx
+    for r in await _search_wayback_cdx(task.ioc_value):
+        await scheduler._buffer_ioc_pivot("url", r.get("url", ""), 0.65)
+
+
+@register_task("commoncrawl_search")
+async def _handle_commoncrawl_search(task, scheduler):
+    from hledac.universal.discovery.duckduckgo_adapter import _search_commoncrawl_cdx
+    for r in await _search_commoncrawl_cdx(task.ioc_value):
+        await scheduler._buffer_ioc_pivot("url", r.get("url", ""), 0.65)
+
+
+# ---------------------------------------------------------------------------
 
 def _register_structured_adapters() -> None:
     """Register the structured TI adapters. Called once at module load."""

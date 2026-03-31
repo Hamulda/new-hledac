@@ -926,6 +926,146 @@ class QuantumInspiredPathFinder:
         }
 
 
+# =============================================================================
+# Sprint 8VE B.2: DuckPGQ IOC Graph — SQL/PGQ graph backend přes DuckDB
+# =============================================================================
+
+import hashlib as _hashlib
+
+_DUCKPGQ_AVAILABLE = False
+_duckpgq_checked   = False
+
+
+def _ensure_duckpgq(con) -> bool:
+    """
+    Jednorázová instalace duckpgq extension.
+    Správný název: 'duckpgq' (ne 'pgq' — to je jiná extension).
+    Volej lazy (jednou), ne při každém importu.
+    """
+    global _DUCKPGQ_AVAILABLE, _duckpgq_checked
+    if _duckpgq_checked:
+        return _DUCKPGQ_AVAILABLE
+    _duckpgq_checked = True
+    try:
+        con.execute("INSTALL duckpgq FROM community; LOAD duckpgq;")
+        _DUCKPGQ_AVAILABLE = True
+    except Exception as e:
+        logger.debug(f"[GRAPH] duckpgq unavailable, using CTE fallback: {e}")
+        _DUCKPGQ_AVAILABLE = False
+    return _DUCKPGQ_AVAILABLE
+
+
+def _stable_node_id(value: str) -> int:
+    """
+    Deterministický 63-bit node ID.
+    NEPOUŽÍVEJ hash() — není deterministický mezi procesy (PYTHONHASHSEED).
+    SHA1 prvních 8 bytů = 64bit, oríznutý na 63bit (positive BIGINT).
+    """
+    return int.from_bytes(
+        _hashlib.sha1(value.encode("utf-8")).digest()[:8], "little"
+    ) & 0x7FFFFFFFFFFFFFFF
+
+
+class DuckPGQGraph:
+    """
+    SQL/PGQ graph backend pres DuckDB.
+    SQL:2023 MATCH clause pro path queries.
+    Fallback: recursive CTE pokud duckpgq extension nedostupná.
+    Výhody: vectorized Arrow IPC, zero-copy, zvládne 10M+ hran.
+    """
+    def __init__(self, db_path: str = ":memory:"):
+        import duckdb
+        self.con = duckdb.connect(db_path)
+        _ensure_duckpgq(self.con)
+        self._init_schema()
+
+    def _init_schema(self):
+        self.con.execute("""
+            CREATE TABLE IF NOT EXISTS ioc_nodes (
+                id         BIGINT PRIMARY KEY,
+                value      VARCHAR NOT NULL UNIQUE,
+                ioc_type   VARCHAR,
+                confidence FLOAT,
+                source     VARCHAR,
+                first_seen TIMESTAMP DEFAULT now()
+            )
+        """)
+        self.con.execute("""
+            CREATE TABLE IF NOT EXISTS ioc_edges (
+                src_id   BIGINT REFERENCES ioc_nodes(id),
+                dst_id   BIGINT REFERENCES ioc_nodes(id),
+                rel_type VARCHAR,
+                weight   FLOAT DEFAULT 1.0,
+                evidence VARCHAR
+            )
+        """)
+
+    def add_ioc(self, value: str, ioc_type: str = "unknown",
+                confidence: float = 0.5, source: str = "") -> int:
+        row_id = _stable_node_id(value)
+        self.con.execute(
+            """INSERT INTO ioc_nodes (id, value, ioc_type, confidence, source)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT (id) DO NOTHING""",
+            [row_id, value, ioc_type, confidence, source]
+        )
+        return row_id
+
+    def add_relation(self, src: str, dst: str, rel_type: str,
+                     weight: float = 1.0, evidence: str = ""):
+        src_id = self.add_ioc(src)
+        dst_id = self.add_ioc(dst)
+        self.con.execute(
+            "INSERT INTO ioc_edges VALUES (?, ?, ?, ?, ?)",
+            [src_id, dst_id, rel_type, weight, evidence]
+        )
+
+    def find_connected(self, value: str, max_hops: int = 2) -> list[dict]:
+        """SQL/PGQ MATCH s recursive CTE fallback. max_hops je vzdy respektován."""
+        if _DUCKPGQ_AVAILABLE:
+            sql = f"""
+                FROM GRAPH_TABLE(ioc_graph
+                    MATCH (a:ioc_nodes)
+                          -[e:ioc_edges*1..{max_hops}]->
+                          (b:ioc_nodes)
+                    WHERE a.value = ?
+                    COLUMNS (b.value, b.ioc_type, b.confidence, b.source)
+                ) LIMIT 100
+            """
+            params = [value]
+        else:
+            # max_hops jako bound parameter — NEnatvrdo
+            sql = """
+                WITH RECURSIVE paths(dst_id, depth) AS (
+                    SELECT e.dst_id, 1
+                    FROM ioc_edges e
+                    JOIN ioc_nodes n ON n.id = e.src_id
+                    WHERE n.value = ?
+                    UNION ALL
+                    SELECT e.dst_id, p.depth + 1
+                    FROM ioc_edges e
+                    JOIN paths p ON p.dst_id = e.src_id
+                    WHERE p.depth < ?
+                )
+                SELECT n.value, n.ioc_type, n.confidence, n.source
+                FROM paths p
+                JOIN ioc_nodes n ON n.id = p.dst_id
+                LIMIT 100
+            """
+            params = [value, max_hops]
+        try:
+            return self.con.execute(sql, params).fetchdf().to_dict("records")
+        except Exception as e:
+            logger.warning(f"[GRAPH] find_connected failed: {e}")
+            return []
+
+    def stats(self) -> dict:
+        nodes = self.con.execute("SELECT COUNT(*) FROM ioc_nodes").fetchone()[0]
+        edges = self.con.execute("SELECT COUNT(*) FROM ioc_edges").fetchone()[0]
+        return {"nodes": nodes, "edges": edges,
+                "pgq_active": _DUCKPGQ_AVAILABLE}
+
+
 # Module availability flag
 QUANTUM_PATHFINDER_AVAILABLE = True
 

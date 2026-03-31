@@ -1110,6 +1110,50 @@ def create_default_registry() -> ToolRegistry:
 # Convenience Exports
 # ============================================================================
 
+# ============================================================================
+# Sprint 8VF: Task Handler Registry (lazy-load, circular-import safe)
+# ============================================================================
+
+_TASK_HANDLERS: dict[str, Callable] = {}
+_HANDLERS_LOADED: bool = False
+
+
+def register_task(task_type: str) -> Callable:
+    """Decorator for registering task handlers."""
+    def decorator(fn: Callable) -> Callable:
+        _TASK_HANDLERS[task_type] = fn
+        return fn
+    return decorator
+
+
+def get_task_handler(task_type: str) -> Callable | None:
+    """
+    Lazy-load handlers on first call.
+    Resolves circular import: ti_feed_adapter imports tool_registry,
+    which is imported from sprint_scheduler.
+    """
+    global _HANDLERS_LOADED
+    if not _HANDLERS_LOADED:
+        _HANDLERS_LOADED = True
+        try:
+            from hledac.universal.discovery import ti_feed_adapter  # noqa: F401
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                f"[REGISTRY] Handler load warning: {e}"
+            )
+    return _TASK_HANDLERS.get(task_type)
+
+
+def list_registered_tasks() -> list[str]:
+    """Return list of registered task type names."""
+    get_task_handler("__warmup__")  # trigger lazy load
+    return list(_TASK_HANDLERS.keys())
+
+
+# ============================================================================
+# Convenience Exports
+# ============================================================================
+
 __all__ = [
     # Core classes
     "ToolRegistry",
@@ -1132,4 +1176,8 @@ __all__ = [
     "PythonExecuteResult",
     # Factory
     "create_default_registry",
+    # Sprint 8VF
+    "register_task",
+    "get_task_handler",
+    "list_registered_tasks",
 ]
