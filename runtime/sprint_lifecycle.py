@@ -233,6 +233,101 @@ class SprintLifecycleManager:
             return True
         return False
 
+    # =============================================================================
+    # Sprint 8VX §C: COMPAT ALIASES — bridge to utils/sprint_lifecycle call-sites
+    # These forward to the canonical API. Labeled as COMPAT so they are clearly
+    # NOT co-equal public API — they exist to make __main__.py cutover safe.
+    # =============================================================================
+
+    # ── COMPAT: begin_sprint ─────────────────────────────────────────────────
+
+    def begin_sprint(self) -> None:
+        """
+        COMPAT ALIAS — forwards to start().
+
+        Canonical: use start() directly. This alias exists to support
+        __main__.py cutover without rewriting call-sites in this pass.
+        """
+        self.start()
+
+    # ── COMPAT: mark_warmup_done ────────────────────────────────────────────
+
+    def mark_warmup_done(self) -> None:
+        """
+        COMPAT ALIAS — transitions WARMUP→ACTIVE.
+
+        Canonical: the WARMUP→ACTIVE transition happens via start() + tick()
+        or directly via transition_to(ACTIVE). This alias exists for
+        __main__.py call-site compatibility.
+        """
+        self.transition_to(SprintPhase.ACTIVE)
+
+    # ── COMPAT: request_windup ──────────────────────────────────────────────
+
+    def request_windup(self) -> None:
+        """
+        COMPAT ALIAS — forwards to transition_to(WINDUP).
+
+        Canonical: use transition_to(SprintPhase.WINDUP).
+        """
+        self.transition_to(SprintPhase.WINDUP)
+
+    # ── COMPAT: request_export ───────────────────────────────────────────────
+
+    def request_export(self) -> None:
+        """
+        COMPAT ALIAS — forwards to mark_export_started().
+
+        Canonical: use mark_export_started() directly.
+        """
+        self.mark_export_started()
+
+    # ── COMPAT: request_teardown ─────────────────────────────────────────────
+
+    def request_teardown(self) -> None:
+        """
+        COMPAT ALIAS — forwards to mark_teardown_started().
+
+        Canonical: use mark_teardown_started() directly.
+        """
+        self.mark_teardown_started()
+
+    # ── COMPAT: is_windup_phase ─────────────────────────────────────────────
+
+    def is_windup_phase(self) -> bool:
+        """
+        COMPAT ALIAS — forwards to should_enter_windup().
+
+        Canonical: use should_enter_windup() directly.
+        """
+        return self.should_enter_windup()
+
+    # ── COMPAT: is_active property ───────────────────────────────────────────
+
+    @property
+    def is_active(self) -> bool:
+        """
+        COMPAT PROPERTY — True when in ACTIVE phase.
+
+        Canonical: use _current_phase == SprintPhase.ACTIVE.
+        """
+        return self._current_phase == SprintPhase.ACTIVE
+
+    # ── COMPAT: is_winding_down property ─────────────────────────────────────
+
+    @property
+    def is_winding_down(self) -> bool:
+        """
+        COMPAT PROPERTY — True when in WINDUP, EXPORT, or TEARDOWN.
+
+        Canonical: use _current_phase in (SprintPhase.WINDUP, SprintPhase.EXPORT, SprintPhase.TEARDOWN).
+        """
+        return self._current_phase in (
+            SprintPhase.WINDUP,
+            SprintPhase.EXPORT,
+            SprintPhase.TEARDOWN,
+        )
+
     # ── Private helpers ─────────────────────────────────────────────────────
 
     def _transition_to_unlocked(self, phase: SprintPhase, now: Optional[float] = None) -> None:

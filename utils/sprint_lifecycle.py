@@ -1,12 +1,23 @@
 """
-Sprint Lifecycle Manager — fail-open, no heavy imports on boot hot path.
+Sprint Lifecycle Manager — COMPAT SHIM ONLY.
 
-States: BOOT → WARMUP → ACTIVE → WINDUP → EXPORT → TEARDOWN
+================================================================
+DEPRECATED — DO NOT USE IN NEW CODE
+Canonical lifecycle authority: runtime/sprint_lifecycle.SprintLifecycleManager
+================================================================
 
-Each transition is idempotent. WINDUP triggers T-3min before sprint end.
-All methods are fail-open: if lifecycle is not active, no-op.
+This module is kept for backward compatibility with existing call-sites
+(__main__.py, synthesis_runner, htn_planner).
 
-Checkpoint seam is prepared but not wired ( Sprint 1B scope).
+New code must use: hledac.universal.runtime.sprint_lifecycle.SprintLifecycleManager
+
+This module contains:
+- 15% COMPAT ALIASES → runtime/sprint_lifecycle canonical methods
+- 85% ORCHESTRATION HELPERS → not lifecycle authority (hooks, signals, watchdog)
+
+Lifecycle authority: BOOT → WARMUP → ACTIVE → WINDUP → EXPORT → TEARDOWN
+Canonical: hledac.universal.runtime.sprint_lifecycle.SprintPhase enum
+Checkpoint seam: maybe_resume() free function (LMDB)
 """
 
 from __future__ import annotations
