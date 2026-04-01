@@ -525,7 +525,11 @@ class DuckDBShadowStore:
         # Sprint 8QA: Background task tracking for graph ingest
         self._bg_tasks: set[asyncio.Task] = set()
         # Sprint 8QA: Injectable IOCGraph instance
+        # NON-AUTHORITATIVE: store is NOT graph truth owner. The injected graph
+        # may be IOCGraph (Kuzu, truth) or DuckPGQGraph (donor/alternate).
+        # Capability must be checked, never assumed. Set by inject_graph().
         self._ioc_graph: Any = None
+        self._graph_attachment_kind: Optional[str] = None  # class name of attached backend
 
         # Sprint 8SB: Semantic store (FastEmbed + LanceDB)
         self._semantic_store: Optional[Any] = None
@@ -536,12 +540,55 @@ class DuckDBShadowStore:
 
     def inject_graph(self, graph: Any) -> None:
         """
-        Inject an IOCGraph instance for graph ingest on canonical findings.
+        Inject a graph instance for IOC ingest on canonical findings.
 
-        The graph is used to upsert IOCs extracted from findings and
-        record observations between co-occurring IOCs.
+        STORE IS NOT GRAPH TRUTH OWNER — the injected graph may be:
+          - IOCGraph (Kuzu): truth backend, full capability
+          - DuckPGQGraph (DuckDB): donor/alternate backend, limited capability
+
+        Capability requirements for buffered writes (ACTIVE phase):
+          - Requires: buffer_ioc(), buffer_observation(), flush_buffers()
+          - IOCGraph has these. DuckPGQGraph does NOT.
+
+        After inject, use get_graph_attachment_kind() to determine
+        which backend was attached and check capabilities explicitly.
         """
         self._ioc_graph = graph
+        self._graph_attachment_kind = graph.__class__.__name__ if graph is not None else None
+
+    def get_graph_attachment_kind(self) -> Optional[str]:
+        """
+        NON-AUTHORITATIVE DIAGNOSTIC: returns the class name of the attached graph.
+
+        Returns None if no graph attached.
+        Use this to determine which backend is attached, then call
+        hasattr/hasattr for specific capability checks before use.
+
+        This is a COMPAT SEAM, not a canonical graph API.
+        """
+        return self._graph_attachment_kind
+
+    def graph_supports_buffered_writes(self) -> bool:
+        """
+        NON-AUTHORITATIVE COMPAT CHECK: does attached graph support ACTIVE-phase
+        buffered writes?
+
+        Returns True only if attached graph has both:
+          - buffer_ioc()
+          - flush_buffers()
+
+        IOCGraph (Kuzu): True — has full buffered write capability.
+        DuckPGQGraph (DuckDB): False — has checkpoint() and add_ioc() only.
+
+        Always check this before triggering background graph ingest,
+        do not assume all injected graphs support buffered writes.
+        """
+        if self._ioc_graph is None:
+            return False
+        return (
+            callable(getattr(self._ioc_graph, "buffer_ioc", None))
+            and callable(getattr(self._ioc_graph, "flush_buffers", None))
+        )
 
     def inject_semantic_store(self, store: Any) -> None:
         """
@@ -2224,8 +2271,14 @@ class DuckDBShadowStore:
                 findings,
             )
             # results is list[dict] — normalize to list[ActivationResult]
-            # Sprint 8QA: trigger graph ingest in background (fire-and-forget via _bg_tasks)
-            if results and any(r.get("lmdb_success") for r in results):
+            # Sprint 8QA/8TF: trigger graph ingest in background (fire-and-forget via _bg_tasks)
+            # GUARD: check capability before triggering — DuckPGQGraph does not have
+            # buffer_ioc/flush_buffers. Silent no-op would hide a miswired attachment.
+            if (
+                results
+                and any(r.get("lmdb_success") for r in results)
+                and self.graph_supports_buffered_writes()
+            ):
                 self._graph_ingest_findings(findings)
 
             # Sprint 8SB: trigger semantic buffer in background
@@ -2670,12 +2723,19 @@ class DuckDBShadowStore:
             await asyncio.gather(*self._bg_tasks, return_exceptions=True)
             self._bg_tasks.clear()
 
-        # Sprint 8QA: close IOC graph
+        # Sprint 8QA/8TF: close IOC graph
+        # GUARD: flush_buffers is IOCGraph-only. DuckPGQGraph has no flush_buffers,
+        # and calling it would raise AttributeError. close() is universal but
+        # we guard flush_buffers to avoid noise in logs for donor backends.
         if self._ioc_graph is not None:
             try:
-                # Sprint 8SA: flush any remaining buffered IOCs before close
-                await self._ioc_graph.flush_buffers()
-                await self._ioc_graph.close()
+                if callable(getattr(self._ioc_graph, "flush_buffers", None)):
+                    await self._ioc_graph.flush_buffers()
+            except Exception:
+                pass
+            try:
+                if callable(getattr(self._ioc_graph, "close", None)):
+                    await self._ioc_graph.close()
             except Exception:
                 pass
 

@@ -112,7 +112,30 @@ class ModelManager:
         "gliner": ModelType.GLINER,
     }
 
-    # Fázové mapování pro workflow
+    # ========================================================================
+    # Sprint 8TF: Phase Drift Guard
+    # ========================================================================
+    # WORKFLOW-LEVEL phase → model mapping.
+    #
+    # AUTHORITY: This map is STRICTLY workflow-level — it is NOT the same
+    # as the coarse-grained phase system used by capabilities.ModelLifecycleManager
+    # (BRAIN/TOOLS/SYNTHESIS/CLEANUP). These two phase systems have DIFFERENT
+    # semantics and MUST NOT be conflated.
+    #
+    # Layer 1 — Workflow-level (this map):
+    #   PLAN/DECIDE/SYNTHESIZE → Hermes
+    #   EMBED/DEDUP/ROUTING → ModernBERT
+    #   NER/ENTITY → GLiNER
+    #
+    # Layer 2 — Coarse-grained (capabilities.ModelLifecycleManager):
+    #   BRAIN/TOOLS/SYNTHESIS/CLEANUP — entirely different strings
+    #
+    # Layer 3 — Windup-local (windup_engine.SynthesisRunner):
+    #   Own isolated model plane with Qwen/SmolLM
+    #
+    # Consumers reading phase facts should use brain.model_phase_facts
+    # to avoid implicit cross-layer confusion.
+    # ========================================================================
     PHASE_MODEL_MAP: Dict[str, ModelName] = {
         "PLAN": "hermes",
         "DECIDE": "hermes",

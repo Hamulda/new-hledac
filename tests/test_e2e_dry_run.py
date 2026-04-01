@@ -62,8 +62,9 @@ async def test_e2e_pipeline_completes():
     assert "peak_rss_mb" in scorecard
     assert "accepted_findings_count" in scorecard
 
-    # EXPORT
+    # EXPORT — Sprint 8VI: export_sprint(store, scorecard, sprint_id) signature
+    # top_graph_nodes already in scorecard from run_windup()
     with patch("runtime.windup_engine._safe_get_breaker_states", return_value={}):
-        export_result = await export_sprint(scheduler, scorecard, "test_sprint_001")
+        export_result = await export_sprint(None, scorecard, "test_sprint_001")
     assert "report_json" in export_result
     assert "seeds_json" in export_result

@@ -2118,102 +2118,56 @@ def _mark_phase(name: str) -> None:
     logger.info(f"[PHASE] {name}")
 
 
+def _compute_sprint_report_path(sprint_id: str) -> "Path":
+    """
+    Compute the sprint report output path.
+
+    Future owner: export/markdown_reporter.py
+    Removal condition: canonical markdown_reporter handles path computation
+                       for all report types; this function is deprecated.
+    """
+    from pathlib import Path as _Path
+
+    reports_dir = _Path.home() / ".hledac" / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    return reports_dir / f"{sprint_id}.md"
+
+
+def _render_sprint_report_markdown(
+    report: Any,
+    scorecard: dict,
+    sprint_id: str,
+) -> str:
+    """
+    Sprint 8VJ §B: Delegates to canonical sprint markdown reporter.
+
+    Pure rendering moved to export/sprint_markdown_reporter.py.
+    Path computation and file write stay in shell.
+    """
+    from hledac.universal.export.sprint_markdown_reporter import render_sprint_markdown as _render
+    return _render(report, scorecard, sprint_id)
+
+
 def _export_markdown_report(
     report: Any,
     scorecard: dict,
     sprint_id: str,
 ) -> Path:
     """
-    Sprint 8TC B.4: Generuje čitelný sprint report do ~/.hledac/reports/{sprint_id}.md
+    Sprint 8TC B.4 (refactored): Deleguje rendering na _render_sprint_report_markdown.
 
-    Volá se z EXPORT fáze ihned po upsert_scorecard().
+    Path computation je zachována v __main__.py — sémantika:
+      ~/.hledac/reports/{sprint_id}.md
+    Tato sémantika zůstává jako export/path debt na další fázi
+    (canonical markdown_reporter používá GHOST_EXPORT_DIR / RAMDISK_ROOT).
+
+    Future owner: export/markdown_reporter.py
+    Removal condition: sprint report format přesunut do canonical reporter
+                       a path cutover dokončen.
     """
-    import time as _time
-    from pathlib import Path as _Path
-
-    reports_dir = _Path.home() / ".hledac" / "reports"
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    path = reports_dir / f"{sprint_id}.md"
-
-    fpm = scorecard.get("findings_per_minute", 0.0)
-    ioc_d = scorecard.get("ioc_density", 0.0)
-    novel = scorecard.get("semantic_novelty", 1.0)
-    outl = scorecard.get("outlines_used", False)
-    src_y: dict[str, int] = {}
-    try:
-        import orjson
-        src_y = orjson.loads(scorecard.get("source_yield_json", "{}"))
-    except Exception:
-        pass
-    phase: dict[str, float] = {}
-    try:
-        import orjson
-        phase = orjson.loads(scorecard.get("phase_timings_json", "{}"))
-    except Exception:
-        pass
-
-    lines = [
-        f"# Ghost Prime — Sprint Report",
-        f"**Sprint ID:** `{sprint_id}`  ",
-        f"**Generated:** {_time.strftime('%Y-%m-%d %H:%M:%S UTC', _time.gmtime())}",
-        "",
-        "---",
-        "",
-        "## Executive Summary",
-        (report.summary if report and hasattr(report, "summary") else "_Synthesis failed or unavailable_"),
-        "",
-        "## Research Metrics",
-        "",
-        "| Metric | Value |",
-        "|:-------|------:|",
-        f"| Findings/min | {fpm:.2f} |",
-        f"| IOC density | {ioc_d:.3f} |",
-        f"| Semantic novelty | {novel:.1%} |",
-        f"| Synthesis engine | {'✅ Outlines constrained' if outl else '⚠️ Regex fallback'} |",
-        "",
-    ]
-
-    # Threat actors
-    lines += ["## Threat Actors", ""]
-    tas = (report.threat_actors if report and hasattr(report, "threat_actors") else []) or []
-    if tas:
-        for ta in tas:
-            lines.append(f"- `{ta}`")
-    else:
-        lines.append("_None identified in this sprint_")
-    lines.append("")
-
-    # Top findings
-    lines += ["## Top Findings", ""]
-    findings = (report.findings if report and hasattr(report, "findings") else []) or []
-    if findings:
-        for i, f in enumerate(findings[:10], 1):
-            lines.append(f"**{i}.** {f}")
-            lines.append("")
-    else:
-        lines.append("_No findings synthesized_")
-
-    # Source leaderboard
-    if src_y:
-        lines += ["## Source Leaderboard", "",
-                  "| Source | Findings |",
-                  "|:-------|--------:|"]
-        for src, cnt in sorted(src_y.items(), key=lambda x: x[1], reverse=True)[:10]:
-            lines.append(f"| `{src}` | {cnt} |")
-        lines.append("")
-
-    # Phase timings
-    if phase:
-        lines += ["## Phase Timings", "",
-                  "| Phase | Time (s) |",
-                  "|:------|--------:|"]
-        sorted_phases = sorted(phase.items(), key=lambda x: x[1])
-        t0 = sorted_phases[0][1] if sorted_phases else 0
-        for ph, ts_val in sorted_phases:
-            lines.append(f"| `{ph}` | {ts_val - t0:.1f}s |")
-        lines.append("")
-
-    path.write_text("\n".join(lines), encoding="utf-8")
+    path = _compute_sprint_report_path(sprint_id)
+    content = _render_sprint_report_markdown(report, scorecard, sprint_id)
+    path.write_text(content, encoding="utf-8")
     logger.info(f"[SPRINT] 📄 Markdown report: {path}")
     return path
 
@@ -2375,6 +2329,25 @@ async def _print_scorecard_report(
         except Exception:
             pass
 
+    # Sprint 8VI §A: Wire export_sprint() do EXPORT fáze
+    # Sprint 8VJ §C: Producer-side ExportHandoff construction
+    # COMPAT BRIDGE: top_graph_nodes v scorecard může chybět (windup_engine.run_windup()
+    # neproběhl v aktuální pathě). Fallback: store._ioc_graph.get_top_nodes_by_degree(n=5)
+    # Future owner: duckdb_store.get_top_seed_nodes() — čisté store API
+    # Removal condition: duckdb_store.get_top_nodes(n=5) pokrývá všechny export use cases
+    try:
+        from export.sprint_exporter import export_sprint as _export_sprint
+        from types import ExportHandoff
+        # Sprint 8VJ §C: Construct typed handoff at producer side
+        # scorecard["top_graph_nodes"] remains the compat seam (current canonical source)
+        handoff = ExportHandoff.from_windup(sprint_id, scorecard_data)
+        export_result = await _export_sprint(store, handoff)
+        logger.info("[SCORECARD] Sprint export: JSON=%s, seeds=%s",
+                     export_result.get("report_json", ""),
+                     export_result.get("seeds_json", ""))
+    except Exception as e:
+        logger.warning("[SCORECARD] export_sprint() failed (non-fatal): %s", e)
+
 
 async def _run_sprint_mode(
     target: str,
@@ -2403,7 +2376,7 @@ async def _run_sprint_mode(
         UMA_STATE_CRITICAL,
         UMA_STATE_EMERGENCY,
     )
-    from .utils.sprint_lifecycle import SprintLifecycleManager, SprintLifecycleState
+    from .runtime.sprint_lifecycle import SprintLifecycleManager, SprintPhase
 
     global _sprint_frontier_stopped
     _sprint_frontier_stopped = False
@@ -2413,7 +2386,7 @@ async def _run_sprint_mode(
         _install_signal_teardown(asyncio.get_running_loop())
 
     lifecycle = SprintLifecycleManager()
-    lifecycle._sprint_duration = duration_s
+    lifecycle.sprint_duration_s = duration_s
 
     # B.5: AsyncExitStack for LIFO teardown
     exit_stack: Optional[contextlib.AsyncExitStack] = None
@@ -2494,11 +2467,11 @@ async def _run_sprint_mode(
         from .patterns.pattern_matcher import configure_default_bootstrap_patterns_if_empty
         configure_default_bootstrap_patterns_if_empty()
 
-        while lifecycle.state == SprintLifecycleState.ACTIVE:
+        while lifecycle._current_phase == SprintPhase.ACTIVE:
             await asyncio.sleep(1.0)
 
             # Check windup condition (T-3min remaining)
-            if lifecycle.remaining_time <= 180.0:
+            if lifecycle.remaining_time() <= 180.0:
                 lifecycle.request_windup()
                 break
 
@@ -2543,8 +2516,12 @@ async def _run_sprint_mode(
                 _top_iocs = await store_instance.get_top_findings(limit=10)
             except Exception:
                 pass
-        if hasattr(scheduler, "_ioc_graph"):
-            gs = scheduler._ioc_graph.stats()
+        # COMPAT LAYER (8VI §A): scheduler reference resolved to store_instance
+        # FUTURE: when SprintScheduler becomes canonical, replace store_instance with scheduler
+        # REMOVAL CONDITION: delete when __main__.py wires SprintScheduler as primary state holder
+        _compat_scheduler = getattr(store_instance, "_ioc_graph", None) if store_instance else None
+        if _compat_scheduler is not None:
+            gs = _compat_scheduler.stats()
             logger.info(
                 f"[GRAPH] nodes={gs['nodes']} edges={gs['edges']} "
                 f"pgq={gs['pgq_active']}"
@@ -2552,7 +2529,7 @@ async def _run_sprint_mode(
             if _top_iocs:
                 first_ioc = _top_iocs[0].get("ioc") if isinstance(_top_iocs[0], dict) else None
                 if first_ioc:
-                    connected = scheduler._ioc_graph.find_connected(first_ioc, max_hops=2)
+                    connected = _compat_scheduler.find_connected(first_ioc, max_hops=2)
                     logger.info(f"[GRAPH] {first_ioc} → {len(connected)} connected nodes")
 
         # Sprint 8QC + 8TC: E2E synthesis — runs in WINDUP, report captured for EXPORT
@@ -2576,9 +2553,9 @@ async def _run_sprint_mode(
             pass
 
         # Drain existing tasks — don't start new ones
-        while lifecycle.state == SprintLifecycleState.WINDUP:
+        while lifecycle._current_phase == SprintPhase.WINDUP:
             await asyncio.sleep(1.0)
-            if lifecycle.remaining_time <= 60.0:
+            if lifecycle.remaining_time() <= 60.0:
                 lifecycle.request_export()
                 break
 

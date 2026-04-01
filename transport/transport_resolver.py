@@ -62,6 +62,21 @@ class TransportResolver:
     - context.requires_anonymity (derived from runtime signals)
     - context.risk_level
     - autodetection of Tor/Nym availability
+
+    AUTHORITY NOTE (audit/8SF):
+      This class is a POLICY CANDIDATE, not the current production authority.
+      Current production path: FetchCoordinator._fetch_url() routes .onion/.i2p
+      directly via _fetch_with_tor() / darknet_connector, and clearnet via
+      curl_cffi/StealthCrawler. This class's resolve() is DORMANT.
+
+      resolve_url() / is_tor_mandatory() are fast sync helpers used by
+      SourceTransportMap callers and are safe to call.
+
+      Migration precondition:
+        Wire resolve() into FetchCoordinator._fetch_url() ONLY after
+        1. TorTransport/Tor session lifecycle is managed by resolver (not per-request start/stop)
+        2. FetchCoordinator._get_tor_session() pool is replaced by resolver-backed session
+        3. NymTransport persistent session is established (currently start/stop per request)
     """
 
     def __init__(self):
@@ -139,6 +154,9 @@ class TransportResolver:
         Resolve appropriate transport based on context.
 
         Priority: Nym > Tor > Direct > InMemory
+
+        AUTHORITY NOTE: DORMANT — not wired into FetchCoordinator.
+        See class-level migration precondition.
         """
         self._check_transports()
 

@@ -422,6 +422,26 @@ class IOCGraph:
 
     # -------------------------------------------------------------------------
     # Batch Upsert (Sprint 8RA)
+    #
+    # CANONICAL SEMANTICS (Sprint 8TD):
+    #   upsert_ioc_batch(iocs) -> list of NEWLY CREATED node IDs only.
+    #   Running twice with same inputs: first call returns N created IDs,
+    #   second call returns [] (all nodes already exist).
+    #   Use graph_stats() if you need total node count.
+    #
+    #   flush_buffers() uses this to report 'ioc_flushed' = newly created count.
+    # -------------------------------------------------------------------------
+
+    # -------------------------------------------------------------------------
+    # Batch Upsert (Sprint 8RA)
+    #
+    # CANONICAL SEMANTICS (Sprint 8TD):
+    #   upsert_ioc_batch(iocs) -> list of NEWLY CREATED node IDs only.
+    #   Running twice with same inputs: first call returns N created IDs,
+    #   second call returns [] (all nodes already exist).
+    #   Use graph_stats() if you need total node count.
+    #
+    #   flush_buffers() uses this to report 'ioc_flushed' = newly created count.
     # -------------------------------------------------------------------------
 
     async def upsert_ioc_batch(
@@ -432,36 +452,40 @@ class IOCGraph:
         Batch upsert of IOC nodes.
 
         Args:
-            iocs: List of (ioc_type, value, confidence) tuples.
-
+            iocs: list of (ioc_type, value, confidence) tuples.
         Returns:
-            List of IOC ids (one per input tuple), in order.
-
-        Idempotent: running twice with same inputs yields same node count.
-        Single transaction context for all nodes in the batch.
+            List of node IDs newly created in this batch.
+            Duplicate calls with the same inputs return [] on subsequent calls.
         """
         if self._closed or self._conn is None or not iocs:
             return []
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            self._executor,
-            self._upsert_ioc_batch_sync,
-            iocs,
-        )
+        node_ids = [_make_ioc_id(t, v) for t, v, _ in iocs]
+        now = time.time()
+        try:
+            return await loop.run_in_executor(
+                self._executor,
+                self._upsert_ioc_batch_sync,
+                node_ids,
+                iocs,
+                now,
+            )
+        except Exception as e:
+            import logging
+            logging.warning(f"[IOCGraph] upsert_ioc_batch failed: {e}")
+            return []
 
     def _upsert_ioc_batch_sync(
         self,
+        node_ids: list[str],
         iocs: list[tuple[str, str, float]],
+        now: float,
     ) -> list[str]:
         """Synchronous batch upsert — runs on _executor thread."""
         conn = self._conn
         assert conn is not None
-        now = time.time()
-        ids: list[str] = []
-
-        for ioc_type, value, confidence in iocs:
-            node_id = _make_ioc_id(ioc_type, value)
-            ids.append(node_id)
+        created: list[str] = []
+        for node_id, (ioc_type, value, confidence) in zip(node_ids, iocs):
             res = conn.execute(
                 "MATCH (n:IOC) WHERE n.id = $id RETURN n.first_seen",
                 {"id": node_id},
@@ -472,12 +496,17 @@ class IOCGraph:
                     "first_seen: $ts, last_seen: $ts, confidence: $c})",
                     {"id": node_id, "t": ioc_type, "v": value, "ts": now, "c": confidence},
                 )
+                created.append(node_id)
             else:
                 conn.execute(
                     "MATCH (n:IOC) WHERE n.id = $id SET n.last_seen = $ts",
                     {"id": node_id, "ts": now},
                 )
-        return ids
+        return created
+
+    # -------------------------------------------------------------------------
+    # Batch Observation
+    # -------------------------------------------------------------------------
 
     async def record_observation_batch(
         self,
@@ -643,68 +672,6 @@ class IOCGraph:
             pass
 
         return {"nodes": nodes, "edges": edges}
-
-    # -------------------------------------------------------------------------
-    # Batch upsert
-    # -------------------------------------------------------------------------
-
-    async def upsert_ioc_batch(
-        self, iocs: list[tuple[str, str, float]]
-    ) -> list[str]:
-        """
-        Batch upsert of IOC nodes.
-
-        Args:
-            iocs: list of (ioc_type, value, confidence) tuples.
-        Returns:
-            List of node IDs created/updated.
-        """
-        if self._closed or self._conn is None or not iocs:
-            return []
-        loop = asyncio.get_running_loop()
-        node_ids = [_make_ioc_id(t, v) for t, v, _ in iocs]
-        now = time.time()
-        try:
-            return await loop.run_in_executor(
-                self._executor,
-                self._upsert_ioc_batch_sync,
-                node_ids,
-                iocs,
-                now,
-            )
-        except Exception as e:
-            import logging
-            logging.warning(f"[IOCGraph] upsert_ioc_batch failed: {e}")
-            return []
-
-    def _upsert_ioc_batch_sync(
-        self,
-        node_ids: list[str],
-        iocs: list[tuple[str, str, float]],
-        now: float,
-    ) -> list[str]:
-        """Synchronous batch upsert — runs on _executor thread."""
-        conn = self._conn
-        assert conn is not None
-        created: list[str] = []
-        for node_id, (ioc_type, value, confidence) in zip(node_ids, iocs):
-            res = conn.execute(
-                "MATCH (n:IOC) WHERE n.id = $id RETURN n.first_seen",
-                {"id": node_id},
-            )
-            if not res.has_next():
-                conn.execute(
-                    "CREATE (:IOC {id: $id, ioc_type: $t, value: $v, "
-                    "first_seen: $ts, last_seen: $ts, confidence: $c})",
-                    {"id": node_id, "t": ioc_type, "v": value, "ts": now, "c": confidence},
-                )
-                created.append(node_id)
-            else:
-                conn.execute(
-                    "MATCH (n:IOC) WHERE n.id = $id SET n.last_seen = $ts",
-                    {"id": node_id, "ts": now},
-                )
-        return created
 
     # -------------------------------------------------------------------------
     # STIX 2.1 Real Export

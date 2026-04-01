@@ -925,6 +925,16 @@ class FetchCoordinator(UniversalCoordinator):
         Uses Lightpanda for JS-heavy pages, falls back to curl_cffi.
         Supports session injection, paywall bypass, and credential rotation.
         Implements exponential backoff retry on failure.
+
+        AUTHORITY SEAM (audit/8SF):
+          This method is the CURRENT SOURCE-INGRESS OWNER.
+          It directly handles:
+            - .onion via _fetch_with_tor() / _darknet_connector.fetch_onion()
+            - .i2p via _darknet_connector.fetch_i2p()
+            - clearnet via curl_cffi/StealthCrawler
+            - JS-heavy via Lightpanda pool
+          TransportResolver.resolve() is DORMANT — not called here.
+          To wire it in future: replace the above with resolver.resolve(ctx).
         """
         # Sprint 82Q Phase 6: Offline mode fast-fail BEFORE any network operations
         from ..types import is_offline_mode, OfflineModeError

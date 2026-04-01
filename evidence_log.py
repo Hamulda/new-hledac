@@ -652,6 +652,7 @@ class EvidenceLog:
         payload: Dict[str, Any],
         source_ids: Optional[List[str]] = None,
         confidence: float = 1.0,
+        correlation: Optional[Dict[str, Optional[str]]] = None,
     ) -> EvidenceEvent:
         """
         Vytvoří a přidá novou událost.
@@ -661,6 +662,8 @@ class EvidenceLog:
             payload: Data události
             source_ids: ID zdrojových událostí
             confidence: Spolehlivost 0-1
+            correlation: Optional correlation dict with keys:
+                run_id, branch_id, provider_id, action_id
 
         Returns:
             Vytvořená EvidenceEvent
@@ -680,6 +683,10 @@ class EvidenceLog:
 
         # Vypočítej hash
         event.content_hash = event.calculate_hash()
+
+        # Přidej korelaci do payload (flattened, query-friendly)
+        if correlation:
+            event.payload["_correlation"] = correlation
 
         # Přidej do logu
         self.append(event)

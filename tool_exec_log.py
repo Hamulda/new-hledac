@@ -59,10 +59,11 @@ class ToolExecEvent:
     seq_no: int = 0
     prev_chain_hash: Optional[str] = None
     chain_hash: Optional[str] = None
+    correlation: Optional[Dict[str, Optional[str]]] = None  # run_id, branch_id, provider_id, action_id
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dict for JSONL"""
-        return {
+        result = {
             "event_id": self.event_id,
             "ts": self.ts.isoformat(),
             "tool_name": self.tool_name,
@@ -75,6 +76,9 @@ class ToolExecEvent:
             "prev_chain_hash": self.prev_chain_hash,
             "chain_hash": self.chain_hash,
         }
+        if self.correlation:
+            result["correlation"] = self.correlation
+        return result
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ToolExecEvent":
@@ -162,7 +166,8 @@ class ToolExecLog:
         input_data: bytes,
         output_data: bytes,
         status: str,
-        error: Optional[Exception] = None
+        error: Optional[Exception] = None,
+        correlation: Optional[Dict[str, Optional[str]]] = None,
     ) -> ToolExecEvent:
         """
         Log a tool execution event.
@@ -173,6 +178,8 @@ class ToolExecLog:
             output_data: Raw output bytes (will be hashed, not stored)
             status: "success" | "error" | "cancelled"
             error: Optional exception if status is "error"
+            correlation: Optional correlation dict with keys:
+                run_id, branch_id, provider_id, action_id
 
         Returns:
             The created ToolExecEvent
@@ -207,6 +214,7 @@ class ToolExecLog:
             seq_no=self._seq,
             prev_chain_hash=self._chain_head,
             chain_hash=chain_hash,
+            correlation=correlation,
         )
 
         # Update chain head

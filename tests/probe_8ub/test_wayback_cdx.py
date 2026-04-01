@@ -1,5 +1,5 @@
 """
-Sprint 8UB: WaybackCDXClient tests
+Sprint 8UB: WaybackCDX tests
 """
 from __future__ import annotations
 
@@ -7,18 +7,17 @@ import asyncio
 import json
 import time
 import xxhash
-from unittest.mock import MagicMock
 
 import pytest
 
 
-class TestWaybackCDXClient:
-    """Test WaybackCDXClient cache, throttle."""
+class TestWaybackCDX:
+    """Test WaybackCDX cache, throttle."""
 
     @pytest.fixture
     def client(self, tmp_path):
-        from hledac.universal.intelligence.archive_discovery import WaybackCDXClient
-        return WaybackCDXClient(cache_dir=tmp_path)
+        from hledac.universal.intelligence.archive_discovery import WaybackCDX
+        return WaybackCDX(cache_dir=tmp_path)
 
     def test_cache_hit(self, client, tmp_path):
         """Cache hit returns cached data without HTTP call."""
@@ -29,7 +28,7 @@ class TestWaybackCDXClient:
         cache_file.write_text(json.dumps([{"url": "http://x.com"}]))
 
         async def run():
-            return await client.get_snapshots(domain, MagicMock(), limit=10, from_year=from_year)
+            return await client.snapshots_one_shot(domain, limit=10, from_year=from_year)
 
         result = asyncio.run(run())
         assert result == [{"url": "http://x.com"}]

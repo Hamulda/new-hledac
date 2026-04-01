@@ -62,7 +62,22 @@ class ActionResult:
 class GhostExecutor:
     """
     Executor pro výzkumné akce.
-    
+
+    INTEGRATION NOTE (Sprint 8SD):
+    ════════════════════════════════════════════════════════
+    This class is a DONOR/COMPATIBILITY backend.
+
+    Canonical execution path: ToolRegistry (tool_registry.py)
+    This class exists for backward compatibility and gradual
+    migration. It is NOT the canonical authority for tool
+    execution decisions.
+
+    When integrating with CapabilityRouter:
+    - Use ToolRegistry as the primary execution surface
+    - GhostExecutor remains as a legacy implementation
+    - Do NOT reference GhostExecutor as "the executor" in docs
+    ════════════════════════════════════════════════════════
+
     Integruje:
     - GhostNetworkDriver pro web crawling
     - StealthManager pro stealth operace
@@ -325,10 +340,10 @@ class GhostExecutor:
         logger.info(f"Archive fallback: {url}")
         
         try:
-            from hledac.deep_research.advanced_archive_discovery import search_archives
-            
+            from hledac.universal.intelligence.archive_discovery import search_archives
+
             archive_result = await search_archives(url)
-            
+
             if archive_result and archive_result.snapshots:
                 latest = archive_result.snapshots[0]
                 

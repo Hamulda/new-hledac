@@ -269,7 +269,15 @@ class SprintLifecycleManager:
         COMPAT ALIAS — forwards to transition_to(WINDUP).
 
         Canonical: use transition_to(SprintPhase.WINDUP).
+        Idempotent: skips if already in WINDUP or beyond (matching utils behavior).
         """
+        # Idempotent: don't re-trigger if already winding down
+        if self._current_phase in (
+            SprintPhase.WINDUP,
+            SprintPhase.EXPORT,
+            SprintPhase.TEARDOWN,
+        ):
+            return
         self.transition_to(SprintPhase.WINDUP)
 
     # ── COMPAT: request_export ───────────────────────────────────────────────
@@ -279,7 +287,10 @@ class SprintLifecycleManager:
         COMPAT ALIAS — forwards to mark_export_started().
 
         Canonical: use mark_export_started() directly.
+        Idempotent: skips if already in EXPORT or TEARDOWN (matching utils behavior).
         """
+        if self._current_phase in (SprintPhase.EXPORT, SprintPhase.TEARDOWN):
+            return
         self.mark_export_started()
 
     # ── COMPAT: request_teardown ─────────────────────────────────────────────

@@ -80,6 +80,22 @@ def get_all_breaker_states() -> dict[str, str]:
 
 # =============================================================================
 # Sprint 8VE C.2: Transport fallback chain
+# AUTHORITY NOTE (audit/8SF):
+#   This module is a TEST-SEAM only. resilient_fetch() and get_transport_for_domain()
+#   are exercised by probe_8ve tests but are NOT called from production code.
+#
+#   Production path:
+#     FetchCoordinator._fetch_url() handles .onion/.i2p directly via
+#     _fetch_with_tor() / _fetch_with_lightpanda() / _fetch_with_curl().
+#
+#   Donor/Compat:
+#     circuit_breaker.py CircuitBreaker class IS used by other code (shared state).
+#     get_breaker() is the canonical domain circuit breaker accessor.
+#
+#   Migration precondition:
+#     Remove this module's fallback-chain functions only AFTER
+#     TransportResolver.resolve() is wired into FetchCoordinator._fetch_url()
+#     and probe_8ve tests are redirected to the wired path.
 # =============================================================================
 
 async def get_transport_for_domain(domain: str) -> str:

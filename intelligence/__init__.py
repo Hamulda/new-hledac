@@ -22,12 +22,14 @@ try:
         ArchiveTodayClient,
         IPFSClient,
         GitHubHistoricalClient,
-        WaybackCDXClient,
+        WaybackCDX,
+        WaybackCDXClient,  # DEPRECATED: alias pro WaybackCDX, odstranit po CE-001
         CDXSnapshot,
         DiscoveredEndpoint,
         search_archives,
         get_wayback_snapshots,
         discover_from_wayback,
+        wayback_cdx_lookup,  # COMPAT: search-shaped wrapper pro fetch_coordinator
         # From stealth_osint/archive_resurrector.py
         ArchiveResurrector,
         ContentSource,

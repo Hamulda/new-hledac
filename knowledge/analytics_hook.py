@@ -284,6 +284,9 @@ def shadow_record_finding(
     title: Optional[str] = None,
     source: Optional[str] = None,
     relevance_score: Optional[float] = None,
+    branch_id: Optional[str] = None,
+    provider_id: Optional[str] = None,
+    action_id: Optional[str] = None,
 ) -> None:
     """
     Non-blocking shadow record for a finding.
@@ -301,6 +304,9 @@ def shadow_record_finding(
         "source_type": source_type,
         "relevance_score": relevance_score or None,
         "confidence": confidence or 0.0,
+        "branch_id": branch_id or None,
+        "provider_id": provider_id or None,
+        "action_id": action_id or None,
     }
 
     Fail-open: never raises, never blocks the caller.
@@ -318,6 +324,9 @@ def shadow_record_finding(
         "source_type": source_type,
         "relevance_score": relevance_score,
         "confidence": confidence if confidence is not None else 0.0,
+        "branch_id": branch_id,
+        "provider_id": provider_id,
+        "action_id": action_id,
     }
 
     try:

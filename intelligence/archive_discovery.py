@@ -667,102 +667,13 @@ class ArchiveDiscovery:
             return results
 
 
-class WaybackCDXClient:
-    """Client for Wayback Machine CDX API."""
-    
-    def __init__(self):
-        self.session = None
-        self.base_url = "https://web.archive.org/cdx/search/cdx"
-    
-    async def __aenter__(self):
-        import aiohttp
-        self.session = aiohttp.ClientSession()
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
-            await self.session.close()
-    
-    async def query_snapshots(
-        self, 
-        url: str, 
-        limit: int = 100,
-        match_type: Optional[str] = None,
-        filters: Optional[List[str]] = None
-    ) -> List[CDXSnapshot]:
-        """Query Wayback Machine for URL snapshots."""
-        if not self.session:
-            raise RuntimeError("Client not initialized (use async with)")
-        
-        params = {
-            'url': url,
-            'output': 'json',
-            'limit': str(limit),
-            'fl': 'timestamp,original,statuscode,digest,length'
-        }
-        
-        if match_type:
-            params['matchType'] = match_type
-        
-        try:
-            async with self.session.get(self.base_url, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if len(data) > 1:
-                        headers = data[0]
-                        snapshots = []
-                        for row in data[1:]:
-                            snap_dict = dict(zip(headers, row))
-                            snapshots.append(CDXSnapshot(
-                                timestamp=snap_dict.get('timestamp', ''),
-                                original_url=snap_dict.get('original', ''),
-                                status_code=snap_dict.get('statuscode', ''),
-                                digest=snap_dict.get('digest', ''),
-                                length=snap_dict.get('length', '0')
-                            ))
-                        return snapshots
-                return []
-        except Exception as e:
-            logger.error(f"Wayback CDX query failed: {e}")
-            return []
-    
-    async def get_earliest_snapshot(self, url: str) -> Optional[CDXSnapshot]:
-        """Get the earliest available snapshot for a URL."""
-        snapshots = await self.query_snapshots(url, limit=1)
-        return snapshots[0] if snapshots else None
-    
-    async def get_latest_snapshot(self, url: str) -> Optional[CDXSnapshot]:
-        """Get the latest available snapshot for a URL."""
-        if not self.session:
-            raise RuntimeError("Client not initialized")
-        
-        params = {
-            'url': url,
-            'output': 'json',
-            'limit': '1',
-            'fl': 'timestamp,original,statuscode,digest,length',
-            'sort': 'reverse'
-        }
-        
-        try:
-            async with self.session.get(self.base_url, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if len(data) > 1:
-                        headers = data[0]
-                        row = data[1]
-                        snap_dict = dict(zip(headers, row))
-                        return CDXSnapshot(
-                            timestamp=snap_dict.get('timestamp', ''),
-                            original_url=snap_dict.get('original', ''),
-                            status_code=snap_dict.get('statuscode', ''),
-                            digest=snap_dict.get('digest', ''),
-                            length=snap_dict.get('length', '0')
-                        )
-                return None
-        except Exception as e:
-            logger.error(f"Wayback latest snapshot query failed: {e}")
-            return None
+# =============================================================================
+# WaybackCDX — Sprint 8UB: canonical low-level CDX request surface
+# AUTHORITY: WaybackCDX je jediný canonical low-level CDX interface.
+# Všechny ostatní Wayback CDX implementace jsou compat layery.
+# AUTHORITY NOTE: xxhash cache (24h TTL), rate limit 2s, M1-safe.
+# REMOVAL CONDITION: až všechny call-sites přejdou na WaybackCDX.get_snapshots()
+# =============================================================================
 
 
 # =============================================================================
@@ -1398,33 +1309,48 @@ async def discover_from_wayback(
     url: str,
     limit: int = 50
 ) -> List[DiscoveredEndpoint]:
-    """Discover historical endpoints from Wayback Machine."""
+    """Discover historical endpoints from Wayback Machine.
+    COMPAT: Tato funkce je archive-discovery wrapper kolem WaybackCDX.
+    AUTHORITY: WaybackCDX.get_snapshots() je nízkoúrovňový interface.
+    REMOVAL CONDITION: pokud by se měl tento wrapper odstranit,
+    všechny call-sites přejdou přímo na WaybackCDX."""
     endpoints = []
-    
-    async with WaybackCDXClient() as client:
-        snapshots = await client.query_snapshots(url, limit=limit)
-        
-        for snap in snapshots:
-            if snap.status_code == '200':
-                endpoint = DiscoveredEndpoint(
-                    url=snap.wayback_url,
-                    confidence_score=0.8,
-                    discovery_method="wayback",
-                    last_modified=snap.timestamp,
-                    size_bytes=int(snap.length) if snap.length.isdigit() else None,
-                    archive_source="wayback"
-                )
-                endpoints.append(endpoint)
-    
+
+    async with WaybackCDX(cache_dir="/tmp/wayback_cdx") as client:
+        snapshots = await client.get_snapshots(url, limit=limit)
+
+        for rec in snapshots:
+            ts = rec.get("timestamp", "")
+            original_url = rec.get("original", "")
+            endpoint = DiscoveredEndpoint(
+                url=f"https://web.archive.org/web/{ts}/{original_url}",
+                confidence_score=0.8,
+                discovery_method="wayback",
+                last_modified=ts,
+                archive_source="wayback"
+            )
+            endpoints.append(endpoint)
+
     return endpoints
 
 
 # =============================================================================
-# WaybackCDXClient — Sprint 8UB: Domain → Wayback snapshots
+# WaybackCDX — Sprint 8UB: canonical low-level CDX request surface
+# AUTHORITY: WaybackCDX je jediný canonical low-level CDX interface.
+# Všechny ostatní Wayback CDX wrappery jsou compat layers.
+# AUTHORITY NOTE: xxhash cache (24h TTL), rate limit 2s, M1-safe.
+# REMOVAL CONDITION: až všechny call-sites přejdou na WaybackCDX.get_snapshots()
+# =============================================================================
+# COMPAT ALIAS: WaybackCDXClient je deprecated alias — použij WaybackCDX
+# REMOVAL CONDITION: po přechodu všech call-sites na WaybackCDX
 # =============================================================================
 
-class WaybackCDXClient:
-    """Wayback Machine CDX API — historické snapshoty domén a URLů.
+import xxhash
+import orjson
+
+
+class WaybackCDX:
+    """Wayback Machine CDX API — low-level domain/URL snapshot discovery.
     ZADARMO, bez API klíče. Unikátní zdroj: smazaný obsah (C2 configs,
     leaked keys, expired phishing domains).
     M1: pure aiohttp async, orjson, xxhash cache 24h."""
@@ -1433,29 +1359,46 @@ class WaybackCDXClient:
     _RATE_S = 2.0
     _CACHE_TTL = 86400  # 24h — historická data se nemění
 
-    def __init__(self, cache_dir: str | Path) -> None:
-        self._cache_dir = Path(cache_dir)
+    def __init__(self, cache_dir: str | Path | None = None) -> None:
+        self._cache_dir = Path(cache_dir) if cache_dir else Path("/tmp/wayback_cache")
         self._last_req = 0.0
+        self._session: aiohttp.ClientSession | None = None
+
+    async def __aenter__(self) -> "WaybackCDX":
+        self._session = aiohttp.ClientSession()
+        return self
+
+    async def __aexit__(self, *_) -> None:
+        if self._session:
+            await self._session.close()
+            self._session = None
 
     async def get_snapshots(
         self,
-        domain: str,
-        session: aiohttp.ClientSession,
+        url_or_domain: str,
         limit: int = 50,
         from_year: int = 2019,
     ) -> list[dict]:
         """Vrátí [{url, timestamp, statuscode, mimetype}] — max `limit` snapshotů.
-        Filtruje na HTML stránky, vynechává redirecty."""
-        import xxhash, orjson
+        Akceptuje URL i domain (auto-detekce podle wildcard syntaxe).
+        Bez externí session — vytváří vlastní."""
+        if not self._session:
+            raise RuntimeError("WaybackCDX requires 'async with' context")
 
-        key = xxhash.xxh64(f"wb_{domain}_{from_year}".encode()).hexdigest()
+        # xxhash cache key
+        key = xxhash.xxh64(f"wb_{url_or_domain}_{from_year}".encode()).hexdigest()
         cp = self._cache_dir / f"{key}.json"
         if cp.exists() and (time.time() - cp.stat().st_mtime < self._CACHE_TTL):
             return orjson.loads(cp.read_bytes())
 
         await self._throttle()
+
+        # Auto-detekce domain vs URL
+        is_domain = "*." in url_or_domain or not url_or_domain.startswith("http")
+        url_param = url_or_domain if is_domain else f"*.{url_or_domain}"
+
         params = {
-            "url": f"*.{domain}",
+            "url": url_param,
             "output": "json",
             "limit": str(limit),
             "filter": "statuscode:200",
@@ -1464,17 +1407,17 @@ class WaybackCDXClient:
             "collapse": "urlkey",
         }
         try:
-            async with session.get(
+            async with self._session.get(
                 self._CDX_URL, params=params,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as r:
                 if r.status == 429:
-                    logger.warning(f"Wayback CDX rate limit: {domain}")
+                    logger.warning(f"Wayback CDX rate limit: {url_or_domain}")
                     return []
                 r.raise_for_status()
                 raw = await r.json(content_type=None)
         except Exception as e:
-            logger.warning(f"WaybackCDX {domain}: {e}")
+            logger.warning(f"WaybackCDX {url_or_domain}: {e}")
             return []
 
         if not raw or len(raw) < 2:
@@ -1494,13 +1437,15 @@ class WaybackCDXClient:
         self,
         url: str,
         timestamp: str,
-        session: aiohttp.ClientSession,
     ) -> str:
         """Stáhnout text konkrétního snapshotu pro PatternMatcher scan.
         URL format: https://web.archive.org/web/{timestamp}/{original_url}"""
+        if not self._session:
+            raise RuntimeError("WaybackCDX requires 'async with' context")
+
         wayback_url = f"https://web.archive.org/web/{timestamp}/{url}"
         try:
-            async with session.get(
+            async with self._session.get(
                 wayback_url,
                 timeout=aiohttp.ClientTimeout(total=20),
                 headers={"Accept": "text/html"},
@@ -1517,3 +1462,58 @@ class WaybackCDXClient:
         if elapsed < self._RATE_S:
             await asyncio.sleep(self._RATE_S - elapsed)
         self._last_req = time.time()
+
+    async def snapshots_one_shot(
+        self,
+        url_or_domain: str,
+        limit: int = 50,
+        from_year: int = 2019,
+    ) -> list[dict]:
+        """One-shot CDX lookup — vytvoří a zavře vlastní session.
+        USE CASE: compat layer, tests, ad-hoc volání bez externího session.
+        PRO: žádné unclosed session warnings.
+        """
+        async with self:
+            return await self.get_snapshots(url_or_domain, limit=limit, from_year=from_year)
+
+
+# COMPAT: Deprecated alias pro WaybackCDX — bude odstraněn po přechodu všech call-sites
+WaybackCDXClient = WaybackCDX
+
+
+# =============================================================================
+# COMPAT LAYER: wayback_cdx_lookup — search-shaped helper
+# AUTHORITY: Tato funkce je compat wrapper kolem WaybackCDX.
+# Používá se v fetch_coordinator.py pro GHOST_DEEP_RESEARCH feature.
+# REMOVAL CONDITION: Po CE-001 (Sprint 8AQ?) — forward fetch_coordinator
+#   na WaybackCDX.get_snapshots() přímo.
+# =============================================================================
+
+
+async def wayback_cdx_lookup(url_or_host: str, limit: int = 10, timeout_s: float = 8.0) -> list[dict]:
+    """Compat: Wayback CDX lookup pro deep_research_sources.py call-site.
+    AUTHORITY: Canonical implementation je WaybackCDX.get_snapshots().
+    Tato funkce je dočasný compat wrapper — neměň její return format,
+    dokud nebudou všechny call-sites přesměrovány.
+
+    Returns:
+        List of dicts s klíči: title, url, snippet, backend, rank, provider, source, timestamp
+    """
+    client = WaybackCDX(cache_dir="/tmp/wayback_cdx")
+    snapshots = await client.snapshots_one_shot(url_or_host, limit=limit)
+
+    out = []
+    for i, rec in enumerate(snapshots[:limit], 1):
+        ts = rec.get("timestamp", "")
+        original_url = rec.get("original", "")
+        out.append({
+            "title": f"Wayback capture {ts}",
+            "url": original_url,
+            "snippet": f"wayback status={rec.get('statuscode', '')} mimetype={rec.get('mimetype', '')}",
+            "backend": "wayback",
+            "rank": i,
+            "provider": "wayback_cdx",
+            "source": "wayback",
+            "timestamp": ts,
+        })
+    return out

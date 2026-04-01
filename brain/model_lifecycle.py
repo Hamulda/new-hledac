@@ -1,34 +1,60 @@
 """
-Model Lifecycle Management - Sprint 7C+8C
-========================================
+Model Lifecycle Management - Sprint 7C+8C+8ME+8TF
+================================================
 
-Kanonické místo pro model lifecycle operace.
-Zajišťuje konzistentní pořadí při unload modelů.
+Authority note (Sprint 8ME + 8TF):
+This module is MULTI-ROLE — do not treat it as a single owner.
 
-Pro Hermes-3: Canonical 7K unload order (SSOT — Hermes3Engine.unload()):
-    1. _shutdown_batch_worker(timeout=3.0)
-    2. _batch_queue = None + _batch_worker_task = None
-    3. _warmup_cache eviction
-    4. _save_cache()
-    5. _prompt_cache / _system_prompt_cache eviction
-    6. invalidate_prefix_cache()
-    7. _model = None + _tokenizer = None + _outlines_model = None
-    8. gc.collect()
-    9. mx.eval([]) + mx.metal.clear_cache()
+Roles:
+  1. Emergency seam: watchdog flag + safe callback pattern
+  2. MLX lazy init helper: delegates to mlx_cache.init_mlx_buffers()
+  3. Unload helper (7K SSOT): delegates to engine.unload(), fail-open
+  4. Lifecycle shadow-state: O(1) status tracking
+  5. Structured-generation sidecar: class ModelLifecycle (Qwen/SmolLM, windup-local)
 
-Pro ostatní modely bez unload() method: legacy direct eviction.
+IMPORTANT — Three Phase Layers (Sprint 8TF):
+  Layer 1 (Workflow-level):   ModelManager.PHASE_MODEL_MAP — PLAN/DECIDE/SYNTHESIZE/EMBED/...
+  Layer 2 (Coarse-grained):  ModelLifecycleManager — BRAIN/TOOLS/SYNTHESIS/CLEANUP
+  Layer 3 (Windup-local):    windup_engine.SynthesisRunner — Qwen/SmolLM isolation
 
-Features:
-- unload_model() helper s fail-open, deleguje na engine.unload() pokud existuje
-- is_safe_to_clear_emergency() — 7K safe-clear preconditions
-- Idempotentní operace
-- Bounded memory cleanup
+The structured-generation sidecar (class ModelLifecycle) is windup-local.
+It is NOT part of the runtime-wide model plane.
 
-Použití:
-    from hledac.universal.brain.model_lifecycle import unload_model
+Canonical runtime-wide owners:
+  - acquire/load: brain.model_manager.ModelManager
+  - unload/cleanup: ModelManager + engine.unload() (7K SSOT)
 
-    await unload_model(model=hermes_engine, tokenizer=tokenizer, prompt_cache=cache)
+Drift risk: This module must NOT conflate the three phase layers above.
+Consumers needing phase facts should use brain.model_phase_facts.
 """
+
+# Transitional Czech prose follows after blank line below.
+
+# Kanonické místo pro model lifecycle operace.
+# Zajišťuje konzistentní pořadí při unload modelů.
+#
+# Pro Hermes-3: Canonical 7K unload order (SSOT — Hermes3Engine.unload()):
+#   1. _shutdown_batch_worker(timeout=3.0)
+#   2. _batch_queue = None + _batch_worker_task = None
+#   3. _warmup_cache eviction
+#   4. _save_cache()
+#   5. _prompt_cache / _system_prompt_cache eviction
+#   6. invalidate_prefix_cache()
+#   7. _model = None + _tokenizer = None + _outlines_model = None
+#   8. gc.collect()
+#   9. mx.eval([]) + mx.metal.clear_cache()
+#
+# Pro ostatní modely bez unload() method: legacy direct eviction.
+#
+# Features:
+# - unload_model() helper s fail-open, deleguje na engine.unload() pokud existuje
+# - is_safe_to_clear_emergency() — 7K safe-clear preconditions
+# - Idempotentní operace
+# - Bounded memory cleanup
+#
+# Použití:
+#   from hledac.universal.brain.model_lifecycle import unload_model
+#   await unload_model(model=hermes_engine, tokenizer=tokenizer, prompt_cache=cache)
 
 from __future__ import annotations
 

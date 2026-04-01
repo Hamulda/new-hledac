@@ -14,27 +14,21 @@ async def test_sprint_mode_state_transitions():
     BOOT->WARMUP->ACTIVE->WINDUP->EXPORT->TEARDOWN without OOM or CancelledError leaks.
     """
     from hledac.universal.__main__ import _run_sprint_mode
-    from hledac.universal.utils.sprint_lifecycle import (
+    from hledac.universal.runtime.sprint_lifecycle import (
         SprintLifecycleManager,
-        SprintLifecycleState,
+        SprintPhase,
     )
     from hledac.universal.core.resource_governor import _reset_uma_hysteresis_for_testing
 
     _reset_uma_hysteresis_for_testing()
 
     # Create a fully initialized manager
-    SprintLifecycleManager._instance = None
     mgr = SprintLifecycleManager()
     # Re-configure for short sprint
-    mgr._sprint_duration = 10.0
-    mgr._windup_lead = 3.0
+    mgr.sprint_duration_s = 10.0
+    mgr.windup_lead_s = 3.0
 
-    # Now make __new__ return this same instance so _run_sprint_mode
-    # gets our pre-configured manager
-    original_new = SprintLifecycleManager.__new__
-
-    def patched_new(cls, *args, **kwargs):
-        # Always return our pre-configured mgr (same singleton pattern)
+    def patched_new(cls, *_args, **_kwargs):
         return mgr
 
     mock_store = MagicMock()
@@ -56,19 +50,19 @@ async def test_sprint_mode_state_transitions():
 
         # Wait for WARMUP (5s) + margin
         await asyncio.sleep(6.0)
-        found_active = (mgr.state == SprintLifecycleState.ACTIVE)
+        found_active = (mgr._current_phase == SprintPhase.ACTIVE)
 
-        assert found_active, f"Expected ACTIVE, got {mgr.state}"
+        assert found_active, f"Expected ACTIVE, got {mgr._current_phase}"
 
         # Wait for full teardown
         with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=15.0)
 
-        final = mgr.state
+        final = mgr._current_phase
         assert final in (
-            SprintLifecycleState.WINDUP,
-            SprintLifecycleState.EXPORT,
-            SprintLifecycleState.TEARDOWN,
+            SprintPhase.WINDUP,
+            SprintPhase.EXPORT,
+            SprintPhase.TEARDOWN,
         ), f"Expected WINDUP+, got {final}"
 
         print(f"[PASS] test_sprint_mode_state_transitions: final={final.value}")
@@ -77,17 +71,16 @@ async def test_sprint_mode_state_transitions():
 async def test_sprint_mode_no_unhandled_exception():
     """No unhandled exception during sprint teardown."""
     from hledac.universal.__main__ import _run_sprint_mode
-    from hledac.universal.utils.sprint_lifecycle import SprintLifecycleManager
+    from hledac.universal.runtime.sprint_lifecycle import SprintLifecycleManager
     from hledac.universal.core.resource_governor import _reset_uma_hysteresis_for_testing
 
     _reset_uma_hysteresis_for_testing()
 
-    SprintLifecycleManager._instance = None
     mgr = SprintLifecycleManager()
-    mgr._sprint_duration = 5.0
-    mgr._windup_lead = 1.0
+    mgr.sprint_duration_s = 5.0
+    mgr.windup_lead_s = 1.0
 
-    def patched_new(cls, *args, **kwargs):
+    def patched_new(cls, *_args, **_kwargs):
         return mgr
 
     mock_store = MagicMock()

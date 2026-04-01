@@ -813,7 +813,7 @@ class UniversalResearchCoordinator(UniversalCoordinator):
             Archive search results
         """
         try:
-            from hledac.deep_research.advanced_archive_discovery import (
+            from hledac.universal.intelligence.archive_discovery import (
                 ArchiveDiscovery, search_archives
             )
             

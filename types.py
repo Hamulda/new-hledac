@@ -18,7 +18,10 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .autonomous_analyzer import AutoResearchProfile
 
 import numpy as np
 
@@ -565,6 +568,91 @@ class ComplexityAnalysis:
     estimated_depth: int
     tot_recommended: bool
     indicators: Dict[str, float]
+
+
+# =============================================================================
+# ANALYZER RESULT (Sprint 8SD: CapabilityRouter Bridge)
+# =============================================================================
+
+@dataclass
+class AnalyzerResult:
+    """
+    Structured output from AutonomousAnalyzer.
+
+    Canonical form for the analyzer -> capability router -> tool registry pipeline.
+    Wraps AutoResearchProfile for typed capability routing.
+
+    NOTE: This is a bridge type. The underlying AutoResearchProfile remains
+    the source of truth for analyzer output until full migration.
+    """
+    # Tool routing
+    tools: Set[str] = field(default_factory=set)
+
+    # Source routing
+    sources: Set[str] = field(default_factory=set)
+
+    # Privacy configuration
+    privacy_level: str = "STANDARD"
+    use_tor: bool = False
+
+    # Model requirements (for ModelLifecycleManager)
+    models_needed: Set[str] = field(default_factory=set)
+
+    # Execution parameters
+    depth: str = "STANDARD"
+    max_time: float = 300.0
+
+    # ToT configuration
+    use_tot: bool = False
+    tot_mode: str = "standard"
+
+    # Reasoning trace
+    reasoning: str = ""
+
+    # Raw profile reference (for backward compatibility during transition)
+    _raw_profile: Optional[Any] = field(default=None, repr=False)
+
+    @classmethod
+    def from_profile(cls, profile: "AutoResearchProfile") -> "AnalyzerResult":
+        """
+        Create AnalyzerResult from AutoResearchProfile.
+
+        This is an adapter bridge - the AutoResearchProfile is preserved
+        in _raw_profile for backward compatibility.
+        """
+        return cls(
+            tools=profile.tools.copy(),
+            sources=profile.sources.copy(),
+            privacy_level=profile.privacy_level,
+            use_tor=profile.use_tor,
+            models_needed=profile.models_needed.copy(),
+            depth=profile.depth,
+            max_time=profile.max_time,
+            use_tot=profile.use_tot,
+            tot_mode=profile.tot_mode,
+            reasoning=profile.reasoning,
+            _raw_profile=profile,
+        )
+
+    def to_capability_signal(self) -> Dict[str, Any]:
+        """
+        Convert to capability signal for CapabilityRouter.
+
+        Returns a typed dict that CapabilityRouter.route() can process.
+        """
+        return {
+            "tools": self.tools,
+            "sources": self.sources,
+            "privacy_level": self.privacy_level,
+            "use_tor": self.use_tor,
+            "depth": self.depth,
+            "use_tot": self.use_tot,
+            "tot_mode": self.tot_mode,
+            "requires_embeddings": bool(self.models_needed & {"modernbert"}),
+            "requires_ner": bool(self.models_needed & {"gliner"}),
+            "requires_temporal": "temporal_analyzer" in self.tools,
+            "requires_crypto": "blockchain_analyzer" in self.tools,
+        }
 
 
 # =============================================================================
@@ -1175,3 +1263,344 @@ class SNNEncryptedContainer:
             timestamp=data["timestamp"],
             entropy_used=data.get("entropy_used", 0)
         )
+
+
+# =============================================================================
+# CORRELATION SCHEMA — Minimal cross-component identity for tracing
+# =============================================================================
+# Phase 1: Schema/contract only — no mandatory full backfill across codebase.
+# Canonical fields for correlating events across ledgers/gates/policies.
+# Future phases may extend with additional fields or promote to full dataclass.
+# =============================================================================
+
+@dataclass(frozen=True)
+class RunCorrelation:
+    """
+    Immutable correlation identity for a single research run.
+
+    Fields:
+        run_id:     Unique run identifier (used by EvidenceLog, ToolExecLog, MetricsRegistry)
+        branch_id:  Research branch/sub-session identifier (for parallel branches)
+        provider_id: LLM provider identifier (e.g. "mlx", "openai", "anthropic")
+        action_id:  Action/event identifier within the run
+
+    Usage:
+        Pass as context to ledger calls for cross-component correlation.
+        All fields are optional to allow gradual adoption — do not require all fields.
+    """
+    run_id: Optional[str] = None
+    branch_id: Optional[str] = None
+    provider_id: Optional[str] = None
+    action_id: Optional[str] = None
+
+    def with_provider(self, provider: str) -> "RunCorrelation":
+        """Return new instance with provider_id set."""
+        return RunCorrelation(
+            run_id=self.run_id,
+            branch_id=self.branch_id,
+            provider_id=provider,
+            action_id=self.action_id,
+        )
+
+    def with_action(self, action: str) -> "RunCorrelation":
+        """Return new instance with action_id set."""
+        return RunCorrelation(
+            run_id=self.run_id,
+            branch_id=self.branch_id,
+            provider_id=self.provider_id,
+            action_id=action,
+        )
+
+    def to_dict(self) -> Dict[str, Optional[str]]:
+        """Serialize to dict for ledger injection."""
+        return {
+            "run_id": self.run_id,
+            "branch_id": self.branch_id,
+            "provider_id": self.provider_id,
+            "action_id": self.action_id,
+        }
+
+
+# =============================================================================
+# PROVIDER CONTRACTS — Sprint 8WA: Canonical LLM Provider Surface
+# =============================================================================
+# Phase 1 scaffold. Minimal hot-path DTOs for LLM provider calls.
+# Future: may extend with streaming, tools, vision modes.
+# Removal condition: replaced by fully-typed provider SDK after cutover.
+# =============================================================================
+
+@dataclass(slots=True)
+class ProviderRequest:
+    """
+    Canonical input to LLM provider (mlx_lm, openai, anthropic, etc.).
+
+    Fields:
+        prompt:           Input prompt string
+        model:            Model identifier (e.g. "Hermes-3-Llama-3.2-3B-4bit")
+        temperature:      Sampling temperature (0.0-2.0)
+        max_tokens:       Maximum tokens to generate
+        correlation:      Run correlation context for tracing
+
+    NOTE: This is a PHASE 1 scaffold. Streaming, tools, vision not included.
+    Hot-path DTO — keep minimal, no rich context objects.
+    """
+    prompt: str
+    model: str
+    temperature: float = 0.3
+    max_tokens: int = 512
+    correlation: Optional[RunCorrelation] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "prompt": self.prompt,
+            "model": self.model,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "correlation": self.correlation.to_dict() if self.correlation else None,
+        }
+
+
+@dataclass(slots=True)
+class ProviderResult:
+    """
+    Canonical output from LLM provider.
+
+    Fields:
+        text:         Generated text response
+        model:        Model that generated the response
+        usage:        Token usage dict (prompt_tokens, completion_tokens, total)
+        latency_ms:   Generation latency in milliseconds
+        correlation:  Run correlation context (echoed from request)
+
+    Removal condition: replaced by fully-typed provider SDK response.
+    """
+    text: str
+    model: str
+    usage: Dict[str, int]
+    latency_ms: float
+    correlation: Optional[RunCorrelation] = None
+
+    @property
+    def prompt_tokens(self) -> int:
+        return self.usage.get("prompt_tokens", 0)
+
+    @property
+    def completion_tokens(self) -> int:
+        return self.usage.get("completion_tokens", 0)
+
+    @property
+    def total_tokens(self) -> int:
+        return self.usage.get("total_tokens", 0)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "text": self.text,
+            "model": self.model,
+            "usage": self.usage,
+            "latency_ms": self.latency_ms,
+            "correlation": self.correlation.to_dict() if self.correlation else None,
+        }
+
+
+# =============================================================================
+# ACTION CONTRACTS — Sprint 8WA: Canonical Action Execution Surface
+# =============================================================================
+# Phase 1 scaffold. ActionRequest/ActionResult for tool/action execution.
+# Future: may add ActionContext, ActionStatus, retry fields.
+# Removal condition: replaced by typed ActionProtocol after cutover.
+# =============================================================================
+
+@dataclass(slots=True)
+class ExecutionRequest:
+    """
+    Canonical request to execute an action/tool.
+
+    Fields:
+        action_type:   Action identifier (e.g. "web_search", "stealth_crawler")
+        parameters:    Action-specific parameters dict
+        priority:      Execution priority 1-10 (lower = higher priority)
+        correlation:   Run correlation for cross-component tracing
+
+    Future canonical consumer: ActionOrchestrator in runtime/sprint_scheduler.py
+    Removal condition: replaced by typed ActionProtocol.
+    """
+    action_type: str
+    parameters: Dict[str, Any]
+    priority: int = 5
+    correlation: Optional[RunCorrelation] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "action_type": self.action_type,
+            "parameters": self.parameters,
+            "priority": self.priority,
+            "correlation": self.correlation.to_dict() if self.correlation else None,
+        }
+
+
+@dataclass(slots=True)
+class ExecutionResult:
+    """
+    Canonical result from action execution.
+
+    Fields:
+        action_type:     Echo of requested action
+        success:         Whether action succeeded
+        data:            Action-specific result data
+        execution_time:  Execution duration in seconds
+        error:           Error message if failed
+        correlation:     Echoed from request
+
+    NOTE: Existing ActionResult (Ghost) at line ~531 is a DIFFERENT contract.
+    GhostActionResult lives in the Ghost layer. This is the generic action result.
+    They MAY be unified in a future phase but NOT during phase 1 scaffold.
+
+    Removal condition: replaced by typed ActionProtocol.
+    """
+    action_type: str
+    success: bool
+    data: Dict[str, Any]
+    execution_time: float
+    error: Optional[str] = None
+    correlation: Optional[RunCorrelation] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "action_type": self.action_type,
+            "success": self.success,
+            "data": self.data,
+            "execution_time": self.execution_time,
+            "error": self.error,
+            "correlation": self.correlation.to_dict() if self.correlation else None,
+        }
+
+
+# =============================================================================
+# BRANCH DECISION — Sprint 8WA: Canonical Branch Routing Surface
+# =============================================================================
+# Phase 1 scaffold. Decision about research flow branching.
+# Future: may add BranchContext, alternative branches, rollback support.
+# Removal condition: replaced by typed BranchProtocol.
+# =============================================================================
+
+@dataclass(slots=True)
+class BranchDecision:
+    """
+    Canonical decision about research branch routing.
+
+    Fields:
+        decision_id:    Unique decision identifier
+        branch_id:      Target branch identifier (chosen branch)
+        alternatives:   List of considered branch IDs
+        reasoning:      LLM reasoning for the decision
+        confidence:     Decision confidence 0.0-1.0
+        correlation:    Run correlation context
+
+    Future canonical consumer: SprintScheduler branch routing logic.
+    Removal condition: replaced by typed BranchProtocol.
+    """
+    decision_id: str
+    branch_id: str
+    alternatives: List[str]
+    reasoning: str
+    confidence: float
+    correlation: Optional[RunCorrelation] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "decision_id": self.decision_id,
+            "branch_id": self.branch_id,
+            "alternatives": self.alternatives,
+            "reasoning": self.reasoning,
+            "confidence": self.confidence,
+            "correlation": self.correlation.to_dict() if self.correlation else None,
+        }
+
+
+# =============================================================================
+# EXPORT HANDOFF — Sprint 8WA: Windup → Export Phase Contract
+# =============================================================================
+# Phase 1 scaffold. Data passed from windup_engine to sprint_exporter.
+# Wraps existing scorecard dict + scheduler reference.
+# Future: may add structured findings, graph snapshot, hypothesis list.
+# Removal condition: replaced by typed WindupResult after cutover.
+# =============================================================================
+
+@dataclass(slots=True)
+class ExportHandoff:
+    """
+    Canonical handoff from windup phase to export phase.
+
+    Fields:
+        sprint_id:         Sprint identifier
+        scorecard:         Scorecard dict (existing windup output)
+        ranked_parquet:    Path to ranked parquet file (or None)
+        synthesis_engine:  Synthesis engine used
+        gnn_predictions:   GNN prediction count
+        top_nodes:         Top IOC graph nodes
+        phase_durations:  Phase timing dict
+        correlation:       Run correlation context
+
+    NOTE: This is a COMPAT handoff — wraps existing dict-based scorecard.
+    The scorecard dict is the current canonical form; this scaffold provides
+    a typed wrapper that will become the canonical form post-cutover.
+
+    Future canonical consumer: sprint_exporter.export_sprint()
+    Removal condition: scorecard replaced by structured WindupResult.
+    """
+    sprint_id: str
+    scorecard: Dict[str, Any]
+    ranked_parquet: Optional[str] = None
+    synthesis_engine: str = "unknown"
+    gnn_predictions: int = 0
+    top_nodes: List[Any] = field(default_factory=list)
+    phase_durations: Dict[str, float] = field(default_factory=dict)
+    correlation: Optional[RunCorrelation] = None
+
+    @classmethod
+    def from_windup(
+        cls,
+        sprint_id: str,
+        scorecard: Dict[str, Any],
+        correlation: Optional[RunCorrelation] = None,
+    ) -> "ExportHandoff":
+        """Create ExportHandoff from windup phase output."""
+        return cls(
+            sprint_id=sprint_id,
+            scorecard=scorecard,
+            ranked_parquet=scorecard.get("ranked_parquet"),
+            synthesis_engine=scorecard.get("synthesis_engine_used", "unknown"),
+            gnn_predictions=scorecard.get("gnn_predicted_links", 0),
+            top_nodes=scorecard.get("top_graph_nodes", []),
+            phase_durations=scorecard.get("phase_duration_seconds", {}),
+            correlation=correlation,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "sprint_id": self.sprint_id,
+            "scorecard": self.scorecard,
+            "ranked_parquet": self.ranked_parquet,
+            "synthesis_engine": self.synthesis_engine,
+            "gnn_predictions": self.gnn_predictions,
+            "top_nodes": self.top_nodes,
+            "phase_durations": self.phase_durations,
+            "correlation": self.correlation.to_dict() if self.correlation else None,
+        }
+
+
+# =============================================================================
+# FUTURE: WINDUP HANDOFF & WARMUP HANDOFF (Phase 2+)
+# =============================================================================
+# Placeholder scaffolds for future phases. Not implemented in Phase 1.
+#
+# WindupHandoff: Active → Windup phase contract (scorecard source)
+#   - Future canonical consumer: windup_engine.run_windup()
+#   - Removal condition: replaced by typed WindupPhaseResult
+#
+# WarmupHandoff: Init → Active phase contract (sprint config source)
+#   - Future canonical consumer: warmup logic in SprintScheduler
+#   - Removal condition: replaced by typed WarmupResult
+#
+# These will be added in Sprint 8WB (Windup phase) and Sprint 8WC (Warmup phase).
+# =============================================================================

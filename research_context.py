@@ -2,9 +2,22 @@
 ResearchContext - Datový model pro autonomní výzkum
 ===================================================
 
-Tento modul definuje Pydantic model pro uchování kontextu během
-autonomního výzkumného procesu. Slouží jako hlavní datová struktura
-pro komunikaci mezi HermesCommander a jednotlivými agenty.
+ROLE: Canonical CONTEXT CARRIER — primary data structure for communication
+between HermesCommander and agents during autonomous research.
+
+This module defines:
+- ResearchContext: main context model (query, iteration, budgets, entities, hypotheses)
+- BudgetState: research budget tracking (iterations, time, tokens, api_calls)
+- Entity/Hypothesis/ErrorRecord: domain models
+
+AUTHORITY BOUNDARY:
+- ResearchContext carries state but does NOT sample, govern, or budget resources.
+- For UMA sampling use: utils/uma_budget.py (sampler)
+- For UMA governance use: core/resource_governor.py (governor)
+- For request budgeting use: resource_allocator.py (allocator)
+- For ledgers use: evidence_log.py, tool_exec_log.py, metrics_registry.py
+
+This module is the CORRECT context carrier for orchestrator <-> agent communication.
 """
 
 from __future__ import annotations

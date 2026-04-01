@@ -1,0 +1,413 @@
+# Graph Backend Reconciliation — Audit Report
+
+**Datum:** 2026-04-01
+**Scope:** `hledac/universal/`
+**Režim:** ČISTĚ AUDITNÍ — žádný refactor, cutover ani nová interface
+
+---
+
+## 1. Graph Split — pohled z ptačí perspektivy
+
+V codebase koexistují dva fyzicky oddělené graph backedny:
+
+| Jméno | Backend | Schema | Role |
+|---|---|---|---|
+| `IOCGraph` | Kuzu (file-based) | IOC nodes + OBSERVED edges | Truth store — všechny IOC upserty jdou sem |
+| `DuckPGQGraph` | DuckDB (SQL/PGQ) | ioc_nodes + ioc_edges | Analytics / donor backend — path queries, top-N, edge export |
+
+Oběma se přistupuje přes atribut pojmenovaný `_ioc_graph`, ale na **různých objektech**:
+
+```
+scheduler._ioc_graph          → DuckPGQGraph (runtime, WARMUP)
+duckdb_store._ioc_graph       → IOCGraph (Kuzu) nebo DuckPGQGraph (windup přepisuje)
+```
+
+Toto není multi-backend replicace — jde o dva různé systémy s různými schématy, různými capability a různými spotřebiteli.
+
+---
+
+## 2. Klíčová zjištění
+
+### 2.1 duckdb_store._ioc_graph — dvojí role
+
+`duckdb_store` (DuckDBShadowStore) má `inject_graph(graph)` určenou pro injektování **IOCGraph (Kuzu)**:
+
+```python
+# duckdb_store.py:537-544
+def inject_graph(self, graph: Any) -> None:
+    """Inject an IOCGraph instance for graph ingest on canonical findings."""
+    self._ioc_graph = graph   # ← comment říká IOCGraph (Kuzu)
+```
+
+Avšak **windup_engine** do ní cpěje **DuckPGQGraph**:
+
+```python
+# windup_engine.py:183
+ioc_graph=getattr(scheduler, "_ioc_graph", None),  # scheduler._ioc_graph = DuckPGQGraph
+```
+
+Výsledek: `duckdb_store._ioc_graph` po windupu drží **DuckPGQGraph**, ne IOCGraph.
+
+### 2.2 duckdb_store._ioc_graph.flush_buffers() — DEBT
+
+```python
+# duckdb_store.py:2674-2677
+if self._ioc_graph is not None:
+    if callable(getattr(self._ioc_graph, "flush_buffers", None)):
+        await self._ioc_graph.flush_buffers()
+```
+
+`DuckPGQGraph` **nemá** `flush_buffers()` — toto je metoda pouze IOCGraph. Tento kód je mrtvý kód pro DuckPGQGraph path.
+
+### 2.3 DuckPGQGraph nemá `export_stix_bundle`
+
+`synthesis_runner` volá:
+
+```python
+# synthesis_runner.py:986
+export_fn = getattr(self._ioc_graph, "export_stix_bundle", None)
+```
+
+DuckPGQGraph tuto metodu **nemá**. IOCGraph ji má. DuckPGQGraph je předáván do synthesis_runner přes `inject_graph(scheduler._ioc_graph)` ve windup_engine.
+
+### 2.4 duckdb_store._ioc_graph.get_top_graph_nodes() — CHYBÍ
+
+`sprint_exporter` spoléhá na existenci `duckdb_store.get_top_graph_nodes()` (viz COMPAT_DEBT_LEDGER.md), ale tato metoda na `DuckDBShadowStore` **neexistuje**. Export bere top_graph_nodes z scorecard, kam je ukládá windup_engine přímo z `scheduler._ioc_graph.get_top_nodes_by_degree(n=10)`.
+
+---
+
+## 3. Capability Matrix
+
+| Capability | IOCGraph (Kuzu) | DuckPGQGraph | Windup očekává | Export očekává | Scheduler očekává | Status |
+|---|---|---|---|---|---|---|
+| **upsert/write truth** | ✅ `upsert_ioc()`, `upsert_ioc_batch()` | ✅ `add_ioc()` | ✅ flush do DuckDB přes duckdb_store path | — | DuckPGQGraph `add_ioc()` | **SPLIT** — dva různé write API |
+| **buffered ACTIVE writes** | ✅ `buffer_ioc()`, `buffer_observation()`, `_BUFFER_FLUSH_SIZE=500` | ❌ žádný buffer | ✅ volá `flush_buffers()` | — | IOCGraph buffer přes `duckdb_store.inject_graph()` → DuckPGQGraph nemá | **DEBT** — DuckPGQGraph nemá flush_buffers |
+| **pivot/path queries** | ✅ `pivot()` — depth 1–2 | ✅ `find_connected()` — max_hops bound | — | — | `_pivot_ioc_graph` (IOCGraph) přes `inject_ioc_graph()` | IOCGraph pro pivot, DuckPGQGraph pro connected |
+| **top nodes** | ❌ chybí úplně | ✅ `get_top_nodes_by_degree(n)` | ✅ volá `get_top_nodes_by_degree(n=10)` | ✅ čte z scorecard | DuckPGQGraph → write do scorecard | DuckPGQGraph je jediný zdroj |
+| **graph stats** | ✅ `graph_stats()` → `{nodes, edges}` | ✅ `stats()` → `{nodes, edges, pgq_active}` | ✅ volá `stats()` | — | DuckPGQGraph | DuckPGQGraph je jediný zdroj |
+| **edge export** | ❌ chybí | ✅ `export_edge_list()` | ✅ volá `export_edge_list()` | — | DuckPGQGraph → feed do GNN | DuckPGQGraph je jediný zdroj |
+| **STIX export** | ✅ `export_stix_bundle()` | ❌ **chybí** | — | — | synthesis_runner používá `self._ioc_graph.export_stix_bundle` — dostává DuckPGQGraph → vrací None | **CRITICAL DEBT** |
+| **checkpoint/recovery** | ✅ `close()` (Kuzu implicitní) | ✅ `checkpoint()` | ✅ volá `checkpoint()` | — | DuckPGQGraph | DuckPGQGraph je jediný zdroj |
+| **GNN edge-list / analytics feed** | ❌ | ✅ `export_edge_list()` → GNN predictor | ✅ `export_edge_list()` | — | DuckPGQGraph → `gnn_predictor` přes synthesis_runner | DuckPGQGraph je jediný zdroj |
+
+---
+
+## 4. Vnitřní duplicity uvnitř IOCGraph
+
+### 4.1 `upsert_ioc_batch` — DUPLICITA (TŘI definice)
+
+V `knowledge/ioc_graph.py` existují **TŘI** definice `upsert_ioc_batch`:
+
+**Definice 1** — řádky 427–450:
+```python
+async def upsert_ioc_batch(self, iocs: list[tuple[str, str, float]]) -> list[str]:
+    if self._closed or self._conn is None or not iocs:
+        return []
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        self._executor,
+        self._upsert_ioc_batch_sync,
+        iocs,
+    )
+
+def _upsert_ioc_batch_sync(self, iocs: list[tuple[str, str, float]]) -> list[str]:
+    """Synchronous batch upsert — runs on _executor thread."""
+    conn = self._conn
+    assert conn is not None
+    now = time.time()
+    ids: list[str] = []
+    for ioc_type, value, confidence in iocs:
+        node_id = _make_ioc_id(ioc_type, value)
+        ids.append(node_id)
+        res = conn.execute(...)
+        # MATCH → CREATE / SET pattern
+```
+Vrací `list[str]` — všechny node_id (existující i nové).
+
+**Definice 2** — řádky 651–707:
+```python
+async def upsert_ioc_batch(
+    self, iocs: list[tuple[str, str, float]]
+) -> list[str]:
+    """Batch upsert of IOC nodes. ... Returns: List of node IDs created/updated."""
+    if self._closed or self._conn is None or not iocs:
+        return []
+    loop = asyncio.get_running_loop()
+    node_ids = [_make_ioc_id(t, v) for t, v, _ in iocs]
+    now = time.time()
+    try:
+        return await loop.run_in_executor(
+            self._executor,
+            self._upsert_ioc_batch_sync,  # ← jiné jméno sync helperu
+            node_ids,
+            iocs,
+            now,
+        )
+    except Exception as e:
+        logging.warning(f"[IOCGraph] upsert_ioc_batch failed: {e}")
+        return []
+
+def _upsert_ioc_batch_sync(
+    self,
+    node_ids: list[str],
+    iocs: list[tuple[str, str, float]],
+    now: float,
+) -> list[str]:
+    """Synchronous batch upsert — runs on _executor thread."""
+    conn = self._conn
+    assert conn is not None
+    created: list[str] = []
+    for node_id, (ioc_type, value, confidence) in zip(node_ids, iocs):
+        res = conn.execute(...)
+        if not res.has_next():
+            conn.execute("CREATE (:IOC {id: $id, ...})")
+            created.append(node_id)  # ← vrací jen CREATED, ne všechny
+        else:
+            conn.execute("MATCH ... SET n.last_seen = $ts")
+    return created  # ← vrací jen nově vytvořené!
+```
+Vrací `list[str]` — pouze **nově vytvořené** node_id.
+
+**Definice 3** — volání z `flush_buffers` — řádky 177–178:
+```python
+if ioc_copy:
+    ioc_ids = await self.upsert_ioc_batch(ioc_copy)  # ← volá Def 1 nebo Def 2? záleží na pořadí def
+```
+
+**PROBLÉM:** Definice 1 i Definice 2 jsou na stejné třídě. V Pythonu druhá definice přepíše první. `flush_buffers` volá `upsert_ioc_batch` — dostane verzi která vrací pouze `created` nodes, ne všechny. To je nekonzistentní s komentářem v `flush_buffers` ("Vrátí počet flushlých IOCs").
+
+**AUDIT NOTE:** Toto je confusion-ready duplicated method. Obě async verze mají stejný název a podobný docstring, ale různou return value semantics. První definice (řádky 427–450) je **mrtvá** — nikdy není volána, protože druhá ji přepíše.
+
+---
+
+## 5. Nové / změněné soubory
+
+| Soubor | Akce | Poznámka |
+|---|---|---|
+| `GRAPH_BACKEND_RECONCILIATION.md` | **NOVÝ** | Tento dokument |
+
+Žádné jiné soubory nebyly změněny (auditně-čistý režim).
+
+---
+
+## 6. Graph Truth Owner, Analytics Provider, Donor Backend
+
+| Role | Držitel | Backend |
+|---|---|---|
+| **Graph Truth Owner** | `IOCGraph` (Kuzu) | `knowledge/ioc_graph.py` — všechny IOC upserty v ACTIVE fázi jdou přes `buffer_ioc` / `flush_buffers` |
+| **Graph Analytics Provider** | `DuckPGQGraph` | `graph/quantum_pathfinder.py` — `stats()`, `get_top_nodes_by_degree()`, `export_edge_list()` |
+| **Donor / Alternate Backend** | `DuckPGQGraph` | Půjčuje své DuckDB-backed metody (`stats`, `top_nodes`, `edge_list`) scheduleru a windupu |
+
+`synthesis_runner._ioc_graph` po windupu drží DuckPGQGraph (přes `inject_graph(scheduler._ioc_graph)`), takže STIX export je **degradován** na no-op.
+
+---
+
+## 7. Migration Blockers
+
+1. **`duckdb_store.get_top_graph_nodes()` neexistuje** — COMPAT_DEBT_LEDGER.md řeší, ale zatím neimplementováno. Export bere top_nodes z scorecard, což je dočasné řešení.
+2. **`duckdb_store._ioc_graph.flush_buffers()` je mrtvý kód** pro DuckPGQGraph path — DuckPGQGraph nemá flush_buffers. Pokud by se duckdb_store přepnul zpět na IOCGraph (Kuzu), musel by se inject_graph zavolat správně a flush_buffers by fungovalo.
+3. **Dva různé write API** — `IOCGraph.upsert_ioc_batch()` vs `DuckPGQGraph.add_ioc()` — neexistuje žádná abstrakce. Každý consumer volá přímo.
+
+---
+
+## 8. Debt Sekce
+
+### CRITICAL
+
+**[DEBT-1] STIX export degradován**
+`synthesis_runner` očekává `ioc_graph.export_stix_bundle()`, ale po windupu dostává DuckPGQGraph, který tuto metodu **nemá**. STIX context je tedy vždy prázdný seznam.
+- Consumer: `synthesis_runner._build_stix_context()` (sprint_exporter → GNN context injection)
+- Implicitní očekávání: truth store garantuje STIX export
+- Skutečnost: truth store (IOCGraph) není nikdy předán do synthesis_runner pro STIX
+
+### HIGH
+
+**[DEBT-2] `upsert_ioc_batch` duplicitní definice — RESOLVED (Sprint 8TD)**
+- **Původní stav:** Dvě async definice na stejné třídě s různou return value semantics. Python druhou přepíše první.
+- **Akce:** Duplicitní definice (Def 1, ř. 427) odstraněna. Kanonická definice (Def 2, nyní jediná) formalizována s explicitní semantics block v docstringu.
+- **Kanonická semantika (Sprint 8TD):** `upsert_ioc_batch(iocs)` vrací `list[str]` **pouze nově vytvořených** node IDs. Druhé volání se stejnými IOCs vrací `[]`. Idempotence garantována.
+- **Uzamčení:** `tests/probe_8td/test_upsert_canonical_semantics.py` — 3 testy lockují CREATED-only semantics.
+- **flush_buffers kontrakt:** `ioc_flushed` = počet newly created nodes (ne total buffered).
+- **Ověření:** `grep -n "async def upsert_ioc_batch" knowledge/ioc_graph.py` → 1 výsledek
+
+**[DEBT-3] `duckdb_store._ioc_graph` schizofrenie**
+`inject_graph` injectuje IOCGraph (Kuzu) podle docstringu, ale windup_engine do nícpěí DuckPGQGraph. Výsledek závisí na pořadí volání.
+- Consumer: `duckdb_store.flush_buffers()` — očekává `flush_buffers()` metodu, kterou DuckPGQGraph nemá
+
+### MEDIUM
+
+**[DEBT-4] `duckdb_store.get_top_graph_nodes()` chybí**
+Export očekává store API, ale metoda není implementovaná. Windup obchází přes scorecard.
+- COMPAT_DEBT_LEDGER.md již dokumentuje
+
+**[DEBT-5] duckdb_store._ioc_graph.flush_buffers mrtvý kód**
+`duckdb_store.py:2677` — pro DuckPGQGraph path je `flush_buffers` callable check false, takže await se nikdy neprovede. Pro IOCGraph path by to fungovalo, ale IOCGraph se do `duckdb_store._ioc_graph` už nedostává správně.
+
+---
+
+## 9. Co se NESMÍ refaktorovat před scheduler cutoverem
+
+1. **NEMĚNIT** `scheduler._ioc_graph` setter logic — windup_engine, sprint_lifecycle a sprint_scheduler spoléhají na to, že `scheduler._ioc_graph` je DuckPGQGraph
+2. **NEMĚNIT** pořadí `inject_graph` vs `runner.inject_graph` — windup_engine závisí na konkrétním pořadí
+3. **NEMĚNIT** capability `DuckPGQGraph.stats()` / `DuckPGQGraph.get_top_nodes_by_degree()` / `DuckPGQGraph.export_edge_list()` — windup_engine a scorecard je přímo konzumují
+4. **NEMĚNIT** `IOCGraph.export_stix_bundle()` — synthesis_runner používá `getattr(..., "export_stix_bundle", None)` fallback, takže chybějící metoda je dnes bezpečná, ale CUTOVER by to mohl změnit
+5. **NEROZPOJOVAT** `duckdb_store._ioc_graph` path — dokud `duckdb_store.flush_buffers()` závisí na `flush_buffers()` metodě, nemůže `duckdb_store._ioc_graph` být bezpečně DuckPGQGraph (kromě toho, že dnes je)
+6. **NEODSTRAŇOVAT** `duckdb_store.get_top_graph_nodes()` absenci — dokud export bere z scorecard, není to akutní, ale cutover scheduleru by to měl řešit
+
+---
+
+## 10. Shrnutí — kdo je kdo
+
+| Otázka | Odpověď |
+|---|---|
+| **Graph Truth Owner dnes** | `IOCGraph` (Kuzu) — `knowledge/ioc_graph.py` — všechny IOC upserty v ACTIVE |
+| **Analytics/Export Provider** | `DuckPGQGraph` — `graph/quantum_pathfinder.py` — `stats()`, `get_top_nodes_by_degree()`, `export_edge_list()` |
+| **Donor/Alternate Backend** | `DuckPGQGraph` — půjčuje SQL/PGQ-backed analytics metodu scheduleru a windupu |
+| **Kdo produkuje STIX** | `IOCGraph.export_stix_bundle()` — ale synthesis_runner dostává DuckPGQGraph → **degradováno na no-op** |
+| **Kdo produkuje top_graph_nodes pro scorecard** | `DuckPGQGraph.get_top_nodes_by_degree(n=10)` v windup_engine |
+| **Co se NESMÍ refaktorovat** | Viz sekce 9 — scheduler cutover je limitovaný existujícími implicitními contracty mezi duckdb_store, windup_engine a synthesis_runner |
+
+---
+
+## 11. Sprint 8TH — STIX Structured Degradation (2026-04-01)
+
+### Co bylo silent mismatch
+
+`_build_stix_context()` v `synthesis_runner.py` vracel `""` (prázdný string) ve třech případech degradace:
+
+1. `_ioc_graph is None`
+2. `getattr(ioc_graph, "export_stix_bundle", None)` vrátí `None` (DuckPGQGraph nemá tuto metodu)
+3. Výjimka při volání
+
+Ve všech třech případech volající dostal prázdný string bez jakéhokoliv vysvětlení. To je **tichá degradace** — caller neví proč STIX context chybí.
+
+### Co je teď explicitně guardované
+
+`_build_stix_context()` je nyní `async` (protože `IOCGraph.export_stix_bundle()` je async) a nastavuje tři instance atributy **před** returnem v každé větví:
+
+| Atribut | Možné hodnoty | Kdy se nastavuje |
+|---|---|---|
+| `_stix_status` | `"available"` \| `"unavailable"` \| `"error"` | Vždy, v každé větvi |
+| `_stix_reason` | Textový důvod | Vždy, v každé větvi |
+| `_stix_backend` | Název třídy backendu | Když je `_ioc_graph` nenulový |
+
+Příklad pro DuckPGQGraph:
+```
+_stix_status = "unavailable"
+_stix_reason = "backend 'DuckPGQGraph' lacks export_stix_bundle — DuckPGQGraph donor cannot serve STIX"
+_stix_backend = "DuckPGQGraph"
+```
+
+### Změněné soubory
+
+| Soubor | Změna |
+|---|---|
+| `brain/synthesis_runner.py` | `_build_stix_context` → `async`, přidány `_stix_status/reason/backend` do `__slots__` a `__init__` |
+| `tests/probe_8th/test_stix_degradation_not_silent.py` | **NOVÝ** — 4 probe testy uzamykající invarianty |
+
+### Testy uzamykající invarianty
+
+```
+tests/probe_8th/test_stix_degradation_not_silent.py
+  test_duckpgq_graph_lacks_export_stix_bundle     → DuckPGQGraph → status="unavailable", reason names backend ✓
+  test_ioc_graph_has_export_stix_bundle           → IOCGraph s IOCs → status="available" ✓
+  test_none_graph_sets_unavailable                 → None graph → status="unavailable" s důvodem ✓
+  test_ioc_graph_no_nodes_available_empty         → IOCGraph prázdný → status="available", reason obsahuje "empty" ✓
+```
+
+### Co bylo schválně NEděláno
+
+1. **Nevytvořen nový DTO/framework** — použity existující instance atributy (`_stix_status/reason/backend`)
+2. **Nepřidána nová graph abstrakce** — žádný GraphProtocol, router ani adapter
+3. **Nezměněn IOCGraph ani DuckPGQGraph** — jen consumer-side `_build_stix_context`
+4. **Není to log-only** — structured state na instanci je hmatatelný a auditovatelný
+5. **Není to "one backend to rule them all"**
+
+### Truth vs Donor capability — uzamčeno
+
+| Capability | Truth Owner | Donor Backend | Status |
+|---|---|---|---|
+| `export_stix_bundle` | IOCGraph (Kuzu) ✅ | DuckPGQGraph ❌ | **UZNAMČENO** — DuckPGQGraph negarantuje STIX; tichá degradace odstraněna |
+| `get_top_nodes_by_degree` | DuckPGQGraph ✅ | — | DuckPGQGraph je jediný zdroj, žádná tichá degradace |
+| `export_edge_list` | DuckPGQGraph ✅ | — | DuckPGQGraph je jediný zdroj, žádná tichá degradace |
+| `stats()` | DuckPGQGraph ✅ | — | DuckPGQGraph je jediný zdroj, žádná tichá degradace |
+
+### Debt sekce — aktualizace
+
+**[DEBT-1] STIX export degradován → RESOLVED (Sprint 8TH)**
+- Původní stav: `_build_stix_context()` vrací `""` bez explanation pro DuckPGQGraph path
+- Akce: `_build_stix_context` → `async`, přidány `_stix_status/reason/backend` instance atributy
+- Kanonická semantika: žádné tiché `""` — vždy existuje structured state v atributech instance
+- Uzamčení: `tests/probe_8th/test_stix_degradation_not_silent.py` — 4 testy
+- **Poznámka:** `_stix_status` je "unavailable" pro DuckPGQGraph — toto JE očekávané chování, ne bug. DuckPGQGraph donor nemá STIX capability. Truth store (IOCGraph) je třeba injectovat správně v production path.
+
+---
+
+## 12. Sprint 8TF — DuckDB Store Graph Attachment Audit (2026-04-01)
+
+### Co bylo silent mismatch
+
+`duckdb_store._ioc_graph` byl přijímán jako "graph backend" bez jakýchkoliv guardů.
+Dva problémy:
+
+1. **`async_ingest_findings_batch`** — automaticky volal `_graph_ingest_findings` bez capability check.
+   Pro DuckPGQGraph (který nemá `buffer_ioc`/`flush_buffers`) to bylo tiché no-op.
+2. **`aclose()` teardown** — volal `flush_buffers()` na `DuckPGQGraph` → `AttributeError` schovaný
+   v `except Exception: pass`. Nevěděli jsme, že flush vůbec neproběhl.
+
+### Co je teď explicitně guardované
+
+| Scénář | Guard |
+|---|---|
+| Background ingest trigger | `graph_supports_buffered_writes()` — AND logika, DuckPGQGraph → False → nikdy nezavolá `_graph_ingest_findings` |
+| `aclose()` flush_buffers | `callable(getattr(g, "flush_buffers", None))` — DuckPGQGraph nemá → nezavolá se |
+| `aclose()` close | `callable(getattr(g, "close", None))` — oba backendy mají → zavolá se |
+
+### Přidané helpers (NON-AUTHORITATIVE, DIAGNOSTIC ONLY)
+
+- `inject_graph()` — nyní nastavuje `_graph_attachment_kind` (class name), docstring obsahuje `STORE IS NOT GRAPH TRUTH OWNER`
+- `get_graph_attachment_kind()` — vrací class name attached backendu nebo None
+- `graph_supports_buffered_writes()` — True pouze když `buffer_ioc` AND `flush_buffers` jsou přítomny
+
+### Změněné soubory
+
+| Soubor | Změna |
+|---|---|
+| `knowledge/duckdb_store.py` | 3 nové metody, 2 guardy v aclose, 1 guard v async_ingest_findings_batch |
+| `tests/probe_8tf/test_graph_attachment_guards.py` | **NOVÝ** — 12 probe testů |
+| `GRAPH_STORE_ATTACHMENT_AUDIT.md` | **NOVÝ** — detailní audit s call-site maticí |
+
+### Testy uzamykající invarianty
+
+```
+tests/probe_8tf/test_graph_attachment_guards.py — 12 PASSED
+  IOCGraph mock → supports buffered writes = True
+  DuckPGQGraph mock → supports buffered writes = False
+  None graph → supports buffered writes = False
+  inject_graph sets _graph_attachment_kind
+  get_graph_attachment_kind = None when no graph
+  Partial graph (buffer_ioc only) → False
+  inject_graph(None) clears state
+  aclose: flush_buffers guard safe for DuckPGQGraph
+  aclose: flush_buffers guard allows call on IOCGraph
+  aclose: close guard allows call on DuckPGQGraph
+  inject_graph docstring: "STORE IS NOT GRAPH TRUTH OWNER"
+  graph_supports_buffered_writes: "NON-AUTHORITATIVE COMPAT CHECK"
+```
+
+### Co bylo schválně NEděláno
+
+1. **Žádný GraphProtocol/interface** — jen diagnostické helpers
+2. **Žádný nový graph abstraction layer**
+3. **Žádná změna v IOCGraph ani DuckPGQGraph**
+4. **Žádné generické graph API na store** — store nepřidává metody jako `flush_graph_buffers`
+5. **Žádný tichý fallback** — každá větev má explicitní guard
+
+### Debt sekce — aktualizace
+
+**[DEBT-3] `duckdb_store._ioc_graph` schizofrenie → PARTIALLY MITIGATED**
+- Původní stav: `inject_graph` acceptuje cokoliv bez capability contract
+- Akce: Přidány `graph_supports_buffered_writes()` + `get_graph_attachment_kind()` + explicitní guardy
+- **Stále přetrvává**: `duckdb_store._ioc_graph` stále drží DuckPGQGraph po windupu — to je mimo scope tohoto sprintu
+- Uzamčení: `tests/probe_8tf/test_graph_attachment_guards.py` — 12 testů
+

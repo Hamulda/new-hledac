@@ -1,6 +1,19 @@
 """
 ResourceGovernor 2.0 – centrální gatekeeper pro všechny výpočetně náročné operace.
-Sleduje RAM, GPU paměť, vytížení a poskytuje async context manager pro bezpečné rezervace.
+
+ROLE: Canonical UMA POLICY / HYSTERESIS / RUNTIME GOVERNANCE (not a raw sampler).
+
+This module provides:
+- State evaluation from system_used_gib (threshold driver)
+- Hysteresis-based I/O-only mode gate (prevents thrashing)
+- Async alarm dispatcher for CRITICAL/EMERGENCY callbacks
+- M1 QoS thread priority hinting
+- Priority-based resource reservation (async context manager)
+
+AUTHORITY BOUNDARY:
+- SAMPLER (utils/uma_budget.py): raw memory sampling, no policy
+- GOVERNOR (core/resource_governor.py): policy/hysteresis/runtime governance
+- ALLOCATOR (resource_allocator.py): request-level budgeting/concurrency
 
 Sprint 8AB: Unified UMA accountant surface (WARN/CRITICAL/EMERGENCY + I/O-only mode).
 Threshold driver: system_used_gib (total - available), NOT process rss_gib.

@@ -12,9 +12,12 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
-from enum import Enum, auto
-from typing import Any, Dict, Optional, Set, Callable, Awaitable
-from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Dict, Optional, Set, Callable, Awaitable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .types import AnalyzerResult
+from dataclasses import dataclass
 
 try:
     import mlx.core as mx
@@ -194,7 +197,26 @@ class CapabilityRegistry:
 
 
 class CapabilityRouter:
-    """Routes research requirements to required capabilities."""
+    """
+    Routes research requirements to required capabilities.
+
+    This is the SECOND stage in the analyzer -> router -> registry pipeline.
+
+    Supports two input modes:
+    1. Legacy: Dict[str, Any] analysis + strategy + depth (backward compatible)
+    2. Canonical: AnalyzerResult (from types.py)
+
+    The AnalyzerResult path is the preferred canonical route.
+
+    Canonical output: Set[Capability] - passed to ToolRegistry for enforcement.
+    """
+
+    # Canonical capability signal keys (from AnalyzerResult.to_capability_signal())
+    SIGNAL_KEYS = frozenset([
+        "tools", "sources", "privacy_level", "use_tor", "depth",
+        "use_tot", "tot_mode", "requires_embeddings", "requires_ner",
+        "requires_temporal", "requires_crypto",
+    ])
 
     # Mapping: source type -> required capabilities
     SOURCE_CAPABILITIES: Dict[str, Set[Capability]] = {
@@ -217,21 +239,41 @@ class CapabilityRouter:
         },
     }
 
+    # Tool-to-capability mapping (scaffold for required_capabilities)
+    TOOL_CAPABILITIES: Dict[str, Set[Capability]] = {
+        "stealth_crawler": {Capability.STEALTH, Capability.DARK_WEB},
+        "archive_discovery": {Capability.TEMPORAL, Capability.METADATA_EXTRACT},
+        "leak_hunter": {Capability.STEALTH},
+        "blockchain_analyzer": {Capability.CRYPTO_INTEL},
+        "academic_search": {Capability.RERANKING, Capability.ENTITY_LINKING},
+        "identity_stitching": {Capability.ENTITY_LINKING},
+        "relationship_discovery": {Capability.ENTITY_LINKING},
+        "pattern_mining": {Capability.PATTERN_MINING, Capability.INSIGHT},
+        "temporal_analyzer": {Capability.TEMPORAL},
+        "document_analyzer": {Capability.DOC_INTEL},
+        "web_intelligence": {Capability.RERANKING},
+        "news_analyzer": {Capability.INSIGHT},
+        "threat_assessor": {Capability.STEALTH},
+        "vulnerability_scanner": {Capability.NETWORK_RECON},
+        "reputation_analyzer": {Capability.INSIGHT},
+        "cross_reference_engine": {Capability.ENTITY_LINKING, Capability.RERANKING},
+    }
+
     @classmethod
     def route(
         cls,
-        analysis: Dict[str, Any],
-        strategy: Any,
-        depth: Any,
+        analysis: Dict[str, Any] | "AnalyzerResult",
+        strategy: Any = None,
+        depth: Any = None,
         profile: str = "default"
     ) -> Set[Capability]:
         """
         Determine required capabilities from research context.
 
         Args:
-            analysis: Initial query analysis
-            strategy: Research strategy with selected sources
-            depth: Discovery depth
+            analysis: Either AnalyzerResult (canonical) or Dict with analysis fields
+            strategy: Research strategy (legacy, optional for AnalyzerResult)
+            depth: Discovery depth (legacy, optional for AnalyzerResult)
             profile: Research profile (stealth, speed, thorough)
 
         Returns:
@@ -242,29 +284,50 @@ class CapabilityRouter:
         # Base capabilities
         required.add(Capability.HERMES)
 
-        # From selected sources
-        if hasattr(strategy, 'selected_sources'):
-            for source in strategy.selected_sources:
-                source_key = str(source).lower() if hasattr(source, 'value') else str(source).lower()
-                for key, caps in cls.SOURCE_CAPABILITIES.items():
-                    if key in source_key:
-                        required.update(caps)
+        # Build capability signal dict (canonical form)
+        signal: Dict[str, Any] = {}
 
-        # From depth
-        depth_key = str(depth).lower() if hasattr(depth, 'value') else str(depth).lower()
-        for key, caps in cls.DEPTH_CAPABILITIES.items():
-            if key in depth_key:
-                required.update(caps)
+        # Canonical path: AnalyzerResult
+        if hasattr(analysis, "to_capability_signal"):
+            # AnalyzerResult instance -> canonical signal dict
+            signal = analysis.to_capability_signal()
+        elif isinstance(analysis, dict):
+            if "tools" in analysis:
+                # Already a capability signal dict from AnalyzerResult.to_capability_signal()
+                signal = analysis
+            else:
+                # Legacy path: raw analysis dict
+                signal = dict(analysis)
+                if strategy is not None and hasattr(strategy, 'selected_sources'):
+                    for source in strategy.selected_sources:
+                        source_key = str(source).lower() if hasattr(source, 'value') else str(source).lower()
+                        for key, caps in cls.SOURCE_CAPABILITIES.items():
+                            if key in source_key:
+                                required.update(caps)
+                if depth is not None:
+                    depth_key = str(depth).lower() if hasattr(depth, 'value') else str(depth).lower()
+                    for key, caps in cls.DEPTH_CAPABILITIES.items():
+                        if key in depth_key:
+                            required.update(caps)
 
-        # From analysis
-        if analysis.get('requires_embeddings', False):
+        # From signal fields
+        if signal.get('requires_embeddings'):
             required.add(Capability.MODERNBERT)
-        if analysis.get('requires_ner', False):
+        if signal.get('requires_ner'):
             required.add(Capability.GLINER)
-        if analysis.get('requires_temporal', False):
+        if signal.get('requires_temporal'):
             required.add(Capability.TEMPORAL)
-        if analysis.get('requires_crypto', False):
+        if signal.get('requires_crypto'):
             required.add(Capability.CRYPTO_INTEL)
+
+        # From tools in signal (canonical path)
+        for tool in signal.get('tools', []):
+            if tool in cls.TOOL_CAPABILITIES:
+                required.update(cls.TOOL_CAPABILITIES[tool])
+
+        # From privacy level
+        if signal.get('privacy_level') == "MAXIMUM" or signal.get('use_tor'):
+            required.add(Capability.STEALTH)
 
         # Profile-specific
         if profile == "stealth":
@@ -277,7 +340,34 @@ class CapabilityRouter:
 
 
 class ModelLifecycleManager:
-    """Enforces hard phase invariants for model lifecycle."""
+    """
+    Enforces hard phase invariants for model lifecycle.
+
+    Authority note (Sprint 8ME + 8TF):
+    This class is a FACADE — it does NOT load/unload models directly.
+    It orchestrates phase transitions through CapabilityRegistry.load/unload.
+    The canonical runtime-wide acquire/load owner is brain.model_manager.ModelManager.
+    The canonical unload owner is ModelManager._release_current_async() +
+    brain.model_lifecycle.unload_model() (7K SSOT delegát).
+
+    This facade uses COARSE-GRAINED phase strings (BRAIN/TOOLS/SYNTHESIS/CLEANUP),
+    which are SEMANTICALLY DIFFERENT from ModelManager.PHASE_MODEL_MAP's workflow-level
+    phase strings (PLAN/DECIDE/SYNTHESIZE/EMBED/DEDUP/ROUTING/NER/ENTITY).
+    These two phase systems are NOT unified — they serve different purposes and MUST NOT
+    be conflated.
+
+    IMPORTANT — Three Phase Layers (Sprint 8TF):
+      Layer 1 (Workflow-level):   ModelManager.PHASE_MODEL_MAP — PLAN/DECIDE/SYNTHESIZE/EMBED/...
+      Layer 2 (Coarse-grained):  ModelLifecycleManager — BRAIN/TOOLS/SYNTHESIS/CLEANUP
+      Layer 3 (Windup-local):    windup_engine.SynthesisRunner — Qwen/SmolLM isolation
+
+    Drift risk: Implicit mapping of Layer 1 ↔ Layer 2 phase strings would create
+    false equivalence (e.g., "SYNTHESIZE" ≠ "SYNTHESIS"). Use brain.model_phase_facts
+    to read phase facts without implicit cross-layer confusion.
+
+    Future: If seam extraction lands, this facade may delegate to
+    ModelManager.with_phase() directly, eliminating the CapabilityRegistry round-trip.
+    """
 
     def __init__(self, registry: CapabilityRegistry):
         self.registry = registry

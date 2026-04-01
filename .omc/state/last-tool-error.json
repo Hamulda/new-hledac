@@ -1,7 +1,7 @@
 {
   "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"python3 -c \\\"\\nimport sys; sys.path.insert(0, '.')\\n\\n# Direct import without package path\\nimport hledac.universal.discovery.ti_feed_adapter\\nprint('✅ Přímý import uspěl')\\nprint(f'ti_fee...",
-  "error": "Exit code 1\nfast-langdetect not available, using fallback detection\nWARNING:hledac.universal.intelligence.document_intelligence:PIL not available - image analysis disabled\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.intelligence.relationship_discovery:[LSH] datasketch not installed, LSH prediction disabled\nINFO:legacy.autonomous_orchestrator:[Metal] Heap capped at 4.8GB\nTraceback (most recent call las...",
-  "timestamp": "2026-03-31T09:32:41.858Z",
+  "tool_input_preview": "{\"command\":\"python -c \\\"\\nfrom brain.model_lifecycle import get_model_lifecycle_status, unload_model, load_model\\nfrom brain.model_manager import ModelManager, get_model_manager\\nfrom capabilities imp...",
+  "error": "Exit code 1\nTraceback (most recent call last):\n  File \"<string>\", line 2, in <module>\n  File \"/Users/vojtechhamada/PycharmProjects/Hledac/hledac/universal/brain/__init__.py\", line 14, in <module>\n    from .hermes3_engine import Hermes3Engine\n  File \"/Users/vojtechhamada/PycharmProjects/Hledac/hledac/universal/brain/hermes3_engine.py\", line 47, in <module>\n    from ..security.pii_gate import fallback_sanitize\nImportError: attempted relative import beyond top-level package",
+  "timestamp": "2026-04-01T16:40:43.305Z",
   "retry_count": 1
 }

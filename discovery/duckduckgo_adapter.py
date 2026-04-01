@@ -353,43 +353,25 @@ async def _scrape_mojeek(
 async def _search_wayback_cdx(
     url_pattern: str, max_results: int = 20
 ) -> list[dict]:
-    """Wayback CDX API — historical snapshots of URL."""
-    import json as _json
+    """Wayback CDX API — historical snapshots of URL.
+    COMPAT: Tato funkce je dočasný compat wrapper.
+    AUTHORITY: archive_discovery.wayback_cdx_lookup() je search-shaped canonical.
+    REMOVAL CONDITION: po přechodu všech call-sites na archive_discovery.wayback_cdx_lookup().
+    """
+    from hledac.universal.intelligence.archive_discovery import wayback_cdx_lookup
+
+    snapshots = await wayback_cdx_lookup(url_pattern, limit=max_results, timeout_s=20.0)
+    # Převod z wayback_cdx_lookup format na _search_wayback_cdx format
     results = []
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                "http://web.archive.org/cdx/search/cdx",
-                params={
-                    "url":      url_pattern,
-                    "output":   "json",
-                    "limit":    max_results,
-                    "fl":       "timestamp,original,statuscode,mimetype",
-                    "collapse": "urlkey",
-                    "filter":   "statuscode:200"
-                },
-                timeout=aiohttp.ClientTimeout(total=20)
-            ) as r:
-                if r.status != 200:
-                    return []
-                rows = await r.json(content_type=None)
-                if not rows or len(rows) < 2:
-                    return []
-                keys = rows[0]
-                for row in rows[1:max_results + 1]:
-                    rec = dict(zip(keys, row))
-                    ts  = rec.get("timestamp", "")
-                    url = rec.get("original", "")
-                    results.append({
-                        "title":     f"Wayback: {url}",
-                        "url":       f"https://web.archive.org/web/{ts}/{url}",
-                        "snapshot_url": url,
-                        "timestamp": ts,
-                        "mimetype":  rec.get("mimetype", ""),
-                        "source":    "wayback_cdx"
-                    })
-    except Exception as e:
-        logger.warning(f"[Wayback CDX] {e}")
+    for snap in snapshots:
+        results.append({
+            "title":        snap.get("title", ""),
+            "url":          snap.get("url", ""),
+            "snapshot_url": snap.get("url", ""),
+            "timestamp":    snap.get("timestamp", ""),
+            "mimetype":     "",
+            "source":       "wayback_cdx"
+        })
     return results
 
 

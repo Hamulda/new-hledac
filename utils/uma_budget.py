@@ -1,15 +1,22 @@
 """
 UnifiedMemoryBudgetAccountant - Sprint 1B Resource Hardening.
 
-Provides unified view of M1 8GB UMA memory budget across:
-- System RAM (psutil)
-- MLX active/peak/cache
-- Explicit threshold API
+ROLE: Canonical RAW UMA SAMPLER (not a governor/policy/allocator).
+
+This module provides:
+- Raw memory sampling (system RAM via psutil, MLX active/peak/cache)
+- Pressure level classification (normal/warn/critical/emergency)
+- Async watchdog with state-change callbacks
 
 Threshold levels (M1 8GB UMA):
 - WARN:   >= 6.0 GB used
 - CRITICAL: >= 6.5 GB used
 - EMERGENCY: >= 7.0 GB used
+
+AUTHORITY BOUNDARY:
+- SAMPLER: reads raw values, no policy, no hysteresis, no budgeting
+- GOVERNOR (core/resource_governor.py): policy/hysteresis/runtime governance
+- ALLOCATOR (resource_allocator.py): request-level budgeting/concurrency
 
 API:
 - get_uma_snapshot() -> dict

@@ -21,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal, Optional, TypeVar, get_type_hints
+from typing import Any, Literal, Optional, Set, TypeVar, get_type_hints
 
 from pydantic import BaseModel, Field, ValidationError, create_model
 
@@ -220,7 +220,13 @@ class RateLimits(BaseModel):
 
 
 class Tool(BaseModel):
-    """Tool definition with schemas, cost model, and handler."""
+    """
+    Tool definition with schemas, cost model, and handler.
+
+    NOTE: This is the CANONICAL execution-control surface for the tool registry.
+    The required_capabilities field is a scaffold for future capability-gated
+    tool execution (planned for Sprint 8SE). Currently not enforced.
+    """
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -231,6 +237,13 @@ class Tool(BaseModel):
     cost_model: CostModel = Field(default_factory=CostModel)
     rate_limits: RateLimits = Field(default_factory=RateLimits)
     handler: Callable[..., Any] = Field(description="Tool implementation")
+
+    # Scaffold for capability-gated execution (Sprint 8SE)
+    # Set of required capability names that must be available before execution
+    required_capabilities: Set[str] = Field(
+        default_factory=set,
+        description="Scaffold: capabilities required for this tool (not yet enforced)"
+    )
 
     def to_tool_card(self) -> dict[str, Any]:
         """Generate tool card for Hermes LLM consumption."""
@@ -582,18 +595,44 @@ class ToolRegistry:
     # Execution Helpers
     # -------------------------------------------------------------------------
 
+    def check_capabilities(self, tool_name: str, available_caps: set[str]) -> tuple[bool, str | None]:
+        """
+        Check if required capabilities are satisfied for tool execution.
+
+        Args:
+            tool_name: Name of the tool to check
+            available_caps: Set of currently available capability names
+
+        Returns:
+            Tuple of (satisfied, error_message_if_not)
+        """
+        tool = self.get_tool(tool_name)
+        required = tool.required_capabilities
+
+        if not required:
+            return True, None
+
+        missing = required - available_caps
+        if missing:
+            return False, f"Tool '{tool_name}' requires capabilities {missing}, available={available_caps}"
+
+        return True, None
+
     async def execute_with_limits(
         self,
         tool_name: str,
         args: dict[str, Any],
         timeout_ms: int | None = None,
+        available_capabilities: set[str] | None = None,
     ) -> Any:
-        """Execute tool with rate limiting and timeout.
+        """Execute tool with rate limiting and capability enforcement.
 
         Args:
             tool_name: Name of the tool to execute
             args: Validated arguments
             timeout_ms: Optional timeout override
+            available_capabilities: Set of available capability names for enforcement.
+                                  If None, capability check is skipped (backward compatible).
 
         Returns:
             Tool return value
@@ -601,9 +640,15 @@ class ToolRegistry:
         Raises:
             KeyError: If tool not found
             ValidationError: If arguments invalid
-            RuntimeError: If rate limit exceeded or timeout
+            RuntimeError: If rate limit exceeded, timeout, or capability check fails
         """
         tool = self.get_tool(tool_name)
+
+        # Sprint 8SE: Capability enforcement (backward compatible - skips if None)
+        if available_capabilities is not None:
+            satisfied, reason = self.check_capabilities(tool_name, available_capabilities)
+            if not satisfied:
+                raise RuntimeError(f"Capability check failed: {reason}")
 
         # Validate arguments
         validated = tool.validate_args(args)
@@ -1102,6 +1147,15 @@ def create_default_registry() -> ToolRegistry:
         rate_limits=RateLimits(max_calls_per_run=20, max_parallel=1),
         handler=_python_execute_handler,
     ))
+
+    # Sprint 8SE: Populate representative tools with required_capabilities
+    # These are canonical examples demonstrating capability-gated execution.
+    # web_search: requires RERANKING (semantic search ranking)
+    registry.get_tool("web_search").required_capabilities = {"reranking"}
+    # academic_search: requires RERANKING + ENTITY_LINKING
+    registry.get_tool("academic_search").required_capabilities = {"reranking", "entity_linking"}
+    # entity_extraction: requires ENTITY_LINKING
+    registry.get_tool("entity_extraction").required_capabilities = {"entity_linking"}
 
     return registry
 

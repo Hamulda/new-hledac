@@ -11,36 +11,15 @@ RDAP_DOMAIN = "https://rdap.org/domain/"
 URLSCAN_SEARCH = "https://urlscan.io/api/v1/search/"
 
 async def wayback_cdx_lookup(url_or_host: str, limit: int = 10, timeout_s: float = 8.0) -> list[dict]:
-    params = {
-        "url": url_or_host,
-        "output": "json",
-        "fl": "timestamp,original,statuscode,mimetype",
-        "filter": "statuscode:200",
-        "limit": str(limit),
-        "collapse": "digest",
-    }
-    timeout = aiohttp.ClientTimeout(total=timeout_s)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(WAYBACK_CDX, params=params) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-    if not data:
-        return []
-    header, *rows = data
-    out = []
-    for i, row in enumerate(rows, 1):
-        rec = dict(zip(header, row))
-        out.append({
-            "title": f"Wayback capture {rec.get('timestamp','')}",
-            "url": rec.get("original", ""),
-            "snippet": f"wayback status={rec.get('statuscode')} mimetype={rec.get('mimetype')}",
-            "backend": "wayback",
-            "rank": i,
-            "provider": "wayback_cdx",
-            "source": "wayback",
-            "timestamp": rec.get("timestamp"),
-        })
-    return out
+    """Compat: Wayback CDX lookup — forwarding na archive_discovery.wayback_cdx_lookup.
+    AUTHORITY: archive_discovery.wayback_cdx_lookup() je canonical.
+    REMOVAL CONDITION: HE-003 (F025_SOURCE_TRANSPORT) — fetch_coordinator přejde na
+    archive_discovery.wayback_cdx_lookup() přímo; pak odstranit tuto vrstvu.
+    """
+    from hledac.universal.intelligence.archive_discovery import (
+        wayback_cdx_lookup as _canonical_lookup,
+    )
+    return await _canonical_lookup(url_or_host, limit=limit, timeout_s=timeout_s)
 
 async def rdap_lookup(domain: str, timeout_s: float = 8.0) -> dict | None:
     timeout = aiohttp.ClientTimeout(total=timeout_s)

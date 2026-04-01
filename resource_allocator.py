@@ -2,11 +2,24 @@
 Resource Allocator with Predictive Modeling
 ==========================================
 
-Predictive resource allocator with:
-- Online linear regression (MLX) for RAM prediction
-- Warm-up phase (first 5 queries use fixed allocation)
-- Emergency brake (cancel lowest priority task when RSS > 6.2 GB)
-- Bounded concurrent requests (max 3)
+ROLE: Canonical REQUEST-LEVEL BUDGETING / CONCURRENCY PRIMITIVE (not a sampler or governor).
+
+This module provides:
+- Request-level RAM budgeting with MLX linear regression prediction
+- Adaptive concurrency semaphore based on memory pressure
+- Emergency brake (cancel lowest priority task)
+- Concurrency limits that adapt to system memory pressure
+
+AUTHORITY BOUNDARY:
+- SAMPLER (utils/uma_budget.py): raw memory sampling, no policy
+- GOVERNOR (core/resource_governor.py): policy/hysteresis/runtime governance
+- ALLOCATOR (resource_allocator.py): request-level budgeting/concurrency
+
+Note: get_memory_pressure_level() in this module uses percent-based thresholds
+(pct > 85 → warn, pct > 93 → critical) which are independent from
+uma_budget.py absolute-MB thresholds. These serve different purposes:
+- uma_budget.py: absolute system+MLX used (Calibrated for M1 8GB UMA)
+- resource_allocator.py: percent-based system pressure (for AdaptiveSemaphore decisions)
 """
 
 import time

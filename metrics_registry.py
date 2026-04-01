@@ -73,6 +73,7 @@ class MetricSnapshot:
     name: str
     value: float
     labels: Optional[Dict[str, str]] = None  # Only if bounded
+    correlation: Optional[Dict[str, Optional[str]]] = None  # run_id, branch_id, provider_id, action_id
 
 
 class MetricsRegistry:
@@ -96,7 +97,8 @@ class MetricsRegistry:
     def __init__(
         self,
         run_dir: Path,
-        run_id: str = "default"
+        run_id: str = "default",
+        correlation: Optional[Dict[str, Optional[str]]] = None,
     ):
         """
         Initialize metrics registry.
@@ -104,9 +106,13 @@ class MetricsRegistry:
         Args:
             run_dir: Directory for metrics JSONL
             run_id: Run identifier
+            correlation: Optional correlation dict with keys:
+                branch_id, provider_id, action_id
+                (run_id is taken from run_id parameter)
         """
         self._run_dir = run_dir
         self._run_id = run_id
+        self._correlation = correlation
         self._last_flush = datetime.utcnow()
 
         # Counters (integers)
@@ -218,19 +224,25 @@ class MetricsRegistry:
         # Collect metrics
         metrics = []
         for name, value in self._counters.items():
-            metrics.append({
+            m = {
                 "ts": now.isoformat(),
                 "name": name,
                 "type": "counter",
                 "value": value,
-            })
+            }
+            if self._correlation:
+                m["correlation"] = self._correlation
+            metrics.append(m)
         for name, value in self._gauges.items():
-            metrics.append({
+            m = {
                 "ts": now.isoformat(),
                 "name": name,
                 "type": "gauge",
                 "value": value,
-            })
+            }
+            if self._correlation:
+                m["correlation"] = self._correlation
+            metrics.append(m)
 
         # Add to ring buffer
         for m in metrics:

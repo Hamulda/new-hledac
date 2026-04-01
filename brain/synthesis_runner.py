@@ -233,7 +233,8 @@ class SynthesisRunner:
 
     __slots__ = ("_lifecycle", "_ioc_graph", "_cached_model_path", "_last_outlines_used",
                  "_custom_synthesis_prompt", "_prompt_modifier", "_duckdb_store",
-                 "_last_synthesis_engine", "_last_arm", "_bandit_rewards")
+                 "_last_synthesis_engine", "_last_arm", "_bandit_rewards",
+                 "_stix_status", "_stix_reason", "_stix_backend")
 
     def __init__(self, lifecycle: "ModelLifecycle") -> None:
         self._lifecycle = lifecycle
@@ -251,6 +252,10 @@ class SynthesisRunner:
         # Sprint 8VH: Bandit tracking
         self._last_arm: str | None = None
         self._bandit_rewards: dict = {}
+        # Sprint 8TH: Structured STIX degradation state
+        self._stix_status: str = "unknown"
+        self._stix_reason: str = ""
+        self._stix_backend: str = ""
 
     def inject_graph(self, graph: Any) -> None:
         """Inject IOCGraph instance from 8QA for STIX context injection."""
@@ -327,7 +332,7 @@ class SynthesisRunner:
         self._lifecycle._loaded = False  # force reload with new path
 
         # STIX context z 8QA grafu
-        stix_context = self._build_stix_context()
+        stix_context = await self._build_stix_context()
 
         # Sprint 8UC B.2.3: Inject episode context from research memory
         episode_ctx = ""
@@ -977,24 +982,62 @@ class SynthesisRunner:
         return "\n".join(lines)
 
     # ── Sprint 8TA: STIX Context ───────────────────────────────────────────
+    # Sprint 8TH: STRUCTURED DEGRADATION — stix_status/stix_reason replaces silent "" return
 
-    def _build_stix_context(self) -> str:
-        """B.6: STIX context z ioc_graph.export_stix_bundle() pokud dostupný."""
+    # _stix_status, _stix_reason, _stix_backend declared in __slots__
+    # Initialized in __init__ — see there
+
+    async def _build_stix_context(self) -> str:
+        """
+        B.6: STIX context z ioc_graph.export_stix_bundle() pokud dostupný.
+
+        SPRINT 8TH: Returns empty string on degradation, BUT sets structured
+        instance attributes FIRST so caller can audit why:
+
+          _stix_status  = "available" | "unavailable" | "error"
+          _stix_reason  = concrete reason string (not a generic message)
+          _stix_backend = backend class name if safe to extract
+
+        Truth store (IOCGraph/Kuzu) HAS export_stix_bundle (async).
+        Donor backend (DuckPGQGraph/DuckDB) DOES NOT.
+        Silent degradation = caller got empty string with no explanation.
+        """
         if self._ioc_graph is None:
+            self._stix_status = "unavailable"
+            self._stix_reason = "ioc_graph is None — no graph injected"
+            self._stix_backend = ""
             return ""
         try:
             export_fn = getattr(self._ioc_graph, "export_stix_bundle", None)
             if export_fn is None:
+                backend_name = type(self._ioc_graph).__name__
+                self._stix_status = "unavailable"
+                self._stix_reason = f"backend '{backend_name}' lacks export_stix_bundle — DuckPGQGraph donor cannot serve STIX"
+                self._stix_backend = backend_name
                 return ""
-            nodes = export_fn()
+            # IOCGraph.export_stix_bundle is async; DuckPGQGraph lacks it entirely
+            nodes = await export_fn()
             if not nodes:
+                self._stix_status = "available"
+                self._stix_reason = "export_stix_bundle returned empty — graph has no IOC nodes"
+                self._stix_backend = type(self._ioc_graph).__name__
                 return ""
             values = [n.get("value", "") for n in nodes[:20] if isinstance(n, dict)]
             if values:
+                self._stix_status = "available"
+                self._stix_reason = f"exported {len(nodes)} nodes, truncated to {len(values)} for prompt"
+                self._stix_backend = type(self._ioc_graph).__name__
                 return f"\nKnown IOCs from graph ({len(values)} entities): {', '.join(values)}"
+            else:
+                self._stix_status = "available"
+                self._stix_reason = "export_stix_bundle returned nodes but none had extractable 'value' field"
+                self._stix_backend = type(self._ioc_graph).__name__
+                return ""
         except Exception as e:
-            logger.debug("STIX context unavailable: %s", e)
-        return ""
+            self._stix_status = "error"
+            self._stix_reason = f"STIX export raised {type(e).__name__}: {e}"
+            self._stix_backend = type(self._ioc_graph).__name__
+            return ""
 
 
 # ---------------------------------------------------------------------------
