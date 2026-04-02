@@ -35,10 +35,10 @@
 | `lifecycle.sprint_duration_s = duration_s` | field assign | ✅ | renamed from `_sprint_duration` |
 | `lifecycle.begin_sprint()` | COMPAT ALIAS → `start()` | ✅ | |
 | `lifecycle.mark_warmup_done()` | COMPAT ALIAS → `transition_to(ACTIVE)` | ✅ | |
-| `lifecycle._current_phase == SprintPhase.ACTIVE` | direct field access | ✅ | enum-safe |
+| `lifecycle.current_phase == SprintPhase.ACTIVE` | public property | ✅ | Sprint 8VX — odstraněn private field access |
 | `lifecycle.remaining_time() <= 180.0` | method call | ✅ | |
 | `lifecycle.request_windup()` | COMPAT ALIAS (idempotent) | ✅ | guard: skip pokud WINDUP+ |
-| `lifecycle._current_phase == SprintPhase.WINDUP` | direct field access | ✅ | |
+| `lifecycle.current_phase == SprintPhase.WINDUP` | public property | ✅ | Sprint 8VX — odstraněn private field access |
 | `lifecycle.remaining_time() <= 60.0` | method call | ✅ | |
 | `lifecycle.request_export()` | COMPAT ALIAS (idempotent) | ✅ | guard: skip pokud EXPORT+ |
 | `lifecycle.request_teardown()` | COMPAT ALIAS | ✅ | jen ve windup path |
@@ -85,18 +85,9 @@ Utils verze byla fail-open (no-op na dvojité volání). Runtime verze vyhodí `
 
 ## 4. run_warmup() Status
 
-**Status: DEFERRED**
+**Status: MOVED (Sprint 8VX)**
 
-`run_warmup()` v runtime verzi je definován, ale NENÍ wired do sprint hot-path.
-
-**Důvod deferralu:**
-1. Preflight běží inline v `_run_sprint_mode()` na ř.2404 (`await _preflight_check()`) — funguje správně
-2. `run_warmup()` závisí na `SprintScheduler` referenci (`scheduler._ioc_graph`, `scheduler._ioc_scorer`) — ale v sprint módu `store_instance` není scheduler
-3. Wiring by vyžadoval předání scheduler reference do sprint path, což je scheduler-side scope
-
-**Future owner:** SprintScheduler side consumer (až bude scheduler canonical)
-
-**Removal condition:** Když sprint mode začne používat `SprintScheduler` jako primární state holder
+`run_warmup()` přesunuto z `runtime/sprint_lifecycle.py` do `__main__.py` — je to WARMUP-fáze orchestration helper, ne lifecycle state machine.
 
 ---
 
@@ -227,6 +218,8 @@ Utils verze byla fail-open (no-op na dvojité volání). Runtime verze vyhodí `
 | `recommended_tool_mode(now_monotonic?, thermal_state?)` | `(Optional[float], str) -> str` | Returns 'normal'|'prune'|'panic' |
 | `is_terminal()` | `() -> bool` | TEARDOWN reached or abort+teardown |
 | `SprintPhase` | `Enum` | BOOT, WARMUP, ACTIVE, WINDUP, EXPORT, TEARDOWN |
+| `current_phase` | `property -> SprintPhase` | Public read-only access to current phase (Sprint 8VX) |
+| `in_phase(phase)` | `(SprintPhase) -> bool` | Convenience helper (Sprint 8VX) |
 
 ### COMPAT ALIASES (must be labeled)
 
@@ -346,7 +339,7 @@ Tyto tři vrstvy **NESMÍ** splynout do jedné API plochy:
 | `request_export()` | **COMPAT ALIAS** | Nahradit `mark_export_started()` |
 | `request_teardown()` | **COMPAT ALIAS** | Nahradit `mark_teardown_started()` |
 | `is_windup_phase()` | **COMPAT ALIAS** | Nahradit `should_enter_windup()` |
-| `is_active` | **COMPAT PROPERTY** | Nahradit `_current_phase == ACTIVE` |
+| `is_active` property | **COMPAT** — nyní preferuj `current_phase == SprintPhase.ACTIVE` |
 | `is_winding_down` | **COMPAT PROPERTY** | Check phase in (WINDUP, EXPORT, TEARDOWN) |
 | SIGINT/SIGTERM handlers | **ORCHESTRATION** | Zůstává v utils, není lifecycle |
 | `_uma_watchdog` | **ORCHESTRATION** | Zůstává v utils, není lifecycle |
