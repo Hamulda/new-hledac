@@ -1098,19 +1098,17 @@ class LanceDBIdentityStore:
         Returns:
             List of ranked documents.
         """
-        # DEBT: Thermal + battery awareness — COUPLING RISK
-        # lancedb_store volá self._orch._memory_mgr přímo.
-        # Toto je OPTIONAL coupling - store funguje i bez orchestratoru.
-        # Debt: externalizovat thermal policy do samostatné třídy.
-        thermal = "NORMAL"
-        on_battery = False
+        # Narrow seam: self._orch._memory_mgr.get_reranking_context() je jediný entry point
+        # pro thermal/battery awareness. Store funguje i bez orchestratoru (default values).
+        ctx = {"thermal": "NORMAL", "on_battery": False, "available_gb": 8.0}
         try:
-            from hledac.universal.coordinators.memory_coordinator import ThermalState
             if self._orch and hasattr(self._orch, '_memory_mgr') and self._orch._memory_mgr:
-                thermal = self._orch._memory_mgr.get_thermal_state().name
-                on_battery = self._orch._memory_mgr._on_battery_power()
+                ctx = self._orch._memory_mgr.get_reranking_context()
         except Exception:
             pass
+        thermal = ctx.get("thermal", "NORMAL")
+        on_battery = ctx.get("on_battery", False)
+        available_gb = ctx.get("available_gb", 8.0)
 
         # Stage 1: Primary search - LanceDB vector
         try:
@@ -1139,13 +1137,7 @@ class LanceDBIdentityStore:
             if variance < 0.1:
                 return candidates[:top_k]
 
-        # Stage 5: Adaptive reranking based on resources
-        try:
-            import psutil
-            available_gb = psutil.virtual_memory().available / (1024**3)
-        except Exception:
-            available_gb = 8.0
-
+        # Stage 5: Adaptive reranking based on resources (available_gb from get_reranking_context)
         # ColBERT (GPU) - requires >4GB and cool temperature
         if available_gb > 4.0 and thermal not in ("HOT", "CRITICAL") and not on_battery:
             reranker = await self._get_colbert_reranker()

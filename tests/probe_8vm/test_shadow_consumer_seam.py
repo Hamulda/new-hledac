@@ -2058,3 +2058,400 @@ class TestProviderRuntimeFactsIntegration:
             if result is not None:
                 assert result.provider_readiness is not None
                 assert result.runtime_facts is not None
+
+    def test_runtime_facts_serialized_in_pre_decision_summary_to_dict(self):
+        """PreDecisionSummary.to_dict() serializes runtime_facts bundle."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            PreDecisionSummary,
+            LifecycleInterpretation,
+            GraphCapabilitySummary,
+            ExportReadinessSummary,
+            ModelControlSummary,
+            PrecursorSummary,
+            DecisionGateReadiness,
+            ToolReadinessPreview,
+            WindupReadinessPreview,
+            ProviderActivationNote,
+            ProviderReadinessPreview,
+            DispatchReadinessPreview,
+        )
+        from hledac.universal.runtime.shadow_inputs import ProviderRuntimeFactsBundle
+
+        runtime_facts = ProviderRuntimeFactsBundle(
+            current_model="hermes",
+            is_loaded=True,
+            initialized=True,
+            fact_stability="STABLE",
+        )
+        d = {
+            "parity_timestamp_monotonic": 0.0,
+            "parity_timestamp_wall": "2026-04-02T00:00:00",
+            "runtime_mode": "FULL_SHADOW",
+            "lifecycle": LifecycleInterpretation(
+                workflow_phase="ACTIVE",
+                workflow_phase_entered_at=0.0,
+                control_phase_mode="normal",
+                control_phase_thermal="nominal",
+                windup_local_mode="none",
+                is_active=True,
+                is_windup=False,
+                is_export_ready=False,
+                is_terminal=False,
+                can_accept_work=True,
+                should_prune=False,
+                synthesis_mode_known=True,
+                phase_conflict=False,
+                phase_conflict_reason=None,
+            ),
+            "graph": GraphCapabilitySummary(
+                backend="duckpgq",
+                nodes=10,
+                edges=5,
+                pgq_active=True,
+                top_nodes_count=3,
+                is_initialized=True,
+                has_structured_data=True,
+                is_rich=True,
+                readiness="ready",
+            ),
+            "export_readiness": ExportReadinessSummary(
+                sprint_id="test",
+                synthesis_engine="hermes",
+                ranked_parquet_present=True,
+                gnn_predictions=5,
+                is_ready=True,
+                has_gnn_predictions=True,
+                has_ranked_data=True,
+                readiness="ready",
+            ),
+            "model_control": ModelControlSummary(
+                tools_count=3,
+                sources_count=2,
+                privacy="STANDARD",
+                depth="STANDARD",
+                models_needed=["hermes"],
+                has_tools=True,
+                has_sources=True,
+                is_high_quality=True,
+                readiness="ready",
+            ),
+            "precursors": PrecursorSummary(
+                branch_decision_id=None,
+                provider_recommend=None,
+                correlation_run_id=None,
+                correlation_branch_id=None,
+                has_branch_decision=False,
+                has_provider_recommend=False,
+                has_correlation=False,
+                is_correlation_linked=False,
+                readiness="unknown",
+            ),
+            "diff_taxonomy": [],
+            "blockers": [],
+            "unknowns": [],
+            "mismatch_reasons": [],
+            "compat_seams": [],
+            "decision_gate": DecisionGateReadiness(
+                gate_status="unknown",
+                blocker_count=0,
+                unknown_count=0,
+                compat_seam_count=0,
+                blocker_categories=[],
+                unknown_categories=[],
+                is_proceed_allowed=False,
+                defer_to_provider=True,
+            ),
+            "tool_readiness": ToolReadinessPreview(
+                readiness="unknown",
+                tool_count=0,
+                tool_names=[],
+                has_network_tools=False,
+                has_high_memory_tools=False,
+                control_mode="normal",
+                pruned_tool_count=0,
+                resource_constraint="unknown",
+                can_execute=False,
+                defer_reason=None,
+            ),
+            "windup_readiness": WindupReadinessPreview(
+                readiness="unknown",
+                is_windup_phase=False,
+                synthesis_mode=None,
+                synthesis_engine="unknown",
+                has_export_data=False,
+                export_data_quality="unknown",
+                defer_reason=None,
+            ),
+            "provider_note": ProviderActivationNote(
+                status="unknown",
+                deferral_reason="lifecycle not active",
+                has_recommendation=False,
+                recommendation=None,
+                next_phase_hint=None,
+            ),
+            "provider_readiness": ProviderReadinessPreview(
+                has_recommendation=False,
+                recommendation=None,
+                readiness="unknown",
+                lifecycle_ready=False,
+                control_ready=True,
+                thermal_safe=True,
+                has_facts=False,
+                blockers=[],
+                unknowns=[],
+                next_phase_hint=None,
+                deferred_reasons=[],
+                runtime_loaded=False,
+                runtime_current_model=None,
+                runtime_initialized=False,
+            ),
+            "dispatch_parity": None,
+            "runtime_facts": runtime_facts,
+        }
+
+        summary = PreDecisionSummary(**d)
+        result_dict = summary.to_dict()
+
+        # runtime_facts must be serialized in to_dict() output
+        assert "runtime_facts" in result_dict
+        rf = result_dict["runtime_facts"]
+        assert rf is not None
+        assert rf["runtime_current_model"] == "hermes"
+        assert rf["runtime_is_loaded"] is True
+        assert rf["runtime_initialized"] is True
+        assert rf["runtime_fact_stability"] == "STABLE"
+
+    def test_runtime_facts_unknown_when_lifecycle_status_unavailable(self):
+        """runtime_facts falls back to UNKNOWN when get_model_lifecycle_status raises."""
+        from unittest.mock import MagicMock, patch
+        from hledac.universal.runtime.sprint_scheduler import SprintScheduler, SprintSchedulerConfig
+
+        config = SprintSchedulerConfig()
+        scheduler = SprintScheduler(config)
+        scheduler._lc_adapter = MagicMock()
+        scheduler._lc_adapter._lc = MagicMock()
+        scheduler._lc_adapter._lc.snapshot.return_value = {}
+
+        with patch("hledac.universal.runtime.shadow_inputs.RuntimeMode") as mock_rm:
+            mock_rm.is_shadow_mode.return_value = True
+            # Force get_model_lifecycle_status to raise (it's imported inside the method)
+            with patch("hledac.universal.brain.model_lifecycle.get_model_lifecycle_status") as mock_status:
+                mock_status.side_effect = RuntimeError("lifecycle unavailable")
+                result = scheduler.consume_shadow_pre_decision()
+                if result is not None:
+                    # Must fall back to UNKNOWN bundle
+                    assert result.runtime_facts is not None
+                    assert result.runtime_facts.fact_stability == "UNKNOWN"
+
+    def test_runtime_facts_compat_when_lifecycle_status_available(self):
+        """runtime_facts reaches COMPAT stability when lifecycle_status provided without model_manager."""
+        from hledac.universal.runtime.shadow_inputs import (
+            collect_provider_runtime_facts,
+            ProviderRuntimeFactsBundle,
+        )
+
+        lifecycle_status = {
+            "loaded": True,
+            "current_model": "hermes",
+            "initialized": True,
+            "last_error": None,
+        }
+        result = collect_provider_runtime_facts(
+            model_manager=None,
+            lifecycle_status=lifecycle_status,
+        )
+        assert result.fact_stability == "COMPAT"
+        assert result.current_model == "hermes"
+        assert result.is_loaded is True
+        assert result.initialized is True
+        assert isinstance(result, ProviderRuntimeFactsBundle)
+
+
+class TestProviderRuntimeFactsPreviewOutput:
+    """Sprint F3.13: Verify runtime_facts appears as standalone top-level section in preview."""
+
+    def test_preview_includes_runtime_facts_top_level_section(self):
+        """_build_shadow_readiness_preview must include runtime_facts as top-level dict."""
+        import os
+        original = os.environ.get("HLEDAC_RUNTIME_MODE")
+        try:
+            os.environ["HLEDAC_RUNTIME_MODE"] = "scheduler_shadow"
+
+            scheduler = SprintScheduler(SprintSchedulerConfig())
+            scheduler._lc_adapter = MagicMock()
+            scheduler._lc_adapter._lc = MagicMock()
+            scheduler._synthesis_engine = "test-engine"
+
+            # Attach fake PreDecisionSummary with runtime_facts
+            from hledac.universal.runtime.shadow_pre_decision import PreDecisionSummary
+            from hledac.universal.runtime.shadow_inputs import ProviderRuntimeFactsBundle
+
+            fake_runtime_facts = ProviderRuntimeFactsBundle(
+                current_model="hermes",
+                is_loaded=True,
+                initialized=True,
+                fact_stability="STABLE",
+            )
+
+            scheduler._shadow_pd_summary = PreDecisionSummary(
+                parity_timestamp_monotonic=0.0,
+                parity_timestamp_wall="2026-04-02T00:00:00",
+                runtime_mode="scheduler_shadow",
+                lifecycle=MagicMock(),
+                graph=MagicMock(),
+                export_readiness=MagicMock(),
+                model_control=MagicMock(),
+                precursors=MagicMock(),
+                diff_taxonomy=[],
+                blockers=[],
+                unknowns=[],
+                mismatch_reasons={},
+                runtime_facts=fake_runtime_facts,
+            )
+            # Set minimal mock for all required attributes
+            scheduler._shadow_pd_summary.lifecycle.workflow_phase = "ACTIVE"
+            scheduler._shadow_pd_summary.lifecycle.is_active = True
+            scheduler._shadow_pd_summary.lifecycle.is_windup = False
+            scheduler._shadow_pd_summary.lifecycle.can_accept_work = True
+            scheduler._shadow_pd_summary.lifecycle.should_prune = False
+            scheduler._shadow_pd_summary.lifecycle.phase_conflict = False
+            scheduler._shadow_pd_summary.graph.backend = "duckpgq"
+            scheduler._shadow_pd_summary.graph.readiness = "ready"
+            scheduler._shadow_pd_summary.graph.nodes = 10
+            scheduler._shadow_pd_summary.graph.edges = 5
+            scheduler._shadow_pd_summary.export_readiness.readiness = "ready"
+            scheduler._shadow_pd_summary.export_readiness.synthesis_engine = "hermes"
+            scheduler._shadow_pd_summary.model_control.readiness = "ready"
+            scheduler._shadow_pd_summary.model_control.tools_count = 3
+            scheduler._shadow_pd_summary.diff_taxonomy = []
+            scheduler._shadow_pd_summary.blockers = []
+            scheduler._shadow_pd_summary.unknowns = []
+            scheduler._shadow_pd_summary.compat_seams = []
+            scheduler._shadow_pd_summary.decision_gate = None
+            scheduler._shadow_pd_summary.tool_readiness = None
+            scheduler._shadow_pd_summary.windup_readiness = None
+            scheduler._shadow_pd_summary.provider_note = None
+            scheduler._shadow_pd_summary.provider_readiness = None
+            scheduler._shadow_pd_summary.dispatch_parity = None
+
+            preview = scheduler._build_shadow_readiness_preview()
+
+            # runtime_facts must appear as TOP-LEVEL key in preview
+            assert "runtime_facts" in preview, "runtime_facts must be top-level key in preview"
+            rf = preview["runtime_facts"]
+            assert rf["runtime_current_model"] == "hermes"
+            assert rf["runtime_is_loaded"] is True
+            assert rf["runtime_initialized"] is True
+            assert rf["runtime_fact_stability"] == "STABLE"
+        finally:
+            if original is not None:
+                os.environ["HLEDAC_RUNTIME_MODE"] = original
+            else:
+                os.environ.pop("HLEDAC_RUNTIME_MODE", None)
+
+    def test_preview_runtime_facts_and_provider_readiness_are_independent(self):
+        """runtime_facts top-level and provider_readiness coexist as independent sections."""
+        import os
+        original = os.environ.get("HLEDAC_RUNTIME_MODE")
+        try:
+            os.environ["HLEDAC_RUNTIME_MODE"] = "scheduler_shadow"
+
+            scheduler = SprintScheduler(SprintSchedulerConfig())
+            scheduler._lc_adapter = MagicMock()
+            scheduler._lc_adapter._lc = MagicMock()
+            scheduler._synthesis_engine = "test-engine"
+
+            from hledac.universal.runtime.shadow_pre_decision import (
+                PreDecisionSummary,
+                ProviderReadinessPreview,
+            )
+            from hledac.universal.runtime.shadow_inputs import ProviderRuntimeFactsBundle
+
+            # runtime_facts at top level (COMPAT stability)
+            fake_runtime_facts = ProviderRuntimeFactsBundle(
+                current_model="modernbert",
+                is_loaded=True,
+                initialized=False,
+                fact_stability="COMPAT",
+            )
+
+            # provider_readiness is a separate section
+            fake_provider_readiness = ProviderReadinessPreview(
+                has_recommendation=True,
+                recommendation="hermes",
+                readiness="ready",
+                lifecycle_ready=True,
+                control_ready=True,
+                thermal_safe=True,
+                has_facts=True,
+                blockers=[],
+                unknowns=[],
+                next_phase_hint=None,
+                deferred_reasons=[],
+                runtime_loaded=True,
+                runtime_current_model="hermes",
+                runtime_initialized=True,
+            )
+
+            scheduler._shadow_pd_summary = PreDecisionSummary(
+                parity_timestamp_monotonic=0.0,
+                parity_timestamp_wall="2026-04-02T00:00:00",
+                runtime_mode="scheduler_shadow",
+                lifecycle=MagicMock(),
+                graph=MagicMock(),
+                export_readiness=MagicMock(),
+                model_control=MagicMock(),
+                precursors=MagicMock(),
+                diff_taxonomy=[],
+                blockers=[],
+                unknowns=[],
+                mismatch_reasons={},
+                runtime_facts=fake_runtime_facts,
+                provider_readiness=fake_provider_readiness,
+            )
+            # Set minimal mock attributes
+            scheduler._shadow_pd_summary.lifecycle.workflow_phase = "ACTIVE"
+            scheduler._shadow_pd_summary.lifecycle.is_active = True
+            scheduler._shadow_pd_summary.lifecycle.is_windup = False
+            scheduler._shadow_pd_summary.lifecycle.can_accept_work = True
+            scheduler._shadow_pd_summary.lifecycle.should_prune = False
+            scheduler._shadow_pd_summary.lifecycle.phase_conflict = False
+            scheduler._shadow_pd_summary.graph.backend = "duckpgq"
+            scheduler._shadow_pd_summary.graph.readiness = "ready"
+            scheduler._shadow_pd_summary.graph.nodes = 10
+            scheduler._shadow_pd_summary.graph.edges = 5
+            scheduler._shadow_pd_summary.export_readiness.readiness = "ready"
+            scheduler._shadow_pd_summary.export_readiness.synthesis_engine = "hermes"
+            scheduler._shadow_pd_summary.model_control.readiness = "ready"
+            scheduler._shadow_pd_summary.model_control.tools_count = 3
+            scheduler._shadow_pd_summary.diff_taxonomy = []
+            scheduler._shadow_pd_summary.blockers = []
+            scheduler._shadow_pd_summary.unknowns = []
+            scheduler._shadow_pd_summary.compat_seams = []
+            scheduler._shadow_pd_summary.decision_gate = None
+            scheduler._shadow_pd_summary.tool_readiness = None
+            scheduler._shadow_pd_summary.windup_readiness = None
+            scheduler._shadow_pd_summary.provider_note = None
+            scheduler._shadow_pd_summary.dispatch_parity = None
+
+            preview = scheduler._build_shadow_readiness_preview()
+
+            # Both sections exist independently
+            assert "runtime_facts" in preview
+            assert "provider_readiness" in preview
+
+            # Top-level runtime_facts has COMPAT stability and modernbert
+            rf = preview["runtime_facts"]
+            assert rf["runtime_fact_stability"] == "COMPAT"
+            assert rf["runtime_current_model"] == "modernbert"
+
+            # provider_readiness has its own readiness classification
+            pr = preview["provider_readiness"]
+            assert pr["readiness"] == "ready"
+            assert pr["has_recommendation"] is True
+            assert pr["lifecycle_ready"] is True
+        finally:
+            if original is not None:
+                os.environ["HLEDAC_RUNTIME_MODE"] = original
+            else:
+                os.environ.pop("HLEDAC_RUNTIME_MODE", None)

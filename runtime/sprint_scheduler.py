@@ -1592,9 +1592,18 @@ class SprintScheduler:
             return None
 
         # Sprint F3.13: Collect provider runtime facts (read-only)
-        # model_manager is not available in SprintScheduler — runtime_facts will be UNKNOWN
+        # COMPAT path: get_model_lifecycle_status() reads _lifecycle_state module shadow-state
+        # The lifecycle_status dict is passed through to collect_provider_runtime_facts()
+        # which derives STABLE/COMPAT/UNKNOWN stability from the inputs.
+        # STABLE path would require ModelManager injection (not yet available;
+        # COMPAT is sufficient for diagnostic purposes).
         try:
-            runtime_facts = collect_provider_runtime_facts(model_manager=None)
+            from brain.model_lifecycle import get_model_lifecycle_status
+            lifecycle_status = get_model_lifecycle_status()
+        except Exception:
+            lifecycle_status = None
+        try:
+            runtime_facts = collect_provider_runtime_facts(model_manager=None, lifecycle_status=lifecycle_status)
         except Exception:
             from hledac.universal.runtime.shadow_inputs import ProviderRuntimeFactsBundle
             runtime_facts = ProviderRuntimeFactsBundle()
@@ -1663,6 +1672,30 @@ class SprintScheduler:
                 control_mode=ctrl_mode,
                 registry_tools=registry.list_tools() if registry else None,
             )
+
+            # Sprint F9: Attach execution context readiness (capability/correlation/audit separation)
+            # This is READ-ONLY — does not call execute_with_limits or activate anything
+            try:
+                from hledac.universal.runtime.shadow_pre_decision import (
+                    build_execution_context_readiness,
+                )
+                # Correlation context from scheduler run (run_id present in sprint context)
+                correlation_context: Optional[Dict[str, Any]] = None
+                if hasattr(self, "_run_id") and self._run_id:
+                    correlation_context = {"run_id": self._run_id}
+
+                exec_logger_available = hasattr(self, "_tool_exec_logger") and self._tool_exec_logger is not None
+
+                execution_context = build_execution_context_readiness(
+                    dispatch_preview=dispatch_preview,
+                    correlation_context=correlation_context,
+                    exec_logger_available=exec_logger_available,
+                )
+                dispatch_preview.execution_context = execution_context
+            except Exception:
+                # Execution context unavailable — skip, this is diagnostic only
+                pass
+
             pd_summary.dispatch_parity = dispatch_preview
         except Exception:
             # Dispatch preview unavailable — skip, this is diagnostic only
@@ -1827,6 +1860,26 @@ class SprintScheduler:
                 "control_mode": pd.dispatch_parity.control_mode,
             }
 
+            # Sprint F9: Execution context readiness — separated capability/correlation/audit
+            # Exposed as separate section for clarity and future F9 cutover readiness
+            if pd.dispatch_parity.execution_context is not None:
+                ec = pd.dispatch_parity.execution_context
+                result["execution_context"] = {
+                    "capability_ready": ec.capability_ready,
+                    "capability_missing": ec.capability_missing,
+                    "correlation_ready": ec.correlation_ready,
+                    "run_id_present": ec.run_id_present,
+                    "branch_id_present": ec.branch_id_present,
+                    "provider_id_present": ec.provider_id_present,
+                    "action_id_present": ec.action_id_present,
+                    "correlation_note": ec.correlation_note,
+                    "audit_ready": ec.audit_ready,
+                    "exec_logger_note": ec.exec_logger_note,
+                    "canonical_tool_dispatch": ec.canonical_tool_dispatch,
+                    "runtime_only_compat_dispatch": ec.runtime_only_compat_dispatch,
+                    "blocker_matrix": ec.blocker_matrix,
+                }
+
         # Sprint F3.5-F3.6: Provider readiness preview — diagnostic only, no activation
         if pd.provider_readiness is not None:
             result["provider_readiness"] = {
@@ -1842,6 +1895,14 @@ class SprintScheduler:
                 "next_phase_hint": pd.provider_readiness.next_phase_hint,
                 "deferred_reasons": pd.provider_readiness.deferred_reasons,
             }
+
+        # Sprint F3.13: Provider runtime facts — standalone top-level section
+        # Exposes runtime_facts bundle directly for diagnostic access and downstream sprints.
+        # This is distinct from provider_readiness.runtime_* fields which are embedded
+        # per-dimension facts. The top-level runtime_facts provides the full bundle
+        # for cases where the complete fact set is needed.
+        if pd.runtime_facts is not None:
+            result["runtime_facts"] = pd.runtime_facts.to_dict()
 
         return result
 

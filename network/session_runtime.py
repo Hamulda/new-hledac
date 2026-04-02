@@ -65,11 +65,15 @@ TOR_READ_TIMEOUT_S: float = 75.0
 #     - fetching/public_fetcher.py — passive text/HTML fetcher (active consumer)
 #     - pipeline/live_feed_pipeline.py:_fetch_article_text() — article fallback seam
 #
-#   PROXY BLOCKER: PaywallBypass and DarknetConnector CANNOT migrate to shared surface
-#   without ProxyConnector support (SOCKS5). MA-1 and MA-2 are BLOCKED by design.
-#   Both use aiohttp_socks ProxyConnector for archive.is/12ft.io and Tor/I2P:
-#     - PaywallBypass: archive.is/12ft.io via SOCKS5 (own pool, limit=10, limit_per_host=3)
-#     - DarknetConnector: Tor SOCKS5 (9050) + I2P SOCKS5 (per-request sessions)
+#   PROXY BLOCKER: DarknetConnector CANNOT migrate to shared surface
+#   without ProxyConnector support (SOCKS5). MA-2 is BLOCKED by design.
+#   DarknetConnector uses aiohttp_socks ProxyConnector for Tor SOCKS5 (9050)
+#   and I2P SOCKS5 (4444) — incompatible with plain TCPConnector.
+#
+#   PaywallBypass is DEFERRED (not BLOCKED): it uses plain aiohttp.TCPConnector
+#   (no SOCKS5) — same connector type as shared surface, but own pool with
+#   different limits (limit=10, limit_per_host=3) and own session lifecycle.
+#   Could theoretically share surface after redesign, but not worth the cost.
 #   See AUDIT_SOURCE_TRANSPORT_SESSION.md §PROXY_BLOCKER.
 #
 #   NOT redirected to shared surface:

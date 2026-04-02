@@ -1657,6 +1657,59 @@ class ToolCapabilityGap:
 
 
 @dataclass
+class ExecutionContextReadiness:
+    """
+    Execution context readiness — DIAGNOSTIC ONLY.
+
+    Separované readiness pro tři dimenze:
+    1. Capability readiness — zda jsou available_capabilities dostatečné
+    2. Correlation readiness — zda scheduler má korelační klíče
+    3. Audit readiness — zda je exec_logger dostupný
+
+    Všechny tři dimenze musí být "ready" pro canonical execute_with_limits call.
+    """
+    # Capability readiness
+    capability_ready: bool
+    capability_missing: List[str]  # seznam chybějících capabilities
+
+    # Correlation readiness (scheduler-side)
+    correlation_ready: bool
+    run_id_present: bool
+    branch_id_present: bool
+    provider_id_present: bool
+    action_id_present: bool
+    correlation_note: str  # lidsky čitelný stav
+
+    # Audit readiness
+    audit_ready: bool  # exec_logger present v scheduler kontextu
+    exec_logger_note: str  # lidsky čitelný stav
+
+    # Canonical dispatch classification (čistá oddělenost)
+    canonical_tool_dispatch: bool  # True pokud všichni kandidáti mají ToolRegistry mapping
+    runtime_only_compat_dispatch: bool  # True pokud všichni kandidáti jsou runtime_only
+
+    # Blokery pro canonical execute_with_limits call
+    blocker_matrix: Dict[str, str]  # tool_name → blocker reason
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "capability_ready": self.capability_ready,
+            "capability_missing": self.capability_missing,
+            "correlation_ready": self.correlation_ready,
+            "run_id_present": self.run_id_present,
+            "branch_id_present": self.branch_id_present,
+            "provider_id_present": self.provider_id_present,
+            "action_id_present": self.action_id_present,
+            "correlation_note": self.correlation_note,
+            "audit_ready": self.audit_ready,
+            "exec_logger_note": self.exec_logger_note,
+            "canonical_tool_dispatch": self.canonical_tool_dispatch,
+            "runtime_only_compat_dispatch": self.runtime_only_compat_dispatch,
+            "blocker_matrix": self.blocker_matrix,
+        }
+
+
+@dataclass
 class DispatchReadinessPreview:
     """
     Dispatch readiness preview — DIAGNOSTIC ONLY.
@@ -1703,6 +1756,9 @@ class DispatchReadinessPreview:
     satisfied_count: int
     blocked_count: int
 
+    # Sprint F9: Execution context readiness (separované capability/correlation/audit)
+    execution_context: Optional[ExecutionContextReadiness] = None
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "readiness": self.readiness,
@@ -1730,7 +1786,109 @@ class DispatchReadinessPreview:
             "runtime_only_count": self.runtime_only_count,
             "satisfied_count": self.satisfied_count,
             "blocked_count": self.blocked_count,
+            "execution_context": self.execution_context.to_dict() if self.execution_context else None,
         }
+
+
+def build_execution_context_readiness(
+    dispatch_preview: DispatchReadinessPreview,
+    correlation_context: Optional[Dict[str, Any]] = None,
+    exec_logger_available: bool = False,
+) -> ExecutionContextReadiness:
+    """
+    Build execution context readiness z DispatchReadinessPreview — DIAGNOSTIC ONLY.
+
+    Rozkládá readiness na tři oddělené dimenze:
+    1. Capability readiness — zda jsou available_capabilities dostatečné
+    2. Correlation readiness — zda scheduler má korelační klíče
+    3. Audit readiness — zda je exec_logger dostupný
+
+    Args:
+        dispatch_preview: Výsledek preview_dispatch_parity()
+        correlation_context: Volitelný dict s korelačními klíči
+            (run_id, branch_id, provider_id, action_id)
+        exec_logger_available: Zda má scheduler přístup k ToolExecLog
+
+    Returns:
+        ExecutionContextReadiness — DIAGNOSTIC ONLY artifact
+
+    Nikdy nevola:
+    - execute_with_limits()
+    - ToolExecLog.log()
+    - Žádný dispatch
+    """
+    # 1. Capability readiness
+    capability_missing = []
+    for gap in dispatch_preview.capability_gaps.values():
+        if not gap.is_satisfied:
+            capability_missing.extend(sorted(gap.missing_capabilities))
+    capability_ready = len(capability_missing) == 0
+
+    # 2. Correlation readiness
+    run_id_present = False
+    branch_id_present = False
+    provider_id_present = False
+    action_id_present = False
+
+    if correlation_context is not None:
+        run_id_present = correlation_context.get("run_id") is not None
+        branch_id_present = correlation_context.get("branch_id") is not None
+        provider_id_present = correlation_context.get("provider_id") is not None
+        action_id_present = correlation_context.get("action_id") is not None
+
+    correlation_ready = run_id_present and branch_id_present
+
+    if correlation_context is None:
+        correlation_note = "correlation_context not provided — cannot determine readiness"
+    elif not (run_id_present or branch_id_present):
+        correlation_note = "correlation keys absent — run_id and/or branch_id missing"
+    else:
+        present = []
+        if run_id_present:
+            present.append("run_id")
+        if branch_id_present:
+            present.append("branch_id")
+        if provider_id_present:
+            present.append("provider_id")
+        if action_id_present:
+            present.append("action_id")
+        correlation_note = f"correlation ready — present: {', '.join(present)}"
+
+    # 3. Audit readiness
+    if exec_logger_available:
+        audit_ready = True
+        exec_logger_note = "exec_logger available — audit logging possible"
+    else:
+        audit_ready = False
+        exec_logger_note = "exec_logger not available — audit logging not possible (not an error for diagnostic mode)"
+
+    # 4. Canonical dispatch classification
+    canonical_tool_dispatch = dispatch_preview.dispatch_path == "canonical_tool"
+    runtime_only_compat_dispatch = dispatch_preview.dispatch_path == "runtime_only_compat"
+
+    # 5. Blocker matrix
+    blocker_matrix: Dict[str, str] = {}
+    for tool_name, gap in dispatch_preview.capability_gaps.items():
+        if not gap.is_satisfied:
+            blocker_matrix[tool_name] = f"missing capabilities: {sorted(gap.missing_capabilities)}"
+    for handler in dispatch_preview.runtime_only_handlers:
+        blocker_matrix[handler] = "runtime_only_compat_dispatch — no canonical tool mapping"
+
+    return ExecutionContextReadiness(
+        capability_ready=capability_ready,
+        capability_missing=capability_missing,
+        correlation_ready=correlation_ready,
+        run_id_present=run_id_present,
+        branch_id_present=branch_id_present,
+        provider_id_present=provider_id_present,
+        action_id_present=action_id_present,
+        correlation_note=correlation_note,
+        audit_ready=audit_ready,
+        exec_logger_note=exec_logger_note,
+        canonical_tool_dispatch=canonical_tool_dispatch,
+        runtime_only_compat_dispatch=runtime_only_compat_dispatch,
+        blocker_matrix=blocker_matrix,
+    )
 
 
 def preview_dispatch_parity(
@@ -1869,6 +2027,7 @@ def preview_dispatch_parity(
         runtime_only_count=len(runtime_only_handlers),
         satisfied_count=len(satisfied_tools),
         blocked_count=len(blocked_tools),
+        execution_context=None,  # F9: Attach via build_execution_context_readiness() separately
     )
 
 
@@ -1877,6 +2036,7 @@ def preview_dispatch_parity(
 # =============================================================================
 
 if TYPE_CHECKING:
+    from typing import Any
     from .shadow_parity import ParityArtifact
     from .shadow_inputs import ProviderRuntimeFactsBundle
     from ..tool_registry import Tool

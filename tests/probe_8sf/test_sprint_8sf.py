@@ -463,15 +463,17 @@ class TestProxyBlocker:
         assert "socks5" not in src.lower()
 
     def test_ma_blocked_by_proxy_design(self):
-        """[SF-17] MA-1 and MA-2 are BLOCKED by proxy incompatibility (documented in audit)."""
+        """[SF-17] MA-2 is BLOCKED, MA-1 is DEFERRED — proxy design reality."""
         import pathlib
         audit_path = pathlib.Path(__file__).parents[4] / "AUDIT_SOURCE_TRANSPORT_SESSION.md"
         if audit_path.exists():
             content = audit_path.read_text()
-            # Proxy blocker is documented
-            assert "PROXY BLOCKER" in content or "proxy design gap" in content.lower()
-            # MA-1 and MA-2 are marked BLOCKED
+            # MA-2 (DarknetConnector) is BLOCKED — SOCKS5 incompatibility
             assert "BLOCKED" in content
+            # MA-1 (PaywallBypass) is DEFERRED — plain TCPConnector, not blocked
+            assert "DEFERRED" in content
+            # DarknetConnector uses ProxyConnector — confirmed
+            assert "ProxyConnector" in content
 
 
 # =============================================================================
