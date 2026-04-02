@@ -800,6 +800,75 @@ class UniversalSecurityCoordinator(UniversalCoordinator):
                 'text': text
             }
 
+    # ========================================================================
+    # F10 — Early Privacy Gate Seam (outbound content path)
+    # ========================================================================
+
+    async def sanitize_outbound(
+        self,
+        content: str,
+        force_fallback: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Early privacy gate for outbound content.
+
+        F10 canonical seam: applies sanitization ONLY at boundary points
+        where content leaves the system (outbound, export, persistence).
+
+        This is NOT applied to internal paths — only at explicit exit points.
+
+        Args:
+            content: Content to sanitize before outbound delivery
+            force_fallback: If True, use fallback_sanitize (10KB bound, no ML)
+
+        Returns:
+            Sanitized content with gate metadata
+        """
+        from ..security.pii_gate import (
+            SecurityGate,
+            fallback_sanitize,
+            quick_sanitize,
+        )
+
+        try:
+            if force_fallback:
+                # Bounded fallback: 10KB max, no ML dependency
+                sanitized = fallback_sanitize(content[:10000] if len(content) > 10000 else content)
+                return {
+                    'success': True,
+                    'sanitized': sanitized,
+                    'method': 'fallback',
+                    'gate': 'early_privacy',
+                    'boundary': 'outbound',
+                    'truncated': len(content) > 10000,
+                    'original_length': len(content),
+                }
+            else:
+                gate = SecurityGate()
+                result = gate.sanitize(content, mask_pii=True, return_matches=False)
+                return {
+                    'success': True,
+                    'sanitized': result.sanitized_text,
+                    'method': 'security_gate',
+                    'gate': 'early_privacy',
+                    'boundary': 'outbound',
+                    'pii_count': result.pii_count,
+                    'risk_level': result.risk_level,
+                }
+        except Exception as e:
+            # Fail-safe: fallback always applied on error
+            sanitized = fallback_sanitize(content[:10000] if len(content) > 10000 else content)
+            return {
+                'success': True,
+                'sanitized': sanitized,
+                'method': 'fallback_on_error',
+                'gate': 'early_privacy',
+                'boundary': 'outbound',
+                'error': str(e),
+                'truncated': len(content) > 10000,
+                'original_length': len(content),
+            }
+
     async def enable_stealth_mode(
         self,
         level: str = "medium"

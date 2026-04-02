@@ -31,6 +31,13 @@ logger = logging.getLogger(__name__)
 
 
 class LootManager:
+    """
+    Encrypted vault export manager.
+
+    Canonical name: VaultManager (alias below).
+    LootManager is the operational name for historical reasons.
+    """
+
     def __init__(self, vault_path: str):
         self.vault_path = Path(vault_path)
         self._use_fallback = not (CRYPTO_AVAILABLE or PYZIPPER_AVAILABLE)
@@ -318,3 +325,11 @@ class LootManager:
         except Exception as e:
             logger.error(f"Fallback decryption failed: {e}")
             return None
+
+
+# =============================================================================
+# ALIAS — Authority clarity
+# =============================================================================
+# "LootManager" evokes loot/stolen goods, not secure vault export.
+# VaultManager is the semantically correct name; LootManager preserved for compat.
+VaultManager = LootManager

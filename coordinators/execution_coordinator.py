@@ -49,7 +49,32 @@ class ExecutionTask:
 
 @dataclass
 class ExecutionResult:
-    """Result of task execution."""
+    """
+    Result of task execution.
+
+    NON-CANONICAL LOCAL SCAFFOLD (Sprint 8VF):
+    ════════════════════════════════════════════════
+    This dataclass is a LOCAL scaffold — it does NOT belong to the
+    canonical types.py scaffold surface.
+
+    RELATIONSHIP TO CANONICAL:
+    - Canonical ExecutionResult is types.py:1441 (ExecutionResult with slots=True)
+    - This local version exists because execution_coordinator owns its own
+      task result model independently of the canonical handoff pipeline
+    - The two are NOT aligned — field names differ
+
+    BOUNDARY RULE (Sprint 8VF):
+    - execution_coordinator may use this local type internally
+    - Any CROSS-COMPONENT handoff that carries execution state to another
+      component (e.g. analyzer→router, windup→export) MUST use the canonical
+      types.py ExecutionResult, not this one
+
+    MIGRATION CONDITION:
+    When execution_coordinator is refactored to pass typed handoffs through
+    the canonical pipeline, this local ExecutionResult becomes redundant.
+
+    See: types.py CANONICAL SCAFFOLD header (line 1269)
+    """
     task_id: str
     success: bool
     summary: str

@@ -7,6 +7,26 @@ Implementuje 14+ akcí pro deep research:
 - RESEARCH_PAPER, DEEP_RESEARCH, DEEP_READ
 - ANSWER, CRACK, ERROR
 - ARCHIVE_FALLBACK, FACT_CHECK, STEALTH_HARVEST, OSINT_DISCOVERY
+
+Sprint 8VF BRIDGE SEAM:
+═══════════════════════════════════════════════════════════════
+GhostExecutor je DONOR/COMPAT vrstva — není canonical authority.
+Canonical authority: ToolRegistry.execute_with_limits()
+
+Tento soubor obsahuje THIN TYPED BRIDGE SEAM pro budoucí cutover:
+- _ACTION_TO_CANONICAL_TOOL: read-only mapping Ghost akce → canonical tool name
+- GhostBridge.to_execution_request(): Ghost params → ExecutionRequest
+- GhostBridge.to_execution_result(): Ghost ActionResult → ExecutionResult
+
+BRIDGE je READ-SIDE ADAPTER — nemění GhostExecutor.execute() path.
+BRIDGE nevolá ToolRegistry.execute_with_limits() — jen typovou konverzi.
+
+REMOVAL CONDITION:
+Až všechny Ghost akce (SCAN, GOOGLE, DEEP_READ, STEALTH_HARVEST,
+OSINT_DISCOVERY, atd.) budou migrovány do ToolRegistry jako proper
+Tool handlery, GhostExecutor se stane kandidátem na deprecation.
+Do té doby zůstává donor/compat vrstvou s tímto bridge seamem.
+═══════════════════════════════════════════════════════════════
 """
 
 from __future__ import annotations
@@ -15,13 +35,35 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..types import ExecutionRequest, ExecutionResult, RunCorrelation
 
 logger = logging.getLogger(__name__)
 
 
 class ActionType(Enum):
-    """Typy akcí"""
+    """
+    Typy akcí.
+
+    NON-CANONICAL — DUPLICATE of types.py:119 ActionResultType.
+    Sprint 8VF: This enum is a LOCAL scaffold in the Ghost layer.
+    It is NOT the canonical action taxonomy.
+
+    The canonical ActionResultType enum lives in types.py:42.
+    GhostExecutor uses this local enum because its action handlers
+    predate the canonical scaffold.
+
+    BRIDGE NOTE (Sprint 8VF):
+    GhostBridge._ACTION_TO_CANONICAL_TOOL provides a read-only mapping
+    from this local enum to canonical tool names.
+
+    MIGRATION: When all Ghost actions migrate to ToolRegistry, this enum
+    becomes deprecated in favor of types.py ActionResultType.
+
+    See: types.py CANONICAL SCAFFOLD header (line 1269)
+    """
     SCAN = "scan"
     GOOGLE = "google"
     DOWNLOAD = "download"
@@ -49,14 +91,169 @@ class ActionResult:
     action: str
     data: Dict[str, Any]
     error: Optional[str] = None
-    
+    execution_time: float = 0.0
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "success": self.success,
             "action": self.action,
             "data": self.data,
             "error": self.error,
+            "execution_time": self.execution_time,
         }
+
+
+# =============================================================================
+# Sprint 8VF: Thin Typed Bridge Seam
+# =============================================================================
+# READ-SIDE ADAPTER — nemění GhostExecutor.execute() path
+# Pouze typová konverze mezi Ghost světem a canonical ExecutionRequest/ExecutionResult
+# Neprodukuje side effects, nevolá ToolRegistry.execute_with_limits()
+# =============================================================================
+
+# Sprint 8VF: Read-only action → canonical tool name mapping
+# DIAGNOSTIC ONLY — používá se v bridge adaptéru pro typovou konverzi
+# Nenahrazuje get_task_handler() v runtime dispatch
+_ACTION_TO_CANONICAL_TOOL: Dict[str, str] = {
+    # Ghost akce → ToolRegistry tool name (pokud existuje ekvivalent)
+    ActionType.SEARCH.value: "web_search",
+    ActionType.GOOGLE.value: "web_search",
+    ActionType.SMART_SEARCH.value: "web_search",
+    ActionType.RESEARCH_PAPER.value: "academic_search",
+    ActionType.DEEP_READ.value: "file_read",  # Částečná shoda — file_read čte obsah
+    # Akce bez ToolRegistry ekvivalentu — zůstávají jako runtime_only_compat
+    ActionType.SCAN.value: "",  # runtime_only_compat
+    ActionType.DOWNLOAD.value: "",  # runtime_only_compat
+    ActionType.MEMORIZE.value: "",  # runtime_only_compat
+    ActionType.PROBE.value: "",  # runtime_only_compat
+    ActionType.TRACK.value: "",  # runtime_only_compat
+    ActionType.DEEP_RESEARCH.value: "",  # runtime_only_compat
+    ActionType.ANSWER.value: "",  # runtime_only_compat
+    ActionType.CRACK.value: "",  # runtime_only_compat
+    ActionType.ERROR.value: "",  # runtime_only_compat
+    ActionType.ARCHIVE_FALLBACK.value: "",  # runtime_only_compat
+    ActionType.FACT_CHECK.value: "",  # runtime_only_compat
+    ActionType.STEALTH_HARVEST.value: "",  # runtime_only_compat
+    ActionType.OSINT_DISCOVERY.value: "",  # runtime_only_compat
+}
+
+
+class GhostBridge:
+    """
+    Sprint 8VF: Thin typed bridge — READ-SIDE ADAPTER mezi Ghost a canonical světem.
+
+    ÚČEL:
+    - Konvertuje Ghost akce/params na ExecutionRequest bez volání ToolRegistry
+    - Konvertuje Ghost ActionResult na ExecutionResult bez side effects
+    - Poskytuje read-only metadata pro dispatch parity preview
+
+    CO NENÍ:
+    - Není nový execution framework
+    - Nemění GhostExecutor.execute() path
+    - Nevolá ToolRegistry.execute_with_limits()
+    - Neprodukuje side effects
+
+    INVARIANTS:
+    - execute_with_limits() zůstává jediný canonical execution-control surface
+    - GhostExecutor zůstává donor/compat
+    - Bridge je read-side adapter, ne execution authority
+
+    REMOVAL CONDITION:
+    Až všechny Ghost akce migrují do ToolRegistry, bridge zůstává
+    jako backward-compat pro existující volající kód.
+    """
+
+    @staticmethod
+    def action_has_canonical_tool(action: str) -> bool:
+        """
+        Vrátí True pokud Ghost akce má mapping na ToolRegistry tool.
+
+        DIAGNOSTIC ONLY — čte z _ACTION_TO_CANONICAL_TOOL.
+        """
+        canonical = _ACTION_TO_CANONICAL_TOOL.get(action, "")
+        return bool(canonical)
+
+    @staticmethod
+    def get_canonical_tool_name(action: str) -> str:
+        """
+        Vrátí canonical tool name pro Ghost akci, nebo prázdný string.
+
+        DIAGNOSTIC ONLY — read-only mapping lookup.
+        """
+        return _ACTION_TO_CANONICAL_TOOL.get(action, "")
+
+    @staticmethod
+    def to_execution_request(
+        action: str,
+        params: Dict[str, Any],
+        priority: int = 5,
+        correlation: Optional["RunCorrelation"] = None,
+    ) -> "ExecutionRequest":
+        """
+        Konvertuje Ghost akci + params na canonical ExecutionRequest.
+
+        TOTO JE TYPOVÁ KONVERZE — žádné volání ToolRegistry.execute_with_limits().
+        Výsledný ExecutionRequest lze předat do ToolRegistry.execute_with_limits()
+        v budoucím cutover kroku.
+
+        Args:
+            action: Ghost ActionType string (např. "google", "deep_read")
+            params: Parametry akce
+            priority: Execution priority (1-10, lower = higher priority)
+            correlation: Optional run correlation context
+
+        Returns:
+            ExecutionRequest — canonical typed request
+
+        NOTE: Tato funkce neověřuje, zda action má canonical tool mapping.
+        Použij action_has_canonical_tool() pro diagnostiku před konverzí.
+        """
+        from ..types import ExecutionRequest as _ExecReq
+        return _ExecReq(
+            action_type=action,
+            parameters=params,
+            priority=priority,
+            correlation=correlation,
+        )
+
+    @staticmethod
+    def to_execution_result(
+        ghost_result: ActionResult,
+        correlation: Optional["RunCorrelation"] = None,
+    ) -> "ExecutionResult":
+        """
+        Konvertuje Ghost ActionResult na canonical ExecutionResult.
+
+        TOTO JE TYPOVÁ KONVERZE — žádné side effects.
+
+        Args:
+            ghost_result: Ghost ActionResult z execute()
+            correlation: Optional run correlation (echoed from request)
+
+        Returns:
+            ExecutionResult — canonical typed result
+
+        NOTE: execution_time je echo zpět z GhostResult, nemeasured
+        canonical execution time (protože Ghost nevolá execute_with_limits).
+        """
+        from ..types import ExecutionResult as _ExecRes
+        return _ExecRes(
+            action_type=ghost_result.action,
+            success=ghost_result.success,
+            data=ghost_result.data,
+            execution_time=ghost_result.execution_time,
+            error=ghost_result.error,
+            correlation=correlation,
+        )
+
+    @staticmethod
+    def get_action_canonical_tool_mapping() -> Dict[str, str]:
+        """
+        Vrátí kopii read-only _ACTION_TO_CANONICAL_TOOL mappingu.
+
+        DIAGNOSTIC ONLY — pro dispatch parity preview a audit.
+        """
+        return dict(_ACTION_TO_CANONICAL_TOOL)
 
 
 class GhostExecutor:
