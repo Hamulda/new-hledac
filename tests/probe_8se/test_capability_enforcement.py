@@ -808,5 +808,334 @@ class TestBypassDebtMatrix:
         assert len(cap_warnings) >= 1
 
 
+class TestF9ExecutionPlaneContainment:
+    """
+    Sprint F9: Execution Plane Containment Tests.
+
+    These tests verify execution-plane containment WITHOUT:
+    - Real production wiring to scheduler
+    - execute_with_limits cutover
+    - GhostExecutor migration
+    - New execution framework
+
+    Tests verify:
+    - GhostExecutor is donor/compat, NOT canonical
+    - ToolRegistry remains canonical execution-control surface
+    - ToolExecLog remains audit boundary
+    - Correlation seam is explicit and bounded
+    - No new execution framework exists
+    - No hidden scheduler wiring
+    - No false authority merge between ActionType and Tool worlds
+    """
+
+    def test_ghost_executor_is_donor_compat_not_canonical(self):
+        """
+        GhostExecutor is DONOR/COMPAT backend, NOT canonical execution authority.
+
+        Evidence:
+        - Uses ActionType enum (NOT Tool model)
+        - Has own _actions dict (NOT _tools registry)
+        - execute() is separate from ToolRegistry.execute_with_limits()
+        - Docstring explicitly states "DONOR/COMPAT"
+        """
+        from hledac.universal.execution.ghost_executor import GhostExecutor, ActionType
+
+        executor = GhostExecutor()
+
+        # ActionType enum exists (NOT Tool model)
+        assert hasattr(ActionType, "SCAN")
+        assert hasattr(ActionType, "DEEP_READ")
+        assert hasattr(ActionType, "STEALTH_HARVEST")
+
+        # _actions dict contains ActionType values
+        assert "scan" in executor._actions
+        assert "deep_read" in executor._actions
+        assert "stealth_harvest" in executor._actions
+
+        # No _tools attribute (that belongs to ToolRegistry)
+        assert not hasattr(executor, "_tools")
+
+        # Docstring confirms donor/compat role
+        docstring = executor.__doc__ or ""
+        assert "DONOR" in docstring
+        assert "COMPAT" in docstring
+
+    def test_ghost_executor_does_not_call_tool_registry(self):
+        """
+        GhostExecutor.execute() does NOT call ToolRegistry.execute_with_limits().
+
+        This is a SEPARATE execution path — important for containment.
+        """
+        from hledac.universal.execution.ghost_executor import GhostExecutor
+        import inspect
+
+        # Check execute method source doesn't reference ToolRegistry
+        source = inspect.getsource(GhostExecutor.execute)
+
+        # execute() should NOT call ToolRegistry.execute_with_limits
+        assert "execute_with_limits" not in source
+        assert "ToolRegistry" not in source
+
+    def test_tool_registry_remain_canonical_execution_surface(self):
+        """
+        ToolRegistry.execute_with_limits() remains the ONLY canonical execution surface.
+
+        No new execution framework was created.
+        """
+        from hledac.universal.tool_registry import ToolRegistry, create_default_registry
+
+        registry = create_default_registry()
+
+        # Only execute_with_limits is canonical (no execute() method)
+        assert hasattr(registry, "execute_with_limits")
+        assert not hasattr(registry, "execute")
+
+        # ToolRegistry class has execute_with_limits
+        assert hasattr(ToolRegistry, "execute_with_limits")
+
+        # No parallel execution authority
+        assert not hasattr(registry, "execute_async")
+        assert not hasattr(registry, "execute_tool")
+
+    def test_tool_exec_log_audit_boundary_unchanged(self):
+        """
+        ToolExecLog remains AUDIT boundary — does NOT execute tools.
+
+        Evidence:
+        - Has log() method, NOT execute_with_limits
+        - Stores hashes, NOT raw payloads
+        - correlation dict storage only
+        """
+        from hledac.universal.tool_exec_log import ToolExecLog
+        from pathlib import Path
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = ToolExecLog(run_dir=Path(tmpdir), enable_persist=False)
+
+            # Has audit method, NOT execution method
+            assert hasattr(logger, "log")
+            assert not hasattr(logger, "execute_with_limits")
+            assert not hasattr(logger, "execute")
+
+            # Log stores hashes, not raw data
+            event = logger.log(
+                tool_name="test",
+                input_data=b"raw sensitive data",
+                output_data=b"result",
+                status="success",
+            )
+            # input_hash is SHA256, NOT the raw data
+            assert event.input_hash != "raw sensitive data"
+            assert len(event.input_hash) == 64  # SHA256 hex length
+
+    def test_correlation_seam_explicit_and_bounded(self):
+        """
+        Correlation seam is explicit: caller → execute_with_limits → exec_logger.log → ToolExecEvent.
+
+        No hidden correlation creation — keys come from call-site.
+        """
+        from hledac.universal.tool_registry import create_default_registry
+        from hledac.universal.tool_exec_log import ToolExecLog
+        from pathlib import Path
+        import tempfile
+        from unittest.mock import MagicMock
+
+        registry = create_default_registry()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger = ToolExecLog(run_dir=Path(tmpdir), enable_persist=False)
+
+            correlation = {
+                "run_id": "sprint-123",
+                "branch_id": "branch-a",
+                "provider_id": "mlx",
+                "action_id": "act-456",
+            }
+
+            # Capture the logged event
+            original_log = logger.log
+            logged_event = None
+            def capture_log(*args, **kwargs):
+                nonlocal logged_event
+                logged_event = original_log(*args, **kwargs)
+                return logged_event
+            logger.log = capture_log
+
+            # execute_with_limits passes correlation through
+            import asyncio
+            asyncio.get_event_loop().run_until_complete(
+                registry.execute_with_limits(
+                    "entity_extraction",
+                    {"text": "test", "entity_types": []},
+                    available_capabilities={"entity_linking"},
+                    exec_logger=logger,
+                    correlation=correlation,
+                )
+            )
+
+            # Correlation was stored exactly as passed
+            assert logged_event.correlation == correlation
+            assert logged_event.correlation["run_id"] == "sprint-123"
+
+    def test_no_new_execution_framework(self):
+        """
+        NO new execution framework was created.
+
+        Evidence:
+        - ToolRegistry.execute_with_limits signature unchanged (plus optional params)
+        - exec_logger is optional side-effect, not execution authority
+        - No new entry points added
+        """
+        from hledac.universal.tool_registry import create_default_registry
+        import inspect
+
+        registry = create_default_registry()
+
+        # Only execute_with_limits is canonical entry point
+        assert hasattr(registry, "execute_with_limits")
+
+        # Signature has optional exec_logger and correlation (not new required params)
+        sig = inspect.signature(registry.execute_with_limits)
+        params = list(sig.parameters.keys())
+
+        # All new params are optional
+        assert "exec_logger" in params
+        assert "correlation" in params
+        # Check they have defaults (optional)
+        exec_logger_param = sig.parameters["exec_logger"]
+        correlation_param = sig.parameters["correlation"]
+        assert exec_logger_param.default is None
+        assert correlation_param.default is None
+
+    def test_no_hidden_scheduler_wiring(self):
+        """
+        NO hidden scheduler wiring exists.
+
+        execute_with_limits does NOT auto-wire to SprintScheduler.
+        """
+        from hledac.universal.tool_registry import create_default_registry
+        import inspect
+
+        registry = create_default_registry()
+
+        # Check source of execute_with_limits doesn't auto-wire scheduler
+        source = inspect.getsource(registry.execute_with_limits)
+
+        # No scheduler references
+        assert "sprint_scheduler" not in source.lower()
+        assert "SprintScheduler" not in source
+        assert "run_id" not in source or "self._run_id" not in source
+
+    def test_no_false_authority_merge(self):
+        """
+        NO merge of ActionType world and Tool world.
+
+        GhostExecutor actions (ActionType) are separate from ToolRegistry tools.
+        They remain separate concerns — no false authority.
+        """
+        from hledac.universal.execution.ghost_executor import GhostExecutor, ActionType
+        from hledac.universal.tool_registry import create_default_registry
+
+        executor = GhostExecutor()
+        registry = create_default_registry()
+
+        # GhostExecutor has ActionType-based actions
+        assert ActionType.SCAN.value in executor._actions
+        assert ActionType.DEEP_READ.value in executor._actions
+
+        # ToolRegistry has Tool-based handlers
+        tool_names = {t.name for t in registry.list_tools()}
+
+        # NO overlap between ActionType values and Tool names
+        ghost_action_values = {a.value for a in ActionType}
+        overlap = ghost_action_values & tool_names
+        assert len(overlap) == 0, f"GhostExecutor actions found in ToolRegistry: {overlap}"
+
+    def test_no_new_dto_outside_types(self):
+        """
+        NO new execution-plane specific DTOs were created.
+
+        RunCorrelation already exists in types.py for correlation.
+        ExecutionContext is legacy (v1+v2), not new execution plane DTO.
+        """
+        from hledac.universal import types
+
+        # RunCorrelation exists for correlation
+        assert hasattr(types, "RunCorrelation")
+
+        # No NEW execution-plane DTOs (beyond RunCorrelation)
+        # ExecutionContext is legacy from v1+v2 (not new DTO for this plane)
+        # ToolExecContext and ExecutionControl would be new execution plane DTOs
+        assert not hasattr(types, "ToolExecContext")
+        assert not hasattr(types, "ExecutionControl")
+
+    def test_ghost_executor_migration_blockers_documented(self):
+        """
+        GhostExecutor migration blockers are explicitly documented.
+
+        These blockers prevent simple GhostExecutor → ToolRegistry migration:
+        1. Akce svázané s interními lazy-loaders
+        2. ActionType → Tool model mapping není triviální
+        3. GhostExecutor.call-sites by musely přejít
+        4. Scheduler wire je forbidden
+        """
+        from hledac.universal.execution.ghost_executor import GhostExecutor
+
+        docstring = GhostExecutor.__doc__ or ""
+
+        # REMOVAL CONDITION documented
+        assert "REMOVAL CONDITION" in docstring
+
+        # BOUNDARY SEAMS documented
+        assert "BOUNDARY SEAMS" in docstring
+        assert "ActionType" in docstring
+        assert "_actions" in docstring
+
+    def test_capability_enforcement_blocker_documented(self):
+        """
+        Capability enforcement blocker: žádné real call-sites s available_capabilities.
+
+        Všechny current call-sites používají None-skip (backward compat).
+        """
+        from hledac.universal.tool_registry import create_default_registry
+
+        registry = create_default_registry()
+
+        # exec_logger and correlation are optional (None defaults)
+        # Real call-sites don't pass them
+        tool = registry.get_tool("academic_search")
+        assert len(tool.required_capabilities) > 0
+
+        # None-skip works (backward compat)
+        import asyncio
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = asyncio.get_event_loop().run_until_complete(
+                registry.execute_with_limits(
+                    "academic_search",
+                    {"query": "test", "sources": ["arxiv"]},
+                    available_capabilities=None,  # All current call-sites do this
+                )
+            )
+            # No hard fail
+            assert result is not None
+
+    def test_tool_exec_log_blocker_real_time_flush(self):
+        """
+        Blocker: ToolExecLog nemá real-time flush.
+
+        Batch fsync (every N events) is a limitation for real-time correlation.
+        """
+        from hledac.universal.tool_exec_log import ToolExecLog
+
+        # _FSYNC_EVERY_N_EVENTS is batch-based
+        assert hasattr(ToolExecLog, "_FSYNC_EVERY_N_EVENTS")
+        assert ToolExecLog._FSYNC_EVERY_N_EVENTS == 25
+
+        # This is a documented limitation for real-time scenarios
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

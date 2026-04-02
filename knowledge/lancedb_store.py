@@ -1,6 +1,13 @@
 """
 LanceDB Identity Store - Hybrid vector + FTS search for entity resolution.
 
+ROLE: Identity/Entity Store (NOT grounding authority)
+=====================================================
+Tento modul je identity/entity store pro entity resolution.
+NENÍ owner context grounding - to je rag_engine.
+NENÍ owner document retrieval - to je rag_engine HNSWVectorIndex.
+NENÍ owner primary vector search - to je rag_engine.
+
 Provides identity stitching capabilities using LanceDB with:
 - Vector embeddings for semantic similarity
 - Full-text search (FTS) for alias matching
@@ -58,6 +65,14 @@ _DEFAULT_URI = Path(__file__).parent.parent.parent / "data" / "identity.lance"
 class LanceDBIdentityStore:
     """
     Identity store using LanceDB for entity resolution.
+
+    ROLE: Identity/Entity Store (NOT grounding authority)
+    ====================================================
+    - entity identity storage (add_entity, search_similar)
+    - NENÍ owner context grounding → rag_engine
+    - NENÍ owner document retrieval → rag_engine HNSWVectorIndex
+    - Embedding policy: MLXEmbeddingManager singleton přes _mlx_embed_manager
+    - Thermal awareness coupling: volá self._orch._memory_mgr (optional, debt)
 
     Features:
     - Hybrid search (vector + FTS)
@@ -1083,7 +1098,10 @@ class LanceDBIdentityStore:
         Returns:
             List of ranked documents.
         """
-        # Thermal + battery awareness
+        # DEBT: Thermal + battery awareness — COUPLING RISK
+        # lancedb_store volá self._orch._memory_mgr přímo.
+        # Toto je OPTIONAL coupling - store funguje i bez orchestratoru.
+        # Debt: externalizovat thermal policy do samostatné třídy.
         thermal = "NORMAL"
         on_battery = False
         try:

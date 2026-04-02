@@ -894,3 +894,132 @@ Pure function — DIAGNOSTIC ONLY, žádné activation API.
 | `runtime/sprint_scheduler.py` | Rozšířen `_build_shadow_readiness_preview()` o `provider_readiness` sekci |
 | `SHADOW_SCHEDULER_PARITY.md` | Přidána F3.12 sekce |
 | `tests/probe_8vm/test_shadow_consumer_seam.py` | Přidány testy pro `TestProviderReadinessPreview` |
+
+---
+
+## F3.13: Provider Runtime Facts Seam (Sprint F3.13)
+
+### Bird's-Eye View: Proč je runtime facts seam potřeba
+
+Provider readiness preview (F3.12) rozlišil mezi:
+- `has_recommendation` — fact o tom, že existuje `models_needed` doporučení (STABLE)
+- `has_facts` — heuristika odvozená z `models_needed` (COMPAT)
+
+Chyběl ale explicitní **runtime state** — co aktuálně běží v provider poolu:
+- `current_model_name` — jaký model je aktuálně loaded
+- `is_loaded` — zda vůbec nějaký model běží
+- `initialized` — zda je provider initialized
+
+**Audit existing surfaces** ukázal, že tyto facts jsou dostupné přes:
+- `brain/model_manager.py::get_current_model()` — vrací model name nebo None
+- `brain/model_lifecycle.py::get_model_lifecycle_status()` — vrací `{loaded, current_model, initialized, last_error}`
+
+### Co je nové v F3.13
+
+1. **`ProviderRuntimeFactsBundle`** — nový read-only bundle v `shadow_inputs.py`
+   - Sbírá runtime facts z `ModelManager.get_current_model()` a `get_model_lifecycle_status()`
+   - `fact_stability`: STABLE (ModelManager available) | COMPAT (lifecycle_status only) | UNKNOWN (nothing)
+   - Canonical owner: `brain/model_manager.py` / `brain/model_lifecycle.py`
+
+2. **`collect_provider_runtime_facts()`** — pure function v `shadow_inputs.py`
+   - Přijímá `model_manager` (volitelné) a `lifecycle_status` (volitelné)
+   - Vrací `ProviderRuntimeFactsBundle`
+   - Žádné side effects, žádné I/O
+
+3. **Provider readiness preview rozšířen** — nové fieldy v `ProviderReadinessPreview`:
+   - `runtime_loaded` — zda je aktuálně loaded
+   - `runtime_current_model` — jméno aktuálně loaded modelu
+   - `runtime_initialized` — zda je provider initialized
+
+4. **Wiring do `compose_pre_decision()`** — nový `runtime_facts` parametr
+
+### Fact Stability Matrix (F3.13)
+
+| Zdroj | Fact Stability | Podmínka |
+|-------|----------------|----------|
+| `ModelManager.get_current_model()` | STABLE | model_manager je dostupný |
+| `ModelManager.is_loaded()` | STABLE | model_manager je dostupný |
+| `get_model_lifecycle_status()` | COMPAT | pouze lifecycle_status bez ModelManager |
+| Nic dostupné | UNKNOWN | model_manager=None, lifecycle_status=None |
+
+### Provider Runtime Facts Matrix
+
+| Field | STABLE path | COMPAT path | UNKNOWN path |
+|-------|-------------|-------------|--------------|
+| `current_model` | `model_manager.get_current_model()` | `lifecycle_status["current_model"]` | None |
+| `is_loaded` | `model_manager.is_loaded()` | `lifecycle_status["loaded"]` | False |
+| `initialized` | `model_manager.is_loaded() and model_manager.initialized_placeholder` | `lifecycle_status["initialized"]` | False |
+| `fact_stability` | "STABLE" | "COMPAT" | "UNKNOWN" |
+
+### Scheduler Shadow Provider-Readiness Matrix (F3.13)
+
+| Field | F3.12 | F3.13 |
+|-------|-------|-------|
+| `has_recommendation` | ✅ (STABLE) | ✅ (STABLE) |
+| `has_facts` | ✅ (COMPAT) | ✅ (COMPAT) |
+| `lifecycle_ready` | ✅ | ✅ |
+| `control_ready` | ✅ | ✅ |
+| `thermal_safe` | ✅ | ✅ |
+| `runtime_loaded` | ❌ | ✅ (STABLE/COMPAT/UNKNOWN) |
+| `runtime_current_model` | ❌ | ✅ (STABLE/COMPAT/UNKNOWN) |
+| `runtime_initialized` | ❌ | ✅ (STABLE/COMPAT/UNKNOWN) |
+
+### Co scheduler-shadow TEĎ UMÍ previewovat (F3.13)
+
+1. **Provider runtime state** — explicitní facts o tom, co aktuálně běží
+2. **Read-only facts surface** — žádné activation, žádné load_model()
+3. **Compat fallback** — lifecycle_status dict jako COMPAT alternativa
+4. **Unknown state** — graceful degradation když nic není dostupné
+
+### Co scheduler-shadow STÁLE NESMÍ (hard boundaries)
+
+1. **Activation** — žádné `acquire()`, `load_model()`, `unload()`
+2. **Simulation** — žádné provider state machine simulation
+3. **Provider framework** — žádné nové provider pool/selection framework
+4. **Scheduler modification** — žádné změny scheduler decision loopu
+
+### Triad Invariant (F3.13)
+
+Stále přísně platí:
+- **Recommendation fact** ≠ **Readiness preview** ≠ **Actual activation**
+- Preview zůstává DIAGNOSTIC ONLY
+- Neaktivuje žádné providery
+
+### Guardraily Implementované v F3.13
+
+1. **Žádné nové public API** — `collect_provider_runtime_facts()` je internal seam
+2. **Žádné side effects** — pure function, žádné I/O
+3. **Graceful degradation** — UNKNOWN když nic není dostupné
+4. **Narrow surface** — pouze read-only facts, žádná activation
+5. **Canonical owner** — `brain/model_manager.py` / `brain/model_lifecycle.py`
+
+### Co NENÍ v tomto sprintu
+
+- Provider activation
+- load_model() integrace
+- Provider state machine implementation
+- Nový provider orchestrator
+- scheduler_active režim
+
+### Co chybí do plné provider activation parity (F4+)
+
+1. **Actual provider activation** — skutečné `acquire()` / `release()` volání
+2. **Provider pool awareness** — scheduler ví, které providery má k dispozici
+3. **Provider selection** — scheduler vybírá provider podle workload
+4. **Provider lifecycle management** — unload/reload strategie
+
+### Co chybí do scheduler_active (F5+)
+
+1. **Plná scheduler activation** — scheduler_active mód s actual dispatch
+2. **Provider-aware dispatch** — dispatch přes aktivní provider pool
+3. **Provider lifecycle orchestration** — scheduler řídí provider lifecycle
+
+### Soubory Změněné v F3.13
+
+| Soubor | Změna |
+|--------|--------|
+| `runtime/shadow_inputs.py` | Přidán `ProviderRuntimeFactsBundle` dataclass a `collect_provider_runtime_facts()` funkce |
+| `runtime/shadow_pre_decision.py` | Přidány `runtime_loaded`, `runtime_current_model`, `runtime_initialized` do `ProviderReadinessPreview`; rozšířena `compose_pre_decision()` o `runtime_facts` parametr; aktualizovány všechny `ProviderReadinessPreview` konstruktory |
+| `runtime/sprint_scheduler.py` | Přidán `collect_provider_runtime_facts` import; volá se v `consume_shadow_pre_decision()` a předává do `compose_pre_decision()` |
+| `SHADOW_SCHEDULER_PARITY.md` | Přidána F3.13 sekce |
+| `tests/probe_8vm/test_shadow_consumer_seam.py` | Přidány testy pro `TestProviderRuntimeFactsBundle` a `TestProviderRuntimeFactsIntegration` |

@@ -32,6 +32,7 @@ from hledac.universal.runtime.shadow_inputs import (
     collect_lifecycle_snapshot,
     collect_graph_summary,
     collect_model_control_facts,
+    collect_provider_runtime_facts,
 )
 from hledac.universal.runtime.shadow_parity import run_shadow_parity
 from hledac.universal.runtime.shadow_pre_decision import compose_pre_decision
@@ -1590,8 +1591,16 @@ class SprintScheduler:
         except Exception:
             return None
 
+        # Sprint F3.13: Collect provider runtime facts (read-only)
+        # model_manager is not available in SprintScheduler — runtime_facts will be UNKNOWN
         try:
-            pd_summary = compose_pre_decision(parity)
+            runtime_facts = collect_provider_runtime_facts(model_manager=None)
+        except Exception:
+            from hledac.universal.runtime.shadow_inputs import ProviderRuntimeFactsBundle
+            runtime_facts = ProviderRuntimeFactsBundle()
+
+        try:
+            pd_summary = compose_pre_decision(parity, runtime_facts=runtime_facts)
         except Exception:
             return None
 

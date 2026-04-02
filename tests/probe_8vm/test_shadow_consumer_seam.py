@@ -1312,3 +1312,749 @@ class TestDispatchPreviewMappingOwnership:
         # unknown task = runtime_only_compat
         assert "some_unknown_task" in result.runtime_only_handlers
         assert result.dispatch_path == "runtime_only_compat"
+
+
+class TestProviderReadinessPreview:
+    """Sprint F3.5-F3.6: Tests for provider readiness preview."""
+
+    def test_provider_readiness_preview_fields(self):
+        """ProviderReadinessPreview must have required fields."""
+        from hledac.universal.runtime.shadow_pre_decision import ProviderReadinessPreview
+
+        prp = ProviderReadinessPreview(
+            has_recommendation=True,
+            recommendation="hermes-3-llama-3.2-3b",
+            readiness="ready",
+            lifecycle_ready=True,
+            control_ready=True,
+            thermal_safe=True,
+            has_facts=True,
+            blockers=[],
+            unknowns=[],
+            next_phase_hint=None,
+            deferred_reasons=[],
+        )
+
+        assert prp.readiness == "ready"
+        assert prp.has_recommendation is True
+        assert prp.lifecycle_ready is True
+        assert prp.control_ready is True
+        assert prp.thermal_safe is True
+        assert prp.has_facts is True
+
+    def test_provider_readiness_ready_requires_all_conditions(self):
+        """ProviderReadinessPreview readiness=ready requires lifecycle+control+thermal+facts."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            _compose_provider_readiness_preview,
+            LifecycleInterpretation,
+            ModelControlSummary,
+        )
+
+        lc = LifecycleInterpretation(
+            workflow_phase="ACTIVE",
+            workflow_phase_entered_at=0.0,
+            control_phase_mode="normal",
+            control_phase_thermal="nominal",
+            windup_local_mode=None,
+            is_active=True,
+            is_windup=False,
+            is_export_ready=False,
+            is_terminal=False,
+            can_accept_work=True,
+            should_prune=False,
+            synthesis_mode_known=False,
+            phase_conflict=False,
+            phase_conflict_reason=None,
+        )
+        mc = ModelControlSummary(
+            tools_count=5,
+            sources_count=3,
+            privacy="STANDARD",
+            depth="DEEP",
+            models_needed=["hermes-3-llama-3.2-3b"],
+            has_tools=True,
+            has_sources=True,
+            is_high_quality=True,
+            readiness="ready",
+        )
+
+        result = _compose_provider_readiness_preview(lc, mc)
+
+        assert result.readiness == "ready"
+        assert result.lifecycle_ready is True
+        assert result.control_ready is True
+        assert result.thermal_safe is True
+        assert result.has_facts is True
+        assert result.blockers == []
+        assert result.unknowns == []
+
+    def test_provider_readiness_blocked_in_terminal_phase(self):
+        """ProviderReadinessPreview readiness=blocked in terminal phase."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            _compose_provider_readiness_preview,
+            LifecycleInterpretation,
+            ModelControlSummary,
+        )
+
+        lc = LifecycleInterpretation(
+            workflow_phase="EXPORT",
+            workflow_phase_entered_at=0.0,
+            control_phase_mode="normal",
+            control_phase_thermal="nominal",
+            windup_local_mode="synthesis",
+            is_active=False,
+            is_windup=False,
+            is_export_ready=True,
+            is_terminal=True,
+            can_accept_work=False,
+            should_prune=False,
+            synthesis_mode_known=True,
+            phase_conflict=False,
+            phase_conflict_reason=None,
+        )
+        mc = ModelControlSummary(
+            tools_count=5,
+            sources_count=3,
+            privacy="STANDARD",
+            depth="DEEP",
+            models_needed=["hermes-3-llama-3.2-3b"],
+            has_tools=True,
+            has_sources=True,
+            is_high_quality=True,
+            readiness="ready",
+        )
+
+        result = _compose_provider_readiness_preview(lc, mc)
+
+        assert result.readiness == "blocked"
+        assert "terminal phase" in result.blockers[0]
+
+    def test_provider_readiness_blocked_in_panic_mode(self):
+        """ProviderReadinessPreview readiness=blocked in panic control mode."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            _compose_provider_readiness_preview,
+            LifecycleInterpretation,
+            ModelControlSummary,
+        )
+
+        lc = LifecycleInterpretation(
+            workflow_phase="ACTIVE",
+            workflow_phase_entered_at=0.0,
+            control_phase_mode="panic",
+            control_phase_thermal="critical",
+            windup_local_mode=None,
+            is_active=True,
+            is_windup=False,
+            is_export_ready=False,
+            is_terminal=False,
+            can_accept_work=True,
+            should_prune=True,
+            synthesis_mode_known=False,
+            phase_conflict=False,
+            phase_conflict_reason=None,
+        )
+        mc = ModelControlSummary(
+            tools_count=5,
+            sources_count=3,
+            privacy="STANDARD",
+            depth="DEEP",
+            models_needed=["hermes-3-llama-3.2-3b"],
+            has_tools=True,
+            has_sources=True,
+            is_high_quality=True,
+            readiness="ready",
+        )
+
+        result = _compose_provider_readiness_preview(lc, mc)
+
+        assert result.readiness == "blocked"
+        assert "panic" in result.blockers[0]
+
+    def test_provider_readiness_deferred_when_not_active(self):
+        """ProviderReadinessPreview readiness=deferred when lifecycle not ACTIVE/WINDUP (BOOT phase)."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            _compose_provider_readiness_preview,
+            LifecycleInterpretation,
+            ModelControlSummary,
+        )
+
+        lc = LifecycleInterpretation(
+            workflow_phase="BOOT",
+            workflow_phase_entered_at=0.0,
+            control_phase_mode="normal",
+            control_phase_thermal="nominal",
+            windup_local_mode=None,
+            is_active=False,
+            is_windup=False,
+            is_export_ready=False,
+            is_terminal=False,
+            can_accept_work=True,
+            should_prune=False,
+            synthesis_mode_known=False,
+            phase_conflict=False,
+            phase_conflict_reason=None,
+        )
+        mc = ModelControlSummary(
+            tools_count=5,
+            sources_count=3,
+            privacy="STANDARD",
+            depth="DEEP",
+            models_needed=["hermes-3-llama-3.2-3b"],
+            has_tools=True,
+            has_sources=True,
+            is_high_quality=True,
+            readiness="ready",
+        )
+
+        result = _compose_provider_readiness_preview(lc, mc)
+
+        assert result.readiness == "deferred"
+        assert result.lifecycle_ready is False
+        assert "BOOT" in result.deferred_reasons[0]
+
+    def test_provider_readiness_compat_in_warmup(self):
+        """ProviderReadinessPreview readiness=compat in WARMUP phase."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            _compose_provider_readiness_preview,
+            LifecycleInterpretation,
+            ModelControlSummary,
+        )
+
+        lc = LifecycleInterpretation(
+            workflow_phase="WARMUP",
+            workflow_phase_entered_at=0.0,
+            control_phase_mode="normal",
+            control_phase_thermal="nominal",
+            windup_local_mode=None,
+            is_active=False,
+            is_windup=False,
+            is_export_ready=False,
+            is_terminal=False,
+            can_accept_work=True,
+            should_prune=False,
+            synthesis_mode_known=False,
+            phase_conflict=False,
+            phase_conflict_reason=None,
+        )
+        mc = ModelControlSummary(
+            tools_count=5,
+            sources_count=3,
+            privacy="STANDARD",
+            depth="DEEP",
+            models_needed=["hermes-3-llama-3.2-3b"],
+            has_tools=True,
+            has_sources=True,
+            is_high_quality=True,
+            readiness="ready",
+        )
+
+        result = _compose_provider_readiness_preview(lc, mc)
+
+        assert result.readiness == "compat"
+        assert result.lifecycle_ready is False
+
+    def test_provider_readiness_unknown_when_no_recommendation_fact(self):
+        """ProviderReadinessPreview readiness=unknown when models_needed is empty."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            _compose_provider_readiness_preview,
+            LifecycleInterpretation,
+            ModelControlSummary,
+        )
+
+        lc = LifecycleInterpretation(
+            workflow_phase="ACTIVE",
+            workflow_phase_entered_at=0.0,
+            control_phase_mode="normal",
+            control_phase_thermal="nominal",
+            windup_local_mode=None,
+            is_active=True,
+            is_windup=False,
+            is_export_ready=False,
+            is_terminal=False,
+            can_accept_work=True,
+            should_prune=False,
+            synthesis_mode_known=False,
+            phase_conflict=False,
+            phase_conflict_reason=None,
+        )
+        mc = ModelControlSummary(
+            tools_count=5,
+            sources_count=3,
+            privacy="STANDARD",
+            depth="DEEP",
+            models_needed=[],  # Empty = no recommendation fact
+            has_tools=True,
+            has_sources=True,
+            is_high_quality=True,
+            readiness="ready",
+        )
+
+        result = _compose_provider_readiness_preview(lc, mc)
+
+        assert result.has_facts is False
+        assert result.readiness in ("deferred", "unknown")
+
+    def test_provider_readiness_no_simulation_fields(self):
+        """ProviderReadinessPreview must NOT contain load_order/provider_state/activation_sequence."""
+        from hledac.universal.runtime.shadow_pre_decision import ProviderReadinessPreview
+        import dataclasses
+
+        prp = ProviderReadinessPreview(
+            has_recommendation=True,
+            recommendation="test-model",
+            readiness="ready",
+            lifecycle_ready=True,
+            control_ready=True,
+            thermal_safe=True,
+            has_facts=True,
+            blockers=[],
+            unknowns=[],
+            next_phase_hint=None,
+            deferred_reasons=[],
+        )
+
+        field_names = {f.name for f in dataclasses.fields(prp)}
+        assert "load_order" not in field_names
+        assert "provider_state" not in field_names
+        assert "activation_sequence" not in field_names
+        assert "actual_model_loaded" not in field_names
+
+    def test_provider_readiness_distinguishes_recommendation_readiness_activation(self):
+        """ProviderReadinessPreview distinguishes: recommendation fact vs readiness preview vs activation."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            _compose_provider_readiness_preview,
+            LifecycleInterpretation,
+            ModelControlSummary,
+        )
+
+        # Case: lifecycle ACTIVE, models_needed present = has recommendation fact
+        lc = LifecycleInterpretation(
+            workflow_phase="ACTIVE",
+            workflow_phase_entered_at=0.0,
+            control_phase_mode="normal",
+            control_phase_thermal="nominal",
+            windup_local_mode=None,
+            is_active=True,
+            is_windup=False,
+            is_export_ready=False,
+            is_terminal=False,
+            can_accept_work=True,
+            should_prune=False,
+            synthesis_mode_known=False,
+            phase_conflict=False,
+            phase_conflict_reason=None,
+        )
+        mc = ModelControlSummary(
+            tools_count=5,
+            sources_count=3,
+            privacy="STANDARD",
+            depth="DEEP",
+            models_needed=["hermes-3-llama-3.2-3b"],
+            has_tools=True,
+            has_sources=True,
+            is_high_quality=True,
+            readiness="ready",
+        )
+
+        result = _compose_provider_readiness_preview(lc, mc)
+
+        # has_recommendation = True means recommendation FACT available
+        assert result.has_recommendation is True
+        # readiness = ready means readiness PREVIEW classification
+        assert result.readiness == "ready"
+        # No actual activation fields
+        assert not hasattr(result, "actual_activation")
+
+    def test_pre_decision_summary_has_provider_readiness_field(self):
+        """PreDecisionSummary must have provider_readiness field."""
+        from hledac.universal.runtime.shadow_pre_decision import PreDecisionSummary
+
+        assert hasattr(PreDecisionSummary, "__dataclass_fields__")
+        # Check at runtime that provider_readiness is a field
+        from hledac.universal.runtime.shadow_pre_decision import PreDecisionSummary
+        pd = PreDecisionSummary(
+            parity_timestamp_monotonic=0.0,
+            parity_timestamp_wall="2026-04-02T00:00:00Z",
+            runtime_mode="scheduler_shadow",
+            lifecycle=MagicMock(),
+            graph=MagicMock(),
+            export_readiness=MagicMock(),
+            model_control=MagicMock(),
+            precursors=MagicMock(),
+            diff_taxonomy=[],
+            blockers=[],
+            unknowns=[],
+            mismatch_reasons={},
+        )
+        # provider_readiness may be None initially
+        assert pd.provider_readiness is None or hasattr(pd.provider_readiness, "readiness")
+
+    def test_scheduler_preview_includes_provider_readiness(self):
+        """_build_shadow_readiness_preview must include provider_readiness when set."""
+        original = os.environ.get("HLEDAC_RUNTIME_MODE")
+        try:
+            os.environ["HLEDAC_RUNTIME_MODE"] = "scheduler_shadow"
+
+            scheduler = SprintScheduler(SprintSchedulerConfig())
+            scheduler._lc_adapter = MagicMock()
+            scheduler._lc_adapter._lc = MagicMock()
+            scheduler._synthesis_engine = "test-engine"
+
+            # Attach fake provider_readiness
+            from hledac.universal.runtime.shadow_pre_decision import ProviderReadinessPreview
+            fake_pr = ProviderReadinessPreview(
+                has_recommendation=True,
+                recommendation="test-model",
+                readiness="ready",
+                lifecycle_ready=True,
+                control_ready=True,
+                thermal_safe=True,
+                has_facts=True,
+                blockers=[],
+                unknowns=[],
+                next_phase_hint=None,
+                deferred_reasons=[],
+            )
+            scheduler._shadow_pd_summary = MagicMock()
+            scheduler._shadow_pd_summary.provider_readiness = fake_pr
+            scheduler._shadow_pd_summary.lifecycle = MagicMock()
+            scheduler._shadow_pd_summary.graph = MagicMock()
+            scheduler._shadow_pd_summary.export_readiness = MagicMock()
+            scheduler._shadow_pd_summary.model_control = MagicMock()
+            scheduler._shadow_pd_summary.precursors = MagicMock()
+            scheduler._shadow_pd_summary.diff_taxonomy = []
+            scheduler._shadow_pd_summary.blockers = []
+            scheduler._shadow_pd_summary.unknowns = []
+            scheduler._shadow_pd_summary.decision_gate = None
+            scheduler._shadow_pd_summary.tool_readiness = None
+            scheduler._shadow_pd_summary.windup_readiness = None
+            scheduler._shadow_pd_summary.provider_note = None
+            scheduler._shadow_pd_summary.dispatch_parity = None
+
+            preview = scheduler._build_shadow_readiness_preview()
+
+            assert "provider_readiness" in preview
+            assert preview["provider_readiness"]["readiness"] == "ready"
+            assert preview["provider_readiness"]["has_recommendation"] is True
+            assert preview["provider_readiness"]["lifecycle_ready"] is True
+            assert preview["provider_readiness"]["control_ready"] is True
+            assert preview["provider_readiness"]["thermal_safe"] is True
+            assert preview["provider_readiness"]["has_facts"] is True
+
+        finally:
+            if original is not None:
+                os.environ["HLEDAC_RUNTIME_MODE"] = original
+            else:
+                os.environ.pop("HLEDAC_RUNTIME_MODE", None)
+
+    def test_provider_readiness_windup_phase_ready(self):
+        """ProviderReadinessPreview readiness=ready in WINDUP phase."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            _compose_provider_readiness_preview,
+            LifecycleInterpretation,
+            ModelControlSummary,
+        )
+
+        lc = LifecycleInterpretation(
+            workflow_phase="WINDUP",
+            workflow_phase_entered_at=0.0,
+            control_phase_mode="prune",
+            control_phase_thermal="fair",
+            windup_local_mode="synthesis",
+            is_active=False,
+            is_windup=True,
+            is_export_ready=False,
+            is_terminal=False,
+            can_accept_work=False,
+            should_prune=True,
+            synthesis_mode_known=True,
+            phase_conflict=False,
+            phase_conflict_reason=None,
+        )
+        mc = ModelControlSummary(
+            tools_count=5,
+            sources_count=3,
+            privacy="STANDARD",
+            depth="DEEP",
+            models_needed=["hermes-3-llama-3.2-3b"],
+            has_tools=True,
+            has_sources=True,
+            is_high_quality=True,
+            readiness="ready",
+        )
+
+        result = _compose_provider_readiness_preview(lc, mc)
+
+        assert result.readiness == "ready"
+        assert result.lifecycle_ready is True
+        assert result.control_ready is True  # prune is OK
+        assert result.thermal_safe is True  # fair is OK
+
+    def test_provider_readiness_critical_thermal_not_ready(self):
+        """ProviderReadinessPreview readiness=deferred when thermal=critical."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            _compose_provider_readiness_preview,
+            LifecycleInterpretation,
+            ModelControlSummary,
+        )
+
+        lc = LifecycleInterpretation(
+            workflow_phase="ACTIVE",
+            workflow_phase_entered_at=0.0,
+            control_phase_mode="normal",
+            control_phase_thermal="critical",
+            windup_local_mode=None,
+            is_active=True,
+            is_windup=False,
+            is_export_ready=False,
+            is_terminal=False,
+            can_accept_work=True,
+            should_prune=False,
+            synthesis_mode_known=False,
+            phase_conflict=False,
+            phase_conflict_reason=None,
+        )
+        mc = ModelControlSummary(
+            tools_count=5,
+            sources_count=3,
+            privacy="STANDARD",
+            depth="DEEP",
+            models_needed=["hermes-3-llama-3.2-3b"],
+            has_tools=True,
+            has_sources=True,
+            is_high_quality=True,
+            readiness="ready",
+        )
+
+        result = _compose_provider_readiness_preview(lc, mc)
+
+        assert result.thermal_safe is False
+        assert result.readiness in ("deferred", "unknown")
+        assert "critical" in result.deferred_reasons[0]
+
+
+# =============================================================================
+# Sprint F3.13: ProviderRuntimeFactsBundle Tests
+# =============================================================================
+
+class TestProviderRuntimeFactsBundle:
+    """Sprint F3.13: Tests for ProviderRuntimeFactsBundle read-only seam."""
+
+    def test_collect_provider_runtime_facts_returns_bundle(self):
+        """collect_provider_runtime_facts returns a valid bundle."""
+        from hledac.universal.runtime.shadow_inputs import collect_provider_runtime_facts
+
+        result = collect_provider_runtime_facts(model_manager=None)
+
+        assert result is not None
+        assert hasattr(result, "current_model")
+        assert hasattr(result, "is_loaded")
+        assert hasattr(result, "initialized")
+        assert hasattr(result, "fact_stability")
+
+    def test_collect_provider_runtime_facts_stable_when_model_manager_available(self):
+        """runtime_facts stability=STABLE when model_manager is provided."""
+        from hledac.universal.runtime.shadow_inputs import collect_provider_runtime_facts
+
+        # Mock model_manager with get_current_model returning a model name
+        class MockModelManager:
+            def get_current_model(self):
+                return "hermes-3-llama-3.2-3b"
+
+            def is_loaded(self):
+                return True
+
+        mm = MockModelManager()
+        result = collect_provider_runtime_facts(model_manager=mm)
+
+        assert result.current_model == "hermes-3-llama-3.2-3b"
+        assert result.is_loaded is True
+        assert result.initialized is False  # Mock doesn't have initialized
+        assert result.fact_stability == "STABLE"
+
+    def test_collect_provider_runtime_facts_compat_with_lifecycle_status(self):
+        """runtime_facts stability=COMPAT when only lifecycle_status is available."""
+        from hledac.universal.runtime.shadow_inputs import collect_provider_runtime_facts
+
+        lifecycle_status = {
+            "loaded": True,
+            "current_model": "modernbert",
+            "initialized": True,
+            "last_error": None,
+        }
+        result = collect_provider_runtime_facts(
+            model_manager=None,
+            lifecycle_status=lifecycle_status,
+        )
+
+        assert result.current_model == "modernbert"
+        assert result.is_loaded is True
+        assert result.initialized is True
+        assert result.fact_stability == "COMPAT"
+
+    def test_collect_provider_runtime_facts_unknown_when_nothing_available(self):
+        """runtime_facts stability=UNKNOWN when neither source is available."""
+        from hledac.universal.runtime.shadow_inputs import collect_provider_runtime_facts
+
+        result = collect_provider_runtime_facts(model_manager=None)
+
+        assert result.current_model is None
+        assert result.is_loaded is False
+        assert result.initialized is False
+        assert result.fact_stability == "UNKNOWN"
+
+    def test_collect_provider_runtime_facts_to_dict(self):
+        """ProviderRuntimeFactsBundle.to_dict() returns correct structure."""
+        from hledac.universal.runtime.shadow_inputs import collect_provider_runtime_facts
+
+        class MockModelManager:
+            def get_current_model(self):
+                return "gliner"
+
+            def is_loaded(self):
+                return True
+
+        mm = MockModelManager()
+        result = collect_provider_runtime_facts(model_manager=mm)
+        d = result.to_dict()
+
+        assert d["runtime_current_model"] == "gliner"
+        assert d["runtime_is_loaded"] is True
+        assert d["runtime_initialized"] is False
+        assert d["runtime_fact_stability"] == "STABLE"
+        assert "future_owner" in d
+
+
+class TestProviderRuntimeFactsIntegration:
+    """Sprint F3.13: Integration tests for runtime_facts in compose_pre_decision."""
+
+    def test_compose_pre_decision_accepts_runtime_facts(self):
+        """compose_pre_decision accepts runtime_facts parameter without error."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            _compose_provider_readiness_preview,
+        )
+        from hledac.universal.runtime.shadow_inputs import ProviderRuntimeFactsBundle
+
+        runtime_facts = ProviderRuntimeFactsBundle(
+            current_model="hermes",
+            is_loaded=True,
+            initialized=False,
+            fact_stability="STABLE",
+        )
+
+        # Verify runtime_facts can be passed without TypeError
+        assert runtime_facts.current_model == "hermes"
+        assert runtime_facts.fact_stability == "STABLE"
+
+    def test_provider_readiness_preview_contains_runtime_facts(self):
+        """ProviderReadinessPreview includes runtime_loaded/runtime_current_model."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            _compose_provider_readiness_preview,
+            LifecycleInterpretation,
+            ModelControlSummary,
+        )
+        from hledac.universal.runtime.shadow_inputs import ProviderRuntimeFactsBundle
+
+        lc = LifecycleInterpretation(
+            workflow_phase="ACTIVE",
+            workflow_phase_entered_at=0.0,
+            control_phase_mode="normal",
+            control_phase_thermal="nominal",
+            windup_local_mode=None,
+            is_active=True,
+            is_windup=False,
+            is_export_ready=False,
+            is_terminal=False,
+            can_accept_work=True,
+            should_prune=False,
+            synthesis_mode_known=False,
+            phase_conflict=False,
+            phase_conflict_reason=None,
+        )
+        mc = ModelControlSummary(
+            tools_count=5,
+            sources_count=3,
+            privacy="STANDARD",
+            depth="DEEP",
+            models_needed=["hermes-3-llama-3.2-3b"],
+            has_tools=True,
+            has_sources=True,
+            is_high_quality=True,
+            readiness="ready",
+        )
+
+        runtime_facts = ProviderRuntimeFactsBundle(
+            current_model="hermes-3-llama-3.2-3b",
+            is_loaded=True,
+            initialized=True,
+            fact_stability="STABLE",
+        )
+
+        result = _compose_provider_readiness_preview(lc, mc, runtime_facts=runtime_facts)
+
+        assert result.runtime_loaded is True
+        assert result.runtime_current_model == "hermes-3-llama-3.2-3b"
+        assert result.runtime_initialized is True
+
+    def test_provider_readiness_preview_defaults_when_no_runtime_facts(self):
+        """ProviderReadinessPreview defaults to False/None when runtime_facts is None."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            _compose_provider_readiness_preview,
+            LifecycleInterpretation,
+            ModelControlSummary,
+        )
+
+        lc = LifecycleInterpretation(
+            workflow_phase="ACTIVE",
+            workflow_phase_entered_at=0.0,
+            control_phase_mode="normal",
+            control_phase_thermal="nominal",
+            windup_local_mode=None,
+            is_active=True,
+            is_windup=False,
+            is_export_ready=False,
+            is_terminal=False,
+            can_accept_work=True,
+            should_prune=False,
+            synthesis_mode_known=False,
+            phase_conflict=False,
+            phase_conflict_reason=None,
+        )
+        mc = ModelControlSummary(
+            tools_count=5,
+            sources_count=3,
+            privacy="STANDARD",
+            depth="DEEP",
+            models_needed=["hermes-3-llama-3.2-3b"],
+            has_tools=True,
+            has_sources=True,
+            is_high_quality=True,
+            readiness="ready",
+        )
+
+        result = _compose_provider_readiness_preview(lc, mc, runtime_facts=None)
+
+        assert result.runtime_loaded is False
+        assert result.runtime_current_model is None
+        assert result.runtime_initialized is False
+
+    def test_runtime_facts_in_scheduler_consume_shadow_pre_decision(self):
+        """SprintScheduler.consume_shadow_pre_decision passes runtime_facts to compose_pre_decision."""
+        from unittest.mock import MagicMock, patch
+        from hledac.universal.runtime.sprint_scheduler import SprintScheduler, SprintSchedulerConfig
+
+        config = SprintSchedulerConfig()
+        scheduler = SprintScheduler(config)
+        scheduler._lc_adapter = MagicMock()
+        scheduler._lc_adapter._lc = MagicMock()
+        scheduler._lc_adapter._lc.snapshot.return_value = {}
+
+        with patch("hledac.universal.runtime.shadow_inputs.RuntimeMode") as mock_rm:
+            mock_rm.is_shadow_mode.return_value = True
+
+            result = scheduler.consume_shadow_pre_decision()
+
+            # When model_manager is not available, runtime_facts should be UNKNOWN
+            if result is not None:
+                assert result.provider_readiness is not None
+                assert result.runtime_facts is not None

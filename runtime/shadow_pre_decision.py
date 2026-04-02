@@ -428,6 +428,11 @@ class ProviderReadinessPreview:
     next_phase_hint: Optional[str]  # What would change readiness
     deferred_reasons: List[str]     # Why deferred (if readiness = deferred)
 
+    # Sprint F3.13: Runtime facts — read-only runtime model state
+    runtime_loaded: bool = False          # is a model currently loaded
+    runtime_current_model: Optional[str] = None  # which model is loaded (hermes/modernbert/gliner/None)
+    runtime_initialized: bool = False       # is MLX/runtime initialized
+
     # No simulation fields (enforced by tests)
     # NO: load_order, provider_state, activation_sequence, actual_model_loaded
 
@@ -487,6 +492,9 @@ class PreDecisionSummary:
 
     # Sprint F3.11: Dispatch parity preview — diagnostic only, no execute_with_limits
     dispatch_parity: Optional[DispatchReadinessPreview] = None
+
+    # Sprint F3.13: Provider runtime facts — read-only runtime model state
+    runtime_facts: Optional["ProviderRuntimeFactsBundle"] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -621,6 +629,7 @@ class PreDecisionSummary:
 
 def compose_pre_decision(
     parity_artifact: "ParityArtifact",
+    runtime_facts: Optional["ProviderRuntimeFactsBundle"] = None,
 ) -> PreDecisionSummary:
     """
     Sestaví PreDecisionSummary z ParityArtifact.
@@ -629,6 +638,8 @@ def compose_pre_decision(
 
     Args:
         parity_artifact: ParityArtifact z run_shadow_parity()
+        runtime_facts: Optional[ProviderRuntimeFactsBundle] — read-only runtime facts
+            about current model state (from ModelManager.get_current_model())
 
     Returns:
         PreDecisionSummary — composed pre-decision artifact
@@ -679,7 +690,7 @@ def compose_pre_decision(
 
     # --- Sprint F3.5-F3.6: Provider Readiness Preview (diagnostic only) ---
     provider_readiness = _compose_provider_readiness_preview(
-        lc, mc
+        lc, mc, runtime_facts
     )
 
     return PreDecisionSummary(
@@ -703,6 +714,8 @@ def compose_pre_decision(
         provider_note=provider_note,
         # Sprint F3.5-F3.6: Provider readiness preview
         provider_readiness=provider_readiness,
+        # Sprint F3.13: Provider runtime facts
+        runtime_facts=runtime_facts,
     )
 
 
@@ -1292,6 +1305,7 @@ def _compose_provider_activation_note(
 def _compose_provider_readiness_preview(
     lifecycle: LifecycleInterpretation,
     model_control: ModelControlSummary,
+    runtime_facts: Optional["ProviderRuntimeFactsBundle"] = None,
 ) -> ProviderReadinessPreview:
     """
     Sestaví ProviderReadinessPreview z LifecycleInterpretation a ModelControlSummary.
@@ -1326,6 +1340,11 @@ def _compose_provider_readiness_preview(
     thermal_safe = lifecycle.control_phase_thermal != "critical"
     has_facts = model_control.models_needed is not None and len(model_control.models_needed) > 0
 
+    # Sprint F3.13: Runtime facts — read-only runtime model state
+    runtime_loaded = runtime_facts.is_loaded if runtime_facts else False
+    runtime_current_model = runtime_facts.current_model if runtime_facts else None
+    runtime_initialized = runtime_facts.initialized if runtime_facts else False
+
     # Blocked: hard constraints
     if lifecycle.is_terminal:
         blockers.append(f"lifecycle in terminal phase={lifecycle.workflow_phase}")
@@ -1341,6 +1360,9 @@ def _compose_provider_readiness_preview(
             unknowns=[],
             next_phase_hint=None,
             deferred_reasons=[],
+            runtime_loaded=runtime_loaded,
+            runtime_current_model=runtime_current_model,
+            runtime_initialized=runtime_initialized,
         )
 
     if lifecycle.phase_conflict:
@@ -1357,6 +1379,9 @@ def _compose_provider_readiness_preview(
             unknowns=[],
             next_phase_hint=None,
             deferred_reasons=[],
+            runtime_loaded=runtime_loaded,
+            runtime_current_model=runtime_current_model,
+            runtime_initialized=runtime_initialized,
         )
 
     if lifecycle.control_phase_mode == "panic":
@@ -1373,6 +1398,9 @@ def _compose_provider_readiness_preview(
             unknowns=[],
             next_phase_hint=None,
             deferred_reasons=[],
+            runtime_loaded=runtime_loaded,
+            runtime_current_model=runtime_current_model,
+            runtime_initialized=runtime_initialized,
         )
 
     if not lifecycle_ready:
@@ -1394,6 +1422,9 @@ def _compose_provider_readiness_preview(
                 unknowns=unknowns,
                 next_phase_hint="ACTIVE phase required",
                 deferred_reasons=deferred_reasons,
+                runtime_loaded=runtime_loaded,
+                runtime_current_model=runtime_current_model,
+                runtime_initialized=runtime_initialized,
             )
 
         return ProviderReadinessPreview(
@@ -1408,6 +1439,9 @@ def _compose_provider_readiness_preview(
             unknowns=unknowns,
             next_phase_hint="ACTIVE phase required",
             deferred_reasons=deferred_reasons,
+            runtime_loaded=runtime_loaded,
+            runtime_current_model=runtime_current_model,
+            runtime_initialized=runtime_initialized,
         )
 
     # Lifecycle is ACTIVE or WINDUP — assess readiness dimensions
@@ -1439,6 +1473,9 @@ def _compose_provider_readiness_preview(
                 unknowns=[],
                 next_phase_hint=None,
                 deferred_reasons=[],
+                runtime_loaded=runtime_loaded,
+                runtime_current_model=runtime_current_model,
+                runtime_initialized=runtime_initialized,
             )
         else:
             # readiness="unknown" from model_control — insufficient facts
@@ -1455,6 +1492,9 @@ def _compose_provider_readiness_preview(
                 unknowns=unknowns,
                 next_phase_hint="model_control readiness required",
                 deferred_reasons=deferred_reasons,
+                runtime_loaded=runtime_loaded,
+                runtime_current_model=runtime_current_model,
+                runtime_initialized=runtime_initialized,
             )
 
     # Deferred or unknown
@@ -1471,6 +1511,9 @@ def _compose_provider_readiness_preview(
             unknowns=unknowns,
             next_phase_hint="normal control mode + non-critical thermal required",
             deferred_reasons=deferred_reasons,
+            runtime_loaded=runtime_loaded,
+            runtime_current_model=runtime_current_model,
+            runtime_initialized=runtime_initialized,
         )
 
     # Fallback — should not reach here
@@ -1486,6 +1529,9 @@ def _compose_provider_readiness_preview(
         unknowns=["insufficient facts to classify provider readiness"],
         next_phase_hint="additional lifecycle/model facts required",
         deferred_reasons=[],
+        runtime_loaded=runtime_loaded,
+        runtime_current_model=runtime_current_model,
+        runtime_initialized=runtime_initialized,
     )
 
 
@@ -1830,4 +1876,5 @@ def preview_dispatch_parity(
 
 if TYPE_CHECKING:
     from .shadow_parity import ParityArtifact
+    from .shadow_inputs import ProviderRuntimeFactsBundle
     from ..tool_registry import Tool

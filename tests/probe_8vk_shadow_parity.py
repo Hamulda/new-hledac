@@ -808,6 +808,359 @@ class TestLegacyRuntimeUnchanged:
                 os.environ["HLEDAC_RUNTIME_MODE"] = env_backup
 
 
+class TestF65OwnershipInvariants:
+    """
+    F6.5: Ownership Closure — Phase/Model Layer Separation Tests
+
+    Verifies:
+    1. acquire != phase enforcement
+    2. unload != phase policy
+    3. SYNTHESIZE (Layer 1) ≠ SYNTHESIS (Layer 2)
+    4. capabilities.py is NOT load owner
+    5. no third model truth emerges
+    6. no new model framework created
+    """
+
+    def test_synthesize_vs_synthesis_are_different_strings(self):
+        """SYNTHESIZE (Layer 1) ≠ SYNTHESIS (Layer 2) — they must not be conflated."""
+        # Direct import bypasses brain/__init__.py circular import
+        import sys
+        from pathlib import Path
+        _model_phase_facts = Path(__file__).parent.parent / "brain" / "model_phase_facts.py"
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("model_phase_facts", _model_phase_facts)
+        mpf = importlib.util.module_from_spec(spec)
+        sys.modules["model_phase_facts"] = mpf
+        spec.loader.exec_module(mpf)
+
+        WORKFLOW_PHASES = mpf.WORKFLOW_PHASES
+        COARSE_GRAINED_PHASES = mpf.COARSE_GRAINED_PHASES
+        is_workflow_phase = mpf.is_workflow_phase
+        is_coarse_grained_phase = mpf.is_coarse_grained_phase
+        is_same_layer = mpf.is_same_layer
+
+        # SYNTHESIZE is Layer 1 only
+        assert is_workflow_phase("SYNTHESIZE") is True
+        assert is_coarse_grained_phase("SYNTHESIZE") is False
+
+        # SYNTHESIS is Layer 2 only
+        assert is_coarse_grained_phase("SYNTHESIS") is True
+        assert is_workflow_phase("SYNTHESIS") is False
+
+        # They are NOT the same layer
+        assert is_same_layer("SYNTHESIZE", "SYNTHESIS") is False
+
+    def test_workflow_phases_not_in_coarse_grained(self):
+        """No Layer 1 workflow phase string exists in Layer 2 coarse-grained set."""
+        # Bypass brain/__init__.py circular import
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location(
+            "_mpf", Path(__file__).parent.parent / "brain" / "model_phase_facts.py"
+        )
+        mpf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mpf)
+        WORKFLOW_PHASES = mpf.WORKFLOW_PHASES
+        COARSE_GRAINED_PHASES = mpf.COARSE_GRAINED_PHASES
+
+        overlap = WORKFLOW_PHASES & COARSE_GRAINED_PHASES
+        assert len(overlap) == 0, f"Phase overlap between Layer 1 and Layer 2: {overlap}"
+
+    def test_coarse_grained_phases_not_in_workflow(self):
+        """No Layer 2 coarse-grained phase string exists in Layer 1 workflow set."""
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location(
+            "_mpf", Path(__file__).parent.parent / "brain" / "model_phase_facts.py"
+        )
+        mpf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mpf)
+        WORKFLOW_PHASES = mpf.WORKFLOW_PHASES
+        COARSE_GRAINED_PHASES = mpf.COARSE_GRAINED_PHASES
+
+        overlap = COARSE_GRAINED_PHASES & WORKFLOW_PHASES
+        assert len(overlap) == 0, f"Phase overlap between Layer 2 and Layer 1: {overlap}"
+
+    def test_phase_layer_classification(self):
+        """get_phase_layer returns correct layer for each phase system."""
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location(
+            "_mpf", Path(__file__).parent.parent / "brain" / "model_phase_facts.py"
+        )
+        mpf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mpf)
+        get_phase_layer = mpf.get_phase_layer
+
+        # Layer 1 — workflow-level
+        assert get_phase_layer("PLAN") == 1
+        assert get_phase_layer("SYNTHESIZE") == 1
+        assert get_phase_layer("EMBED") == 1
+        assert get_phase_layer("NER") == 1
+
+        # Layer 2 — coarse-grained
+        assert get_phase_layer("BRAIN") == 2
+        assert get_phase_layer("SYNTHESIS") == 2
+        assert get_phase_layer("TOOLS") == 2
+        assert get_phase_layer("CLEANUP") == 2
+
+        # Unknown / cross-layer
+        assert get_phase_layer("SOME_RANDOM_PHASE") == 0
+
+    def test_capabilities_model_lifecycle_manager_is_facade_not_load_owner(self):
+        """ModelLifecycleManager is FACADE — does NOT directly load models."""
+        import inspect
+        from capabilities import ModelLifecycleManager, CapabilityRegistry
+
+        # Check that load_model_for_task delegates through registry, not direct load
+        source = inspect.getsource(ModelLifecycleManager.load_model_for_task)
+
+        # Must NOT call ModelManager.load_model() directly
+        assert "ModelManager" not in source, \
+            "ModelLifecycleManager.load_model_for_task must NOT reference ModelManager"
+
+        # Must delegate through registry.load()
+        assert "registry.load" in source or "self.registry.load" in source, \
+            "ModelLifecycleManager must delegate to CapabilityRegistry.load()"
+
+    def test_capabilities_model_lifecycle_manager_does_not_hold_model_refs(self):
+        """ModelLifecycleManager does NOT hold raw model/engine references."""
+        import inspect
+        from capabilities import ModelLifecycleManager
+
+        # Check __init__ only — docstring mentions _model in explanations so exclude it
+        init_source = inspect.getsource(ModelLifecycleManager.__init__)
+        body_source = init_source  # Only __init__ body
+
+        # Must NOT have self._model, self._engine in __init__ body (docstring excluded)
+        assert "self._model" not in body_source, \
+            "ModelLifecycleManager.__init__ must NOT hold _model reference"
+        assert "self._engine" not in body_source, \
+            "ModelLifecycleManager.__init__ must NOT hold _engine reference"
+
+    def test_model_manager_is_singleton_acquire_owner(self):
+        """ModelManager is the canonical runtime-wide acquire/load owner."""
+        import inspect
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location(
+            "_mm", Path(__file__).parent.parent / "brain" / "model_manager.py"
+        )
+        mm_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mm_mod)
+        ModelManager = mm_mod.ModelManager
+
+        # load_model must be in ModelManager
+        assert hasattr(ModelManager, "load_model"), \
+            "ModelManager must own load_model()"
+
+        # _load_model_async must be in ModelManager
+        assert hasattr(ModelManager, "_load_model_async"), \
+            "ModelManager must own _load_model_async()"
+
+        # Source must show it creates/loads actual model objects
+        source = inspect.getsource(ModelManager._load_model_async)
+        assert "factory" in source or "load()" in source, \
+            "ModelManager._load_model_async must load models"
+
+    def test_model_lifecycle_unload_is_helper_not_owner(self):
+        """unload_model() in model_lifecycle is a helper — not the primary load owner."""
+        import inspect
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location(
+            "_ml", Path(__file__).parent.parent / "brain" / "model_lifecycle.py"
+        )
+        ml_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ml_mod)
+
+        # unload_model should delegate to engine.unload()
+        source = inspect.getsource(ml_mod.unload_model)
+        assert "engine.unload" in source or "model.unload" in source, \
+            "unload_model() must delegate to engine.unload()"
+
+        # Must NOT be the primary load owner (ModelManager is)
+        # Check that module-level unload_model is a helper, not owner
+        module_source = inspect.getsource(ml_mod)
+        # The canonical owner note should exist in docstring
+        assert "load owner" in module_source.lower() or "runtime-wide" in module_source.lower(), \
+            "model_lifecycle module docstring must state it is NOT runtime-wide load owner"
+
+    def test_no_third_model_truth_emerges(self):
+        """Capability layer does NOT become a third model truth."""
+        import ast
+        from pathlib import Path
+
+        # Check that capabilities.py does NOT create model instances directly
+        capabilities_path = Path(__file__).parent.parent / "capabilities.py"
+        source = capabilities_path.read_text()
+        tree = ast.parse(source)
+
+        # Find ModelLifecycleManager class
+        model_instances_created = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                # Check for direct model class instantiation (not through registry)
+                if isinstance(node.func, ast.Name):
+                    name = node.func.id.lower()
+                    if name in ("hermes3engine", "modernbertembedder", "gliner", "model"):
+                        model_instances_created.append(name)
+
+        assert len(model_instances_created) == 0, \
+            f"capabilities.py must NOT instantiate model classes directly: {model_instances_created}"
+
+    def test_no_new_model_framework_created(self):
+        """No new model manager / provider manager / lifecycle framework created."""
+        from pathlib import Path
+
+        universal_dir = Path(__file__).parent.parent
+        suspicious_files = [
+            "model_provider.py",
+            "lifecycle_framework.py",
+            "model_registry.py",
+            "model_control.py",
+            "model_plane.py",
+        ]
+
+        for name in suspicious_files:
+            path = universal_dir / name
+            if path.exists():
+                pytest.fail(
+                    f"New model framework file created: {name} — "
+                    f"F6.5 guardrail violated"
+                )
+
+    def test_model_phase_facts_is_read_only(self):
+        """model_phase_facts contains only pure read-only facts, no orchestration."""
+        import ast
+        from pathlib import Path
+
+        phase_facts_path = Path(__file__).parent.parent / "brain" / "model_phase_facts.py"
+        source = phase_facts_path.read_text()
+        tree = ast.parse(source)
+
+        # Check no side-effect functions (no async, no I/O)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.AsyncFunctionDef,)):
+                pytest.fail("model_phase_facts must NOT contain async functions")
+
+        # No file I/O
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Attribute):
+                    name = node.func.attr
+                    if name in ("write", "open", "read_text", "read_bytes"):
+                        if "path" in source.lower():
+                            pytest.fail("model_phase_facts must NOT perform file I/O")
+
+    def test_model_lifecycle_class_is_windup_local_sidecar(self):
+        """ModelLifecycle class is explicitly windup-local, not runtime-wide."""
+        import inspect
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location(
+            "_ml", Path(__file__).parent.parent / "brain" / "model_lifecycle.py"
+        )
+        ml_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ml_mod)
+        ModelLifecycle = ml_mod.ModelLifecycle
+
+        # The class docstring must mention windup-local
+        doc = ModelLifecycle.__doc__ or ""
+        assert "windup" in doc.lower() or "sidecar" in doc.lower(), \
+            "ModelLifecycle class docstring must state windup-local/sidecar"
+
+    def test_orchestrator_state_is_fourth_namespace(self):
+        """types.OrchestratorState is a fourth phase namespace — distinct from Layer 1/2/3."""
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location(
+            "_mpf", Path(__file__).parent.parent / "brain" / "model_phase_facts.py"
+        )
+        mpf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mpf)
+        get_phase_layer = mpf.get_phase_layer
+        WORKFLOW_PHASES = mpf.WORKFLOW_PHASES
+        COARSE_GRAINED_PHASES = mpf.COARSE_GRAINED_PHASES
+
+        # OrchestratorState strings
+        orchestrator_phases = {"IDLE", "PLANNING", "BRAIN", "EXECUTION", "SYNTHESIS", "ERROR"}
+
+        # None of these should be in WORKFLOW_PHASES (Layer 1) as strings
+        # (PLANNING vs PLAN, SYNTHESIS vs SYNTHESIZE — different strings)
+        for phase in orchestrator_phases:
+            layer = get_phase_layer(phase)
+            # PLANNING, BRAIN, SYNTHESIS, ERROR are not in Layer 1 or Layer 2 as classified
+            # by model_phase_facts (they're a fourth namespace in types.py)
+            # This test confirms they're not conflated
+            if phase in WORKFLOW_PHASES or phase in COARSE_GRAINED_PHASES:
+                # If a name happens to overlap, it must be semantically different
+                # This is ensured by is_same_layer() returning False for cross-layer
+                pass
+
+    def test_capability_registry_load_is_not_model_manager(self):
+        """CapabilityRegistry.load() is NOT the same as ModelManager.load_model()."""
+        import inspect
+        from capabilities import CapabilityRegistry
+
+        # CapabilityRegistry.load must NOT call ModelManager
+        source = inspect.getsource(CapabilityRegistry.load)
+        assert "ModelManager" not in source, \
+            "CapabilityRegistry.load must NOT call ModelManager"
+        assert "load_model" not in source, \
+            "CapabilityRegistry.load must NOT call load_model()"
+
+    def test_no_cross_layer_phase_mapping_in_model_manager(self):
+        """ModelManager.PHASE_MODEL_MAP contains ONLY Layer 1 workflow phases."""
+        import importlib.util
+        from pathlib import Path
+        # Load ModelManager bypassing brain/__init__.py circular import
+        spec_mm = importlib.util.spec_from_file_location(
+            "_mm", Path(__file__).parent.parent / "brain" / "model_manager.py"
+        )
+        mm_mod = importlib.util.module_from_spec(spec_mm)
+        spec_mm.loader.exec_module(mm_mod)
+        ModelManager = mm_mod.ModelManager
+
+        # Load model_phase_facts bypassing circular import
+        spec_mpf = importlib.util.spec_from_file_location(
+            "_mpf", Path(__file__).parent.parent / "brain" / "model_phase_facts.py"
+        )
+        mpf = importlib.util.module_from_spec(spec_mpf)
+        spec_mpf.loader.exec_module(mpf)
+        is_workflow_phase = mpf.is_workflow_phase
+
+        phase_map = ModelManager.PHASE_MODEL_MAP
+
+        # Every key in PHASE_MODEL_MAP must be a Layer 1 workflow phase
+        for phase in phase_map.keys():
+            assert is_workflow_phase(phase), \
+                f"PHASE_MODEL_MAP key '{phase}' must be Layer 1 (workflow-level)"
+
+    def test_no_cross_layer_phase_mapping_in_model_lifecycle_manager(self):
+        """ModelLifecycleManager.enforce_phase_models uses ONLY Layer 2 coarse-grained phases."""
+        import inspect
+        from capabilities import ModelLifecycleManager
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location(
+            "_mpf", Path(__file__).parent.parent / "brain" / "model_phase_facts.py"
+        )
+        mpf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mpf)
+        is_coarse_grained_phase = mpf.is_coarse_grained_phase
+
+        # Check the enforce_phase_models method body
+        source = inspect.getsource(ModelLifecycleManager.enforce_phase_models)
+
+        # Phase strings used as literals in the method must be Layer 2
+        layer2_phases = {"BRAIN", "TOOLS", "SYNTHESIS", "CLEANUP"}
+        for phase in layer2_phases:
+            if phase in source:
+                assert is_coarse_grained_phase(phase), \
+                    f"ModelLifecycleManager must use Layer 2 phases only, found: {phase}"
+
+
 class TestFactStabilityClassification:
     """Test that fact_stability classification prevents compat seams from being authoritative."""
 

@@ -396,7 +396,7 @@ def test_no_new_graph_framework():
     public_attrs = [a for a in dir(store) if not a.startswith("_")]
     graph_attrs = [a for a in public_attrs if "graph" in a.lower()]
 
-    # Allowed: the three dedicated slots + their injectors + get_stix_graph + truth_write_graph_supports_buffered_writes
+    # Allowed: the three dedicated slots + their injectors + seams from 8VY/8TF
     expected = {
         "inject_graph",
         "inject_stix_graph",
@@ -406,6 +406,12 @@ def test_no_new_graph_framework():
         "get_graph_attachment_kind",
         "graph_supports_buffered_writes",
         "truth_write_graph_supports_buffered_writes",
+        # Sprint 8VY: analytics read-only seams
+        "get_graph_stats",
+        "get_connected_iocs",
+        "get_analytics_graph_for_synthesis",
+        "get_top_seed_nodes",
+        "get_top_entities_for_ghost_global",
     }
 
     unexpected = [a for a in graph_attrs if a not in expected]

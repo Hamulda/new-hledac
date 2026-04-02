@@ -11,6 +11,7 @@ Tests:
 """
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -109,7 +110,7 @@ class TestGhostGlobalMainNoSpelunking:
 
     def test_main_uses_store_seam(self):
         """__main__.py ghost_global block calls store seam, not graph.get_nodes()."""
-        main_path = "hledac/universal/__main__.py"
+        main_path = Path(__file__).parent.parent.parent / "__main__.py"
         with open(main_path) as f:
             source = f.read()
 

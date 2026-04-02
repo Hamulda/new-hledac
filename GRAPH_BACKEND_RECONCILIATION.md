@@ -1089,3 +1089,157 @@ tests/probe_8wd/test_windup_synthesis_lifecycle_injection.py — 10 PASSED
 4. **Žádná změna dormant path** — `runtime/windup_engine.run_windup()` není opravována jako by byla active
 5. **Žádné nové produkční soubory** — pouze probe test
 6. **Žádný nový windup DTO** — lifecycle gate zůstává na existing `_lifecycle_adapter` seam
+
+
+---
+
+## 19. Sprint 8F7 — Graph Capability Closure: Explicit Authority Labels (2026-04-02)
+
+### 1. Ptačí perspektiva: Proč je to graph capability closure, ne graph rewrite
+
+Graph rewrite by znamenalo sloučit, přesunout nebo zunifikovat graph backedny.
+Graph capability closure znamená **označit existující architekturu explicitními authority labels**,
+doplnit TROJOSOU capability matrix (backend × seam × consumer) a označit dormant path jako dormant.
+
+F7 nedělá:
+- Žádný nový GraphProtocol
+- Žádný generic get_graph() facade
+- Žádný přesun graph logiky do store
+- Žádný scheduler cutover
+- Žádný velký refactor windup_engine.py
+
+F7 dělá:
+- Authority labels na třídách (docstrings)
+- Trojosou capability matrix
+- Aktualizaci dormant/alternate classification
+- Drobné seam guardy kde chybí
+- Aktualizovanou dokumentaci
+
+### 2. Kdo je GraphTruthStore, kdo GraphAnalyticsProvider
+
+| Role | Držitel | Backend |definuje |
+|---|---|---|---|
+| **GraphTruthStore** | `IOCGraph` (Kuzu) | `knowledge/ioc_graph.py` | Truth owner: `buffer_ioc`, `flush_buffers`, `upsert_ioc_batch`, `export_stix_bundle`, `pivot` |
+| **GraphAnalyticsProvider** | `DuckPGQGraph` (DuckDB) | `graph/quantum_pathfinder.py` | Analytics donor: `stats()`, `get_top_nodes_by_degree()`, `export_edge_list()`, `find_connected()` |
+| **Sidecar seam holder** | `DuckDBShadowStore` | `knowledge/duckdb_store.py` | Drží 3 graph sloty, NENÍ graph authority |
+
+DuckDBShadowStore **není** graph authority — je to sidecar container se třemi oddělenými sloty:
+- `_truth_write_graph` (IOCGraph, TRUTH-WRITE ONLY)
+- `_stix_graph` (IOCGraph, TRUTH-STIX ONLY)
+- `_ioc_graph` (DuckPGQGraph, ANALYTICS/Donor ONLY)
+
+### 3. Trojosá Capability Matrix (backend × seam × consumer)
+
+#### Backend capability
+
+| Capability | IOCGraph (Kuzu) | DuckPGQGraph (DuckDB) |
+|---|---|---|
+| **upsert_ioc / add_ioc** | ✅ `upsert_ioc()`, `upsert_ioc_batch()` | ✅ `add_ioc()` |
+| **buffered writes (ACTIVE)** | ✅ `buffer_ioc()`, `buffer_observation()`, `flush_buffers()` | ❌ |
+| **pivot** | ✅ `pivot()` | ❌ |
+| **path queries** | ❌ | ✅ `find_connected()` |
+| **top nodes** | ❌ | ✅ `get_top_nodes_by_degree()` |
+| **graph stats** | ✅ `graph_stats()` → `{nodes, edges}` | ✅ `stats()` → `{nodes, edges, pgq_active}` |
+| **edge export** | ❌ | ✅ `export_edge_list()` |
+| **STIX export** | ✅ `export_stix_bundle()` | ❌ |
+| **checkpoint** | ✅ implicit (Kuzu close) | ✅ `checkpoint()` |
+
+#### Store seam → consumer mapping
+
+| Seam | Typ | Consumer | Backend |
+|---|---|---|---|
+| `inject_truth_write_graph()` / `get_truth_write_graph()` | TRUTH-WRITE | `_graph_ingest_findings()` | IOCGraph |
+| `inject_stix_graph()` / `get_stix_graph()` | TRUTH-STIX | `_build_stix_context()` Priority 1 | IOCGraph |
+| `inject_graph()` / `get_analytics_graph_for_synthesis()` | ANALYTICS | `_windup_synthesis()` Priority 2, windup_engine | DuckPGQGraph |
+| `get_graph_stats()` | ANALYTICS-READ | `_run_sprint_mode()` logging | DuckPGQGraph |
+| `get_connected_iocs()` | ANALYTICS-READ | `_run_sprint_mode()` logging | DuckPGQGraph |
+| `get_top_seed_nodes()` | ANALYTICS-READ | `export_sprint()` | DuckPGQGraph |
+| `get_top_entities_for_ghost_global()` | ANALYTICS-READ | ghost_global | DuckPGQGraph |
+| `truth_write_graph_supports_buffered_writes()` | CAPABILITY-CHECK | `async_ingest_findings_batch` trigger guard | IOCGraph only |
+| `graph_supports_buffered_writes()` | CAPABILITY-CHECK | Legacy compat | IOCGraph only |
+
+#### Consumer → active path status
+
+| Consumer | Path | Graph source | Status |
+|---|---|---|---|
+| `_graph_ingest_findings()` | ACTIVE-phase buffered writes | `_truth_write_graph` (IOCGraph) | ⚠️ TRUTH-WRITE SLOT NEVER INJECTED in ACTIVE — tichý no-op |
+| `_build_stix_context()` Priority 1 | STIX synthesis | `_stix_graph` (IOCGraph) | ✅ IOCGraph created + injected v WINDUP bloku |
+| `_build_stix_context()` Priority 2 | Analytics fallback | `_ioc_graph` (DuckPGQGraph) | ✅ explicit `unavailable` label |
+| `_run_sprint_mode()` stats | Analytics diagnostics | `get_graph_stats()` seam | ✅ |
+| `_run_sprint_mode()` connected | Analytics diagnostics | `get_connected_iocs()` seam | ✅ |
+| `_windup_synthesis()` Priority 1 | STIX context | `store.get_stix_graph()` → `runner.inject_stix_graph()` | ✅ |
+| `_windup_synthesis()` Priority 2 | Analytics donor | `store.get_analytics_graph_for_synthesis()` → `runner.inject_graph()` | ✅ |
+| `windup_engine.run_windup()` | DORMANT/ALTERNATE | `scheduler._ioc_graph` (DuckPGQGraph) | ⚠️ Donor path — never called |
+
+### 4. Kritický nález: truth-write slot NIKDY není injectovaný v ACTIVE
+
+`inject_truth_write_graph()` existuje v DuckDBShadowStore (Sprint 8WA), ale **NENÍ nikdy volána** v žádném produkčním kódu (`__main__.py`, `duckdb_store.py` samotný, `windup_engine.py`).
+
+Důsledek:
+- `_truth_write_graph` je vždy `None` v produkčním běhu
+- `truth_write_graph_supports_buffered_writes()` → `False`
+- `async_ingest_findings_batch` trigger: `if truth_write_graph_supports_buffered_writes()` → False → `_graph_ingest_findings()` se nikdy nezavolá
+- **Buffered IOC writes v ACTIVE fázi jsou tichý no-op**
+
+Toto je existing behavior (před F7) — ne nový problém. F7 toto označuje jako **TRUTH-WRITE GAP** (viz sekce 5).
+
+### 5. Debt sekce — F7 aktualizace
+
+**[F7-DEBT-1] TRUTH-WRITE GAP: `_truth_write_graph` nikdy není injectovaný v ACTIVE**
+
+- Scope: ACTIVE fáze — `async_ingest_findings_batch` trigger → `_graph_ingest_findings()`
+- Root cause: `inject_truth_write_graph()` existuje ale nikdy se nevolá
+- Impact: buffered IOC writes jsou no-op, dokud store nemá injected IOCGraph
+- Resolution: patří do dalšího sprintu (F-sprint focused na ACTIVE-phase graph wiring)
+- Status: **EXISTING BEHAVIOR, not new bug**
+
+**[DEBT-3] duckdb_store._ioc_graph schizofrenie → RESOLVED (Sprint 8WA)**
+- Tri-slot architecture: `_truth_write_graph`, `_ioc_graph`, `_stix_graph` — plně oddělené
+
+**[DEBT-5] duckdb_store._ioc_graph.flush_buffers mrtvý kód → RESOLVED (Sprint 8WA)**
+- `aclose()` nyní volá `flush_buffers()` na `_truth_write_graph` (IOCGraph), ne na `_ioc_graph`
+
+### 6. Dormant/Alternate path — runtime/windup_engine explicitní označení
+
+`runtime/windup_engine.py::run_windup()` je **DORMANT/ALTERNATE** — definovaná ale nikdy nevolaná v produkci.
+
+| Aspekt | Status |
+|---|---|
+| Definice | `runtime/windup_engine.py:31` |
+| Volána z `__main__` | ❌ NE — nikdy |
+| Graph source | `scheduler._ioc_graph` (DuckPGQGraph, analytics donor) |
+| Lifecycle source | `scheduler._lc_adapter` přes `inject_lifecycle_adapter()` |
+| STIX capability | ❌ DuckPGQGraph nemá `export_stix_bundle` |
+| Status label | **DORMANT/ALTERNATE** — donor/alternate path, not canonical |
+
+Active runtime path (`__main__._windup_synthesis()`) je plně nezávislá na `windup_engine`:
+- Vytváří vlastní `SynthesisRunner` instance
+- Používá `store.get_stix_graph()` (Priority 1) a `store.get_analytics_graph_for_synthesis()` (Priority 2)
+- Injected lifecycle přes `inject_lifecycle_adapter(lifecycle)`
+- **NEPOUŽÍVÁ** `windup_engine.run_windup()`
+
+### 7. Změny provedené ve F7
+
+Žádné produkční soubory nebyly změněny. F7 je čistě dokumentační + testovací sprint.
+
+### 8. Testy přidány ve F7
+
+```
+tests/probe_8f7/test_graph_capability_closure.py — NOVÝ
+  F7.1: IOCGraph = GraphTruthStore (authority label v docstringu)
+  F7.2: DuckPGQGraph = GraphAnalyticsProvider (authority label v docstringu)
+  F7.3: DuckDBShadowStore is NOT graph authority (store seams are adapters only)
+  F7.4: Three slots are independent (_truth_write_graph ≠ _ioc_graph ≠ _stix_graph)
+  F7.5: No generic get_graph() introduced
+  F7.6: inject_truth_write_graph never called in production (TRUTH-WRITE GAP)
+  F7.7: windup_engine.run_windup is DORMANT (never called from __main__)
+  F7.8: Active _windup_synthesis uses store seams (not scheduler private fields)
+  F7.9: Capability matrix: IOCGraph has STIX, DuckPGQGraph does not
+  F7.10: Capability matrix: IOCGraph has buffered writes, DuckPGQGraph does not
+```
+
+### 9. Co zůstává pro další sprinty
+
+1. **F-sprint: ACTIVE-phase truth-write graph wiring** — inject `IOCGraph` do `_truth_write_graph` během ACTIVE fáze, aby buffered writes fungovaly
+2. **F-sprint: `get_top_graph_nodes()` na store** — stále chybí, export bere z scorecard
+3. **F-sprint: Scheduler cutover** — `scheduler._ioc_graph` zůstává DuckPGQGraph path

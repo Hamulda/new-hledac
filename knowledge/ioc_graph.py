@@ -1,6 +1,12 @@
 """
 IOC Graph — Kuzu-backed entity graph for OSINT IOC tracking.
 
+GRAPH TRUTH STORE (Sprint 8F7)
+===============================
+IOCGraph is the GraphTruthStore — the authoritative backend for IOC entity truth.
+It owns: buffer_ioc(), flush_buffers(), upsert_ioc_batch(), export_stix_bundle(), pivot().
+It is NOT the analytics backend — DuckPGQGraph serves that role.
+
 Schema:
   IOC(id STRING PK, ioc_type STRING, value STRING,
       first_seen DOUBLE, last_seen DOUBLE, confidence DOUBLE)

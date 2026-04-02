@@ -555,3 +555,215 @@ No new execution authority. No new entry point. No framework.
 | File | Change |
 |------|--------|
 | `TOOL_CAPABILITY_EXECUTION_ENFORCEMENT.md` | Updated: call-site audit, bypass debt matrix, next steps | |
+
+---
+
+## Sprint F9: Execution Plane Containment Prework
+
+### Bird's Eye View: Why This Is CONTAINMENT, Not Activation
+
+F9 prework = preparation without activation. The execution plane is now **explicitly contained** so future scheduler wiring (F9 cutover) has clean seams to exploit.
+
+**What F9 prework does NOT do:**
+- Real production wiring to scheduler
+- execute_with_limits cutover
+- Migration of GhostExecutor actions
+- New execution framework
+- New DTO world outside types.py
+- New orchestrator
+- Broad prewire
+
+**What F9 prework DOES do:**
+- Explicit execution-plane audit (boundaries made explicit)
+- Boundary dotvrzení (GhostExecutor, ToolRegistry, ToolExecLog)
+- Execution-plane matrix (authority taxonomy)
+- Runtime blockers documented (what's missing for real cutover)
+- Test coverage for containment claims
+
+**Core principle:** Containment + blocker ledger over prewire.
+
+---
+
+### Execution Plane Matrix (F9 Prework)
+
+| Komponenta | Role | Canonical? | Donor/Compat? | Audit? | Execution Authority? |
+|------------|------|------------|---------------|--------|---------------------|
+| `ToolRegistry` | Execution control + capability enforcement | ✅ **ANO** | ❌ | ❌ | ✅ **ANO** |
+| `GhostExecutor` | Legacy action executor (ActionType-based) | ❌ | ✅ **ANO** | ❌ | ❌ (donor only) |
+| `ToolExecLog` | Hash-chain audit pro tool invocations | ❌ | ❌ | ✅ **ANO** | ❌ |
+| `ToolExecEvent.correlation` | Correlation sink (run_id, branch_id, provider_id, action_id) | ❌ | ❌ | ✅ (storage) | ❌ |
+
+---
+
+### Canonical Execution-Control Surface
+
+**`ToolRegistry.execute_with_limits()`** je jediný canonical execution-control surface.
+
+```
+execute_with_limits(tool_name, args, ...)
+    ├── check_capabilities() — capability gate (before semaphore)
+    ├── validate_call() — rate limit check
+    ├── semaphore.acquire() — parallelism control
+    └── _execute_handler() — async/sync dispatch
+
+Optional side-effect (Sprint 8VF):
+    └── exec_logger.log(...) — audit logging (fail-safe, non-blocking)
+```
+
+**Dokumentované seams:**
+- `available_capabilities`: capability enforcement hook
+- `exec_logger`: optional audit logging hook
+- `correlation`: optional correlation dict pass-through
+
+---
+
+### Donor/Compat Backend: GhostExecutor
+
+GhostExecutor je **DONOR/COMPAT**, ne execution authority.
+
+**Boundary seams (verified):**
+- ActionType enum world (NOT Tool model)
+- `_actions` dict (NOT `_tools` registry)
+- `execute()` — SEPARATE execution path from ToolRegistry
+- Ne volá `ToolRegistry.execute_with_limits()`
+- Akce jako SCAN, GOOGLE, DEEP_READ, STEALTH_HARVEST, OSINT_DISCOVERY žijí zde
+
+**Removal condition:** Až budou všechny akce migrrovány do ToolRegistry jako Tool handlery.
+
+**Migration blockers:**
+1. Akce jsou svázané s interními lazy-loadery (GhostNetworkDriver, StealthOrchestrator)
+2. ActionType → Tool model přemapování není triviální
+3. GhostExecutor.call-sites by musely přejít na `execute_with_limits()`
+4. Žádný oficiální scheduler wire (guardrail: nesahej na scheduler)
+
+---
+
+### Audit Boundary: ToolExecLog
+
+ToolExecLog je **AUDIT/LOGGING** boundary, ne execution authority.
+
+**Co dělá:**
+- `log()` — append-only hash-chain event
+- `ToolExecEvent.correlation` — storage pro correlation dict
+- `verify_all()` — tamper-evidence verification
+
+**CoNEDĚLÁ:**
+- Neexecutuje tooly
+- Nevytváří parallel execution authority
+- Neukládá raw payloads (jen hashe)
+
+**Correlation seam (Sprint 8VF):**
+```
+ToolRegistry.execute_with_limits(..., correlation={run_id, branch_id, ...})
+    ↓
+exec_logger.log(..., correlation=correlation)
+    ↓
+ToolExecEvent.correlation — stored
+```
+
+---
+
+### Correlation Flow (Current State)
+
+```
+Correlation keys: run_id, branch_id, provider_id, action_id
+
+CALLER (e.g., SprintScheduler)
+    │
+    ├── correlation dict created with run_id, branch_id
+    ├── passed to execute_with_limits(..., correlation=...)
+    │
+    └──→ ToolExecLog.log(..., correlation=correlation)
+            │
+            └──→ ToolExecEvent.correlation — stored in event
+```
+
+**Where correlation comes from:**
+- SprintScheduler.run() má run_id
+- branch_id z větvení sprintů
+- provider_id z model provider
+- action_id z akce identity
+
+**Where correlation is stored:**
+- ToolExecEvent.correlation (ToolExecLog)
+- EvidenceEvent._correlation (EvidenceLog, v payload)
+- MetricsRegistry.correlation (flush do JSONL)
+
+---
+
+### Runtime Blockers for F9 Cutover (Skutečný Triad Wiring)
+
+| Blocker | Severity | Status | Notes |
+|---------|----------|--------|-------|
+| **Žádný scheduler wire** | GUARDRAIL | ⚠️ FORBIDDEN | Nesahej na scheduler dle CLAUDE.md |
+| **GhostExecutor akce nemají Tool mapping** | HIGH | ⚠️ EXISTUJE | Akce jako deep_read, stealth_harvest nejsou v ToolRegistry |
+| **Žádné real call-sites s available_capabilities** | MEDIUM | ⚠️ EXISTUJE | Všechny používají None-skip |
+| **exec_logger není propojený na scheduler kontext** | MEDIUM | ⚠️ EXISTUJE | Korelace není aktivně předávána |
+| **ToolExecLog nemá real-time flush** | LOW | ⚠️ EXISTUJE | Batch fsync, ne real-time |
+| **No capability population pro všechny tooly** | MEDIUM | ⚠️ PARTIAL | Reprezentativní tooly mají required_capabilities |
+
+---
+
+### F9 Prework: Explicitní Odpovědi
+
+**1. Co je canonical execution-control surface?**
+→ `ToolRegistry.execute_with_limits()` — jediný entry point pro tool execution s enforcementem
+
+**2. Co je donor/compat execution backend?**
+→ `GhostExecutor` — ActionType-based akce (SCAN, GOOGLE, DEEP_READ, STEALTH_HARVEST, OSINT_DISCOVERY), NOT canonical
+
+**3. Jaká je role ToolExecLog?**
+→ AUDIT boundary — loguje tool invocation events s hash-chain pro tamper-evidence, correlation storage
+
+**4. Jak dnes teče correlation?**
+→ correlation dict (run_id, branch_id, provider_id, action_id) se předává z caller → execute_with_limits → exec_logger.log → ToolExecEvent.correlation
+
+**5. Jaké jsou blockers pro skutečný F9 cutover?**
+→ Scheduler guardrail, GhostExecutor akce bez Tool mapping, žádné real call-sites s capabilities, korelace není aktivně předávána
+
+---
+
+### Files Changed in Sprint F9
+
+| File | Change |
+|------|--------|
+| `execution/ghost_executor.py` | NO CHANGE (already correct donor/compat) |
+| `tool_registry.py` | NO CHANGE (already canonical surface) |
+| `tool_exec_log.py` | NO CHANGE (already audit boundary) |
+| `types.py` | NO CHANGE (RunCorrelation already exists) |
+| `TOOL_CAPABILITY_EXECUTION_ENFORCEMENT.md` | ADDED: F9 prework section, execution-plane matrix, blockers |
+| `tests/probe_8se/test_capability_enforcement.py` | ADDED: F9 containment tests (already comprehensive) |
+
+### Test Coverage (F9 Prework)
+
+Testy z `probe_8se` a `probe_8vf` již pokrývají:
+
+**GhostExecutor boundary:**
+- `test_ghost_executor_has_donor_comment` ✅
+- `test_ghost_executor_not_in_tool_registry_canonical` ✅
+- `test_ghost_executor_removal_condition_documented` ✅
+- `test_ghost_executor_boundary_seams_documented` ✅
+- `test_ghost_executor_future_owner_documented` ✅
+- `test_ghost_executor_execute_is_separate_from_tool_registry` ✅
+
+**ToolRegistry canonical:**
+- `test_tool_registry_has_explicit_docstring` ✅
+- `test_tool_registry_docstring_has_do_dont` ✅
+- `test_tool_registry_related_components_documented` ✅
+- `test_single_entry_point` ✅
+- `test_capability_enforcement_still_works` ✅
+
+**ToolExecLog audit:**
+- `test_tool_exec_log_has_audit_role` ✅
+- `test_tool_exec_log_is_not_execution_authority` ✅
+- `test_tool_exec_log_has_correlation_boundary` ✅
+- `test_tool_exec_log_has_do_not_list` ✅
+
+**Correlation seam:**
+- `test_correlation_passed_through` ✅
+- `test_tool_exec_event_has_correlation_field` ✅
+- `test_run_correlation_to_dict` ✅
+
+**No new framework:**
+- `test_no_new_execution_authority_created` ✅
+- `test_logger_is_optional_not_required` ✅

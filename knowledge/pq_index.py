@@ -1,6 +1,13 @@
 """
 Product Quantization (PQ) index pro kompresi embeddingů.
 Vrací similarity (1/(1+L2)) konzistentní s HNSW cosine similarity.
+
+ROLE: Compression/Acceleration Layer (NOT retrieval authority)
+===========================================================
+- komprimuje embeddingy pomocí Product Quantization (12× úspora)
+- NENÍ owner primary vector retrieval → rag_engine HNSWVectorIndex
+- NENÍ owner identity store → lancedb_store
+- standalone tool: train() → encode() → search() workflow
 """
 
 import logging

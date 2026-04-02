@@ -4,6 +4,14 @@ Sprint 8VI §A: WINDUP fáze — run_windup()
 Extrahováno z __main__.py WINDUP sekce.
 Dedup, GNN inference, ANE semantic dedup, MoE synthesis,
 hypothesis enqueue, DuckPGQ checkpoint, scorecard.
+
+DORMANT / ALTERNATE PATH (Sprint 8F7)
+======================================
+run_windup() je DORMANT — definovaná ale NIKDY nevolaná v produkci.
+Active runtime path je __main__._windup_synthesis().
+
+Tento modul je ponechán jako donor/alternate pro případné budoucí použití.
+NEPOUŽÍVÁ se v aktuálním produkčním běhu.
 """
 
 from __future__ import annotations

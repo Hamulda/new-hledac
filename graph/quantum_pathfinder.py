@@ -2,6 +2,12 @@
 Quantum-Inspired Pathfinder Module
 ===================================
 
+GRAPH ANALYTICS PROVIDER / DONOR BACKEND (Sprint 8F7)
+========================================================
+DuckPGQGraph is the GraphAnalyticsProvider — the analytics/donor backend.
+It owns: stats(), get_top_nodes_by_degree(), export_edge_list(), find_connected().
+It is NOT the truth store — IOCGraph (Kuzu) serves that role for buffered writes and STIX.
+
 Implements quantum-inspired pathfinding using MLX (Apple Silicon ML framework)
 for finding hidden relationships in knowledge graphs.
 

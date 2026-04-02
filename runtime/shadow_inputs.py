@@ -586,3 +586,125 @@ def collect_export_handoff_facts(
         "ranked_parquet_present": False,
         "phase_durations": {},
     }
+
+
+# =============================================================================
+# Sprint F3.13: Provider Runtime Facts Seam
+# Read-only runtime facts about current model/provider state
+# =============================================================================
+
+@dataclass
+class ProviderRuntimeFactsBundle:
+    """
+    Bundle provider/model runtime-related shadow inputs.
+
+    source: brain/model_manager.py::ModelManager.get_current_model()
+            brain/model_lifecycle.py::get_model_lifecycle_status()
+
+    Shrouded ownership — DIAGNOSTIC SCAFFOLD, NOT a shared contract.
+    Canonical facts owned by brain/model_manager.py and brain/model_lifecycle.py.
+
+    This bundle provides RUNTIME-WIDE FACTS about what model is currently loaded:
+    - current_model: which model is loaded (hermes/modernbert/gliner/None)
+    - is_loaded: whether a model is currently loaded
+    - initialized: whether MLX/runtime is initialized
+
+    This is DISTINCT from model_control.models_needed which tells what SHOULD be loaded.
+
+    Fact stability:
+    - from_manager_and_lifecycle: STABLE (direct from ModelManager + model_lifecycle)
+    - from_lifecycle_only: COMPAT (model_lifecycle shadow-state only)
+    - no inputs: UNKNOWN
+
+    Class-level attributes (NOT instance overrides):
+    - __future_owner__: "brain/model_manager.py / brain/model_lifecycle.py" — canonical owner
+    """
+    current_model: Optional[str] = None  # "hermes" | "modernbert" | "gliner" | None
+    is_loaded: bool = False
+    initialized: bool = False
+    last_error: Optional[str] = None
+    # Fact stability classification
+    fact_stability: str = "UNKNOWN"  # STABLE | COMPAT | UNKNOWN
+    # Compat note: set when fact_stability != STABLE
+    __compat_note__: Optional[str] = None
+
+    # future_owner is class-level — canonical owner of runtime facts
+    __future_owner__: ClassVar[str] = "brain/model_manager.py / brain/model_lifecycle.py"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "runtime_current_model": self.current_model,
+            "runtime_is_loaded": self.is_loaded,
+            "runtime_initialized": self.initialized,
+            "runtime_last_error": self.last_error,
+            "runtime_fact_stability": self.fact_stability,
+            "future_owner": self.__future_owner__,
+            "__compat_note__": self.__compat_note__,
+        }
+
+
+def collect_provider_runtime_facts(
+    model_manager: Any = None,
+    lifecycle_status: Optional[Dict[str, Any]] = None,
+) -> ProviderRuntimeFactsBundle:
+    """
+    Collect provider/model runtime facts from ModelManager and model_lifecycle.
+
+    PURE function — no side effects, no I/O, no model loading.
+
+    This function reads from EXISTING read-only surfaces:
+    - ModelManager.get_current_model() — what is currently loaded
+    - model_lifecycle.get_model_lifecycle_status() — lifecycle shadow-state
+
+    Args:
+        model_manager: ModelManager instance (or None)
+        lifecycle_status: Result of get_model_lifecycle_status() dict (or None)
+
+    Returns:
+        ProviderRuntimeFactsBundle
+
+    Invariant §F3.13: This function NEVER calls load_model(), acquire(),
+    or any activation API. It only reads existing state.
+    """
+    # Primary path: ModelManager available
+    if model_manager is not None:
+        try:
+            current = model_manager.get_current_model()
+            is_loaded = current is not None
+            # model_lifecycle status for initialization state
+            lc_status = lifecycle_status or {}
+            initialized = lc_status.get("initialized", False)
+            last_error = lc_status.get("last_error")
+            return ProviderRuntimeFactsBundle(
+                current_model=current,
+                is_loaded=is_loaded,
+                initialized=initialized,
+                last_error=last_error,
+                fact_stability="STABLE",
+            )
+        except Exception:
+            pass
+
+    # Compat path: lifecycle_status only
+    if lifecycle_status is not None:
+        try:
+            current = lifecycle_status.get("current_model")
+            is_loaded = lifecycle_status.get("loaded", False)
+            initialized = lifecycle_status.get("initialized", False)
+            last_error = lifecycle_status.get("last_error")
+            return ProviderRuntimeFactsBundle(
+                current_model=current,
+                is_loaded=is_loaded,
+                initialized=initialized,
+                last_error=last_error,
+                fact_stability="COMPAT",
+                __compat_note__="model_manager not available, using model_lifecycle shadow-state only",
+            )
+        except Exception:
+            pass
+
+    # Nothing available — unknown
+    return ProviderRuntimeFactsBundle(
+        fact_stability="UNKNOWN",
+        __compat_note__="no model_manager and no lifecycle_status provided",
+    )

@@ -423,6 +423,58 @@ class TestPublicFetcherConsumer:
 
 
 # =============================================================================
+# [SF-17] PaywallBypass uses ProxyConnector (PROXY BLOCKER — cannot use shared surface)
+# =============================================================================
+
+
+class TestProxyBlocker:
+    """Verify PaywallBypass and DarknetConnector are blocked from shared surface by design."""
+
+    def test_paywall_bypass_has_own_session_pool(self):
+        """[SF-17] PaywallBypass._get_session() has own pool — NOT using shared surface."""
+        from hledac.universal.tools.paywall import PaywallBypass
+
+        src = inspect.getsource(PaywallBypass._get_session)
+        # Has its own ClientSession with own connector — not async_get_aiohttp_session
+        assert "aiohttp.ClientSession" in src
+        assert "async_get_aiohttp_session" not in src
+        # Own connector limits (different from shared surface)
+        assert "limit=" in src
+
+    def test_darknet_connector_uses_proxy_connector(self):
+        """[SF-17] DarknetConnector uses ProxyConnector — cannot share surface."""
+        from hledac.universal.tools.darknet import DarknetConnector
+
+        src_tor = inspect.getsource(DarknetConnector.fetch_via_tor)
+        src_i2p = inspect.getsource(DarknetConnector.fetch_via_i2p)
+        # Both use ProxyConnector for Tor/I2P SOCKS5
+        assert "ProxyConnector" in src_tor or "proxy" in src_tor.lower()
+        assert "ProxyConnector" in src_i2p or "proxy" in src_i2p.lower()
+        # Shared surface cannot serve SOCKS5 proxy chains
+
+    def test_shared_surface_has_no_proxy_support(self):
+        """[SF-17] async_get_aiohttp_session uses plain TCPConnector — no SOCKS5."""
+        from hledac.universal.network.session_runtime import async_get_aiohttp_session
+
+        src = inspect.getsource(async_get_aiohttp_session)
+        # Plain TCPConnector only — no ProxyConnector
+        assert "TCPConnector" in src
+        assert "ProxyConnector" not in src
+        assert "socks5" not in src.lower()
+
+    def test_ma_blocked_by_proxy_design(self):
+        """[SF-17] MA-1 and MA-2 are BLOCKED by proxy incompatibility (documented in audit)."""
+        import pathlib
+        audit_path = pathlib.Path(__file__).parents[4] / "AUDIT_SOURCE_TRANSPORT_SESSION.md"
+        if audit_path.exists():
+            content = audit_path.read_text()
+            # Proxy blocker is documented
+            assert "PROXY BLOCKER" in content or "proxy design gap" in content.lower()
+            # MA-1 and MA-2 are marked BLOCKED
+            assert "BLOCKED" in content
+
+
+# =============================================================================
 # Audit Summary Helpers
 # =============================================================================
 
