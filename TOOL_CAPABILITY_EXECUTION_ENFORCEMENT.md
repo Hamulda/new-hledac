@@ -326,6 +326,29 @@ GhostExecutor actions like `stealth_harvest`, `osint_discovery` COULD be impleme
 
 ---
 
+## Dispatch Preview Mapping Seam (Sprint F3.11)
+
+### Canonical Read-Side Owner for Dispatch Preview
+
+| Owner | Location | Role |
+|-------|----------|------|
+| `tool_registry.py` | `TASK_TYPE_TO_TOOL_PREVIEW` (line 1340) | **CANONICAL READ-SIDE** — task_type → tool_name mapping for dispatch parity preview |
+| `tool_registry.py` | `get_task_tool_preview_mapping()` (line 1362) | Getter pro consumer access |
+| `shadow_pre_decision.py` | volá `get_task_tool_preview_mapping()` | **CONSUMER** — pouze čte, nevlastní mapping |
+
+**Drift prevention**: dříve byl `TASK_TYPE_TO_TOOL` lokální konstanta v `shadow_pre_decision.py`. Nyní centralizovaný v `tool_registry.py`.
+
+### Dispatch Path Taxonomy
+
+| Path | Meaning | Canonical Owner |
+|------|---------|----------------|
+| `canonical_tool_dispatch` | Task/type má ToolRegistry tool mapping | `tool_registry.py` |
+| `runtime_only_compat_dispatch` | Task/type používá inline `get_task_handler()`, nemá ToolRegistry mapping | runtime (inline) |
+
+**Scope**: dispatch preview mapping je read-side metadata seam pro diagnostiku. Není execution-control authority.
+
+---
+
 ## Next Migration Step After Sprint 8VF
 
 Before integrating with SprintScheduler dispatch:

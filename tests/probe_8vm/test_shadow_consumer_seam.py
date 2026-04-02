@@ -1205,3 +1205,110 @@ class TestDispatchParityPreview:
                 os.environ["HLEDAC_RUNTIME_MODE"] = original
             else:
                 os.environ.pop("HLEDAC_RUNTIME_MODE", None)
+
+
+class TestDispatchPreviewMappingOwnership:
+    """Sprint F3.11: Verify TASK_TYPE_TO_TOOL_PREVIEW canonical read-side owner."""
+
+    def test_task_tool_preview_mapping_exists_in_tool_registry(self):
+        """Canonical read-side owner is tool_registry.py, not shadow_pre_decision."""
+        from hledac.universal.tool_registry import TASK_TYPE_TO_TOOL_PREVIEW
+
+        # Verify key entries exist
+        assert TASK_TYPE_TO_TOOL_PREVIEW["cve_to_github"] == "python_execute"
+        assert TASK_TYPE_TO_TOOL_PREVIEW["ip_to_ct"] == "web_search"
+        assert TASK_TYPE_TO_TOOL_PREVIEW["domain_to_dns"] == "web_search"
+        assert len(TASK_TYPE_TO_TOOL_PREVIEW) == 18
+
+    def test_get_task_tool_preview_mapping_returns_correct_mapping(self):
+        """get_task_tool_preview_mapping() returns the canonical mapping."""
+        from hledac.universal.tool_registry import get_task_tool_preview_mapping
+
+        mapping = get_task_tool_preview_mapping()
+
+        # Verify same content as constant
+        assert mapping["cve_to_github"] == "python_execute"
+        assert mapping["ip_to_ct"] == "web_search"
+        # Verify it returns a copy (immutable use)
+        assert mapping is not None
+
+    def test_preview_dispatch_parity_uses_registry_mapping(self):
+        """preview_dispatch_parity() reads from tool_registry, not local constant."""
+        from hledac.universal.runtime.shadow_pre_decision import preview_dispatch_parity
+
+        result = preview_dispatch_parity(
+            task_candidates=["cve_to_github", "ip_to_ct"],
+            available_capabilities={"reranking"},
+            control_mode="normal",
+            registry_tools=None,  # use default registry
+        )
+
+        # Verify mapping was used correctly
+        assert result.tool_candidates["cve_to_github"] == "python_execute"
+        assert result.tool_candidates["ip_to_ct"] == "web_search"
+
+    def test_preview_no_module_level_task_type_to_tool_in_shadow_pre_decision(self):
+        """Verify TASK_TYPE_TO_TOOL is NOT a module-level constant in shadow_pre_decision.
+
+        It's OK if it's a local variable inside preview_dispatch_parity() function
+        (assigned from get_task_tool_preview_mapping()), but it must NOT be a
+        module-level constant definition.
+        """
+        import ast
+        import inspect
+
+        source = inspect.getsource(
+            __import__(
+                "hledac.universal.runtime.shadow_pre_decision",
+                fromlist=["shadow_pre_decision"]
+            )
+        )
+        tree = ast.parse(source)
+
+        # Find module-level assignments to TASK_TYPE_TO_TOOL
+        # (top-level = not inside any function or class)
+        module_level_names = set()
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "TASK_TYPE_TO_TOOL":
+                        module_level_names.add(target.id)
+
+        # TASK_TYPE_TO_TOOL should NOT be a module-level assignment in shadow_pre_decision
+        # (it's now only a local variable inside preview_dispatch_parity function)
+        assert "TASK_TYPE_TO_TOOL" not in module_level_names, (
+            "TASK_TYPE_TO_TOOL found as module-level constant in shadow_pre_decision.py — "
+            "it should be read from tool_registry.py via get_task_tool_preview_mapping()"
+        )
+
+    def test_runtime_only_compat_dispatch_still_explicit(self):
+        """runtime_only_compat_dispatch is preserved for task types without registry mapping."""
+        from hledac.universal.runtime.shadow_pre_decision import preview_dispatch_parity
+
+        # Use a task type NOT in TASK_TYPE_TO_TOOL_PREVIEW
+        result = preview_dispatch_parity(
+            task_candidates=["unknown_task_type"],
+            available_capabilities=set(),
+            control_mode="normal",
+        )
+
+        assert "unknown_task_type" in result.runtime_only_handlers
+        assert result.dispatch_path == "runtime_only_compat"
+
+    def test_preview_dispatch_parity_preserves_all_dispatch_taxonomy(self):
+        """All dispatch taxonomy values are preserved: canonical, runtime_only, capability gap."""
+        from hledac.universal.runtime.shadow_pre_decision import preview_dispatch_parity
+
+        # Mix: known task with cap gap + unknown task
+        result = preview_dispatch_parity(
+            task_candidates=["cve_to_github", "ip_to_ct", "some_unknown_task"],
+            available_capabilities=set(),  # missing reranking
+            control_mode="normal",
+        )
+
+        # canonical tool with capability gap
+        assert "cve_to_github" in result.tool_candidates
+        assert result.capability_gaps.get("python_execute") is not None
+        # unknown task = runtime_only_compat
+        assert "some_unknown_task" in result.runtime_only_handlers
+        assert result.dispatch_path == "runtime_only_compat"

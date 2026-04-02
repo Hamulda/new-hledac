@@ -612,6 +612,8 @@ class EvidenceLog:
             # Only emit shadow records for evidence_packet events with URL-bearing payloads
             if event.event_type == "evidence_packet":
                 payload = event.payload or {}
+                # Extract correlation from payload if present (flattened by create_event)
+                _corr: Optional[Dict[str, Any]] = payload.get("_correlation")
                 shadow_record_finding(
                     finding_id=event.event_id,
                     query=payload.get("query", ""),
@@ -622,6 +624,9 @@ class EvidenceLog:
                     title=payload.get("title"),
                     source=payload.get("source"),
                     relevance_score=payload.get("relevance_score"),
+                    branch_id=_corr.get("branch_id") if _corr else None,
+                    provider_id=_corr.get("provider_id") if _corr else None,
+                    action_id=_corr.get("action_id") if _corr else None,
                 )
         except Exception:
             # Fail-open: shadow hook never crashes the main path

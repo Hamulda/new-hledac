@@ -736,6 +736,136 @@ class DuckDBShadowStore:
             return []
 
     # ------------------------------------------------------------------
+    # Sprint 8VY: Analytics graph read-only seams — REMOVED shell-private access
+    # ------------------------------------------------------------------
+    # __main__._run_sprint_mode() previously used:
+    #   getattr(store_instance, "_ioc_graph", None).stats()
+    #   getattr(store_instance, "_ioc_graph", None).find_connected()
+    # _windup_synthesis() previously used:
+    #   elif hasattr(store, "_ioc_graph") and store._ioc_graph: runner.inject_graph(store._ioc_graph)
+    #
+    # These private-slot accesses are replaced by narrow, fail-open seam methods below.
+    # STORE IS NOT GRAPH TRUTH OWNER — these are diagnostic/analytics read-only seams.
+
+    def get_graph_stats(self) -> dict:
+        """
+        Sprint 8VY: Read-only seam for analytics graph stats (DuckPGQGraph.stats()).
+
+        PURPOSE
+        -------
+        Replaces direct shell access to store._ioc_graph.stats() in __main__._run_sprint_mode().
+        DuckDBShadowStore is NOT a graph authority — this is a thin fail-open adapter
+        for the diagnostics use case only.
+
+        CONSUMER
+        --------
+        __main__._run_sprint_mode(): logging [GRAPH] nodes/edges/pgq stats.
+
+        STORE IS NOT GRAPH TRUTH OWNER
+        -------------------------------
+        The analytics _ioc_graph (DuckPGQGraph) is the donor backend.
+        Returns {} (fail-open) if no graph attached or call fails.
+
+        CAPABILITY REQUIREMENTS
+        -----------------------
+        Requires attached graph to implement stats() → {nodes, edges, pgq_active}.
+        DuckPGQGraph: has this method.
+        IOCGraph: has this method.
+
+        Returns:
+            dict: {nodes, edges, pgq_active} or {} if unavailable.
+        """
+        if self._ioc_graph is None:
+            return {}
+        try:
+            method = getattr(self._ioc_graph, "stats", None)
+            if not callable(method):
+                return {}
+            result = method()
+            if not isinstance(result, dict):
+                return {}
+            # Validate minimal shape
+            if not all(k in result for k in ("nodes", "edges")):
+                return {}
+            return result
+        except Exception:
+            return {}
+
+    def get_connected_iocs(self, ioc_value: str, max_hops: int = 2) -> list:
+        """
+        Sprint 8VY: Read-only seam for analytics graph find_connected() (DuckPGQGraph).
+
+        PURPOSE
+        -------
+        Replaces direct shell access to store._ioc_graph.find_connected() in
+        __main__._run_sprint_mode(). Diagnostic use case: log connected nodes for top IOC.
+        DuckDBShadowStore is NOT a graph authority — thin fail-open adapter.
+
+        CONSUMER
+        --------
+        __main__._run_sprint_mode(): logging {first_ioc} → {len(connected)} connected nodes.
+
+        STORE IS NOT GRAPH TRUTH OWNER
+        -------------------------------
+        The analytics _ioc_graph (DuckPGQGraph) is the donor backend.
+        Returns [] (fail-open) if no graph attached or call fails.
+
+        CAPABILITY REQUIREMENTS
+        -----------------------
+        Requires attached graph to implement find_connected(value, max_hops) → list.
+        DuckPGQGraph: has this method.
+        IOCGraph: does NOT have this method → returns [] (fail-open).
+
+        Args:
+            ioc_value: The IOC value to find connections for.
+            max_hops: Maximum traversal depth (default 2).
+
+        Returns:
+            list: Connected IOC nodes or [] if unavailable.
+        """
+        if self._ioc_graph is None:
+            return []
+        try:
+            method = getattr(self._ioc_graph, "find_connected", None)
+            if not callable(method):
+                return []
+            result = method(ioc_value, max_hops=max_hops)
+            if not isinstance(result, list):
+                return []
+            return result
+        except Exception:
+            return []
+
+    def get_analytics_graph_for_synthesis(self) -> Any:
+        """
+        Sprint 8VY: Read-only seam replacing store._ioc_graph fallback in _windup_synthesis().
+
+        PURPOSE
+        -------
+        Replaces the elif hasattr(store, "_ioc_graph") and store._ioc_graph fallback in
+        _windup_synthesis(). This is the Priority 2 / analytics-donor path for synthesis.
+
+        CONSUMER
+        --------
+        _windup_synthesis(): runner.inject_graph(store.get_analytics_graph_for_synthesis())
+
+        STORE IS NOT GRAPH TRUTH OWNER
+        -------------------------------
+        DuckDBShadowStore is NOT graph authority. This seam explicitly labels the
+        analytics donor backend. Callers must handle None.
+
+        CAPABILITY REQUIREMENTS
+        -----------------------
+        DuckPGQGraph (analytics donor) has: stats, get_top_nodes_by_degree, export_edge_list.
+        DuckPGQGraph does NOT have: export_stix_bundle, buffer_ioc, flush_buffers.
+        For STIX, use store.get_stix_graph() (Priority 1).
+
+        Returns:
+            Any: The attached analytics graph (DuckPGQGraph) or None.
+        """
+        return self._ioc_graph
+
+    # ------------------------------------------------------------------
     # Sprint 8TF §2: ghost_global seam — top-100 IOC entities for cross-sprint accumulation
     # ------------------------------------------------------------------
 

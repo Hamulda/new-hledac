@@ -2545,21 +2545,21 @@ async def _run_sprint_mode(
                 _top_iocs = await store_instance.get_top_findings(limit=10)
             except Exception:
                 pass
-        # COMPAT LAYER (8VI §A): scheduler reference resolved to store_instance
-        # FUTURE: when SprintScheduler becomes canonical, replace store_instance with scheduler
-        # REMOVAL CONDITION: delete when __main__.py wires SprintScheduler as primary state holder
-        _compat_scheduler = getattr(store_instance, "_ioc_graph", None) if store_instance else None
-        if _compat_scheduler is not None:
-            gs = _compat_scheduler.stats()
-            logger.info(
-                f"[GRAPH] nodes={gs['nodes']} edges={gs['edges']} "
-                f"pgq={gs['pgq_active']}"
-            )
-            if _top_iocs:
-                first_ioc = _top_iocs[0].get("ioc") if isinstance(_top_iocs[0], dict) else None
-                if first_ioc:
-                    connected = _compat_scheduler.find_connected(first_ioc, max_hops=2)
-                    logger.info(f"[GRAPH] {first_ioc} → {len(connected)} connected nodes")
+        # Sprint 8VY §A: Analytics graph stats via store seam (no private-slot access)
+        # Previously: getattr(store_instance, "_ioc_graph", None).stats()
+        if store_instance is not None:
+            gs = store_instance.get_graph_stats() if hasattr(store_instance, "get_graph_stats") else {}
+            if gs:
+                logger.info(
+                    f"[GRAPH] nodes={gs['nodes']} edges={gs['edges']} "
+                    f"pgq={gs['pgq_active']}"
+                )
+                if _top_iocs:
+                    first_ioc = _top_iocs[0].get("ioc") if isinstance(_top_iocs[0], dict) else None
+                    if first_ioc:
+                        connected = store_instance.get_connected_iocs(first_ioc, max_hops=2) if hasattr(store_instance, "get_connected_iocs") else []
+                        if connected:
+                            logger.info(f"[GRAPH] {first_ioc} → {len(connected)} connected nodes")
 
         # Sprint 8QC + 8TC: E2E synthesis — runs in WINDUP, report captured for EXPORT
         windup_report = None
@@ -2652,10 +2652,12 @@ async def _windup_synthesis(
         stix_graph = store.get_stix_graph() if hasattr(store, "get_stix_graph") else None
         if stix_graph is not None:
             runner.inject_stix_graph(stix_graph)
-        elif hasattr(store, "_ioc_graph") and store._ioc_graph is not None:
-            # Sprint 8VQ: Priority 2 — analytics/donor graph (DuckPGQGraph — no STIX)
-            # This path has no STIX capability, but we still wire it for diagnostics
-            runner.inject_graph(store._ioc_graph)
+        else:
+            # Sprint 8VY: Priority 2 — analytics/donor graph via explicit seam
+            # Previously: elif hasattr(store, "_ioc_graph") and store._ioc_graph: runner.inject_graph(store._ioc_graph)
+            analytics_graph = store.get_analytics_graph_for_synthesis() if hasattr(store, "get_analytics_graph_for_synthesis") else None
+            if analytics_graph is not None:
+                runner.inject_graph(analytics_graph)
     except Exception:
         pass
 

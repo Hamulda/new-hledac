@@ -706,6 +706,21 @@ Pure function — DIAGNOSTIC ONLY, žádné `execute_with_limits()`, žádné pr
 | Ledger writes | Není truth store |
 | Dispatch/enqueue work | Čistě diagnostické |
 
+### Canonical Read-Side Owner (Sprint F3.11 normalization)
+
+`TASK_TYPE_TO_TOOL_PREVIEW` mapping (task_type → tool_name) má nyní **canonical read-side ownera**:
+
+| Owner | Role | Location |
+|-------|------|----------|
+| `tool_registry.py` | **CANONICAL READ-SIDE OWNER** — `TASK_TYPE_TO_TOOL_PREVIEW` constant + `get_task_tool_preview_mapping()` | `tool_registry.py:1340-1392` |
+| `shadow_pre_decision.py` | **CONSUMER** — volá `get_task_tool_preview_mapping()`, nevlastní mapping | `shadow_pre_decision.py:1447-1450` |
+
+**Drift prevention**: dříve byl `TASK_TYPE_TO_TOOL` lokální konstanta v `shadow_pre_decision.py`. Nyní je centralizovaný v `tool_registry.py` jako read-side metadata seam. `shadow_pre_decision.py` už mapping nevlastní, pouze čte přes getter.
+
+**Rozlišení ownership**:
+- `tool_registry.py` — canonical read-side owner (metadata seam)
+- `runtime_only_compat_dispatch` — task types bez ToolRegistry mappingu (inline `get_task_handler()`)
+
 ### Co NENÍ v tomto sprintu
 
 | Co | Proč deferred |
@@ -713,6 +728,7 @@ Pure function — DIAGNOSTIC ONLY, žádné `execute_with_limits()`, žádné pr
 | Skutečný dispatch přes ToolRegistry | Vyžaduje scheduler_active mode |
 | Provider plane simulace | Vznik pseudo-authority |
 | Plná capability enforcement | Vyžaduje real capability provider |
+| Nový scheduler-owned persistent state | Shadow zůstává read-only diagnostic |
 
 ### Guardraily Implementované v F3.11
 
@@ -721,12 +737,14 @@ Pure function — DIAGNOSTIC ONLY, žádné `execute_with_limits()`, žádné pr
 3. **Rozlišení canonical vs runtime_only_compat** — runtime_only neprezentuje jako canonical
 4. **Pure function** — žádné side effects v preview_dispatch_parity()
 5. **No bg_tasks** — dispatch parity počítáno synchronně v consume_shadow_pre_decision()
+6. **Mapping ownership normalized** — `TASK_TYPE_TO_TOOL_PREVIEW` v tool_registry.py, ne shadow_pre_decision.py
 
 ### Soubory Změněné v F3.11
 
 | Soubor | Změna |
 |--------|--------|
-| `runtime/shadow_pre_decision.py` | Přidány `DispatchTaxonomy`, `ToolCapabilityGap`, `DispatchReadinessPreview`, `preview_dispatch_parity()` |
-| `runtime/sprint_scheduler.py` | Rozšířen `consume_shadow_pre_decision()` o dispatch parity, `_build_shadow_readiness_preview()` o `dispatch_parity` key |
-| `tests/probe_8vm/test_shadow_consumer_seam.py` | Přidány testy pro dispatch parity preview |
-| `SHADOW_SCHEDULER_PARITY.md` | Přidána F3.11 sekce |
+| `tool_registry.py` | Přidán `TASK_TYPE_TO_TOOL_PREVIEW` constant + `get_task_tool_preview_mapping()` (canonical read-side owner) |
+| `runtime/shadow_pre_decision.py` | Importuje mapping z tool_registry, odstraněna lokální definice |
+| `SHADOW_SCHEDULER_PARITY.md` | Aktualizována F3.11 sekce — canonical read-side owner, mapping ownership normalized |
+| `TOOL_CAPABILITY_EXECUTION_ENFORCEMENT.md` | Aktualizováno — canonical/read-only seams rozšířeny o dispatch preview mapping |
+| `tests/probe_8vm/test_shadow_consumer_seam.py` | Přidány testy pro mapping ownership normalization |

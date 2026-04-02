@@ -876,3 +876,106 @@ Toto je **role cleanup, ne capability merger**. Každý slot má svůj backend a
 2. **DuckDBShadowStore není graph owner** — store zůstává sidecar. Graph attachment seams
    jsou consumer-facing adapters, ne authority shift.
 3. **`get_top_graph_nodes()` chybí** — stále není implementovaná na store, export bere z scorecard.
+
+---
+
+## 17. Sprint 8VY — Shell Boundary Cleanup: Private Graph Slot Access Removed (2026-04-02)
+
+### 1. Ptačí perspektiva: Proč je to shell boundary cleanup, ne graph rewrite
+
+V products kódu `__main__._run_sprint_mode()` a `_windup_synthesis()` existovaly **přímé přístupy na store private sloty**:
+
+```python
+# __main__.py — COMPAT LAYER (8VI §A) — PŘÍMÝ PRIVATE-SLOT ACCESS
+_compat_scheduler = getattr(store_instance, "_ioc_graph", None)  # ← private slot
+if _compat_scheduler is not None:
+    gs = _compat_scheduler.stats()                                # ← direct method call na private slotu
+    connected = _compat_scheduler.find_connected(first_ioc, ...)  # ← direct method call na private slotu
+
+# _windup_synthesis() — FALLBACK PŘÍMÝ PRIVATE-SLOT ACCESS
+elif hasattr(store, "_ioc_graph") and store._ioc_graph is not None:  # ← private slot
+    runner.inject_graph(store._ioc_graph)                           # ← direct private slot access
+```
+
+Toto **nejsou graph rewrite, unification ani nové frameworky**. Je to čistě **nahrazení direct shell accessu
+s pevně danými private názvy slotů úzkými read-only seam metodami** na store objektu.
+
+Proč to není graph rewrite:
+- Počet graph slotů se nemění (3 slots: `_truth_write_graph`, `_ioc_graph`, `_stix_graph`)
+- Žádný graph backend se nemění (IOCGraph, DuckPGQGraph)
+- Žádný nový GraphProtocol nevzniká
+- Store se nestává graph authority
+- Semantika volání zůstává stejná — pouze shell access je přesměrován přes seam
+
+### 2. Graph Shell-Boundary Matrix
+
+| Consumer | Přístup | Slot | Seam Metoda | Semantika |
+|---|---|---|---|---|
+| `_run_sprint_mode` stats logging | `getattr(store, "_ioc_graph").stats()` | `_ioc_graph` | `store.get_graph_stats()` | fail-open → `{}` |
+| `_run_sprint_mode` connected logging | `getattr(store, "_ioc_graph").find_connected()` | `_ioc_graph` | `store.get_connected_iocs()` | fail-open → `[]` |
+| `_windup_synthesis` Priority 2 | `elif store._ioc_graph: runner.inject_graph()` | `_ioc_graph` | `store.get_analytics_graph_for_synthesis()` | explicit None check |
+| Sprint 8VQ STIX Priority 1 | `store.get_stix_graph()` | `_stix_graph` | — | beze změny |
+| Sprint 8TF seed nodes | `store.get_top_seed_nodes()` | `_ioc_graph` | — | beze změny |
+| Sprint 8TF ghost_global | `store.get_top_entities_for_ghost_global()` | `_ioc_graph` | — | beze změny |
+
+**Změněné řádky:**
+- `__main__.py:2548-2562` — COMPAT LAYER block odstraněn, nahrazen seam voláními
+- `__main__.py:2655-2658` — `elif hasattr(store, "_ioc_graph")` odstraněn, nahrazen `get_analytics_graph_for_synthesis()`
+
+### 3. Seznam změněných souborů
+
+| Soubor | Změna |
+|---|---|
+| `knowledge/duckdb_store.py` | 3 nové seam metody: `get_graph_stats()`, `get_connected_iocs()`, `get_analytics_graph_for_synthesis()` |
+| `__main__.py` | Odstraněn COMPAT LAYER (8VI §A) přímý přístup na `_ioc_graph`, nahrazen seam voláními |
+| `GRAPH_BACKEND_RECONCILIATION.md` | Sekce 17 — dokumentace shell boundary cleanup |
+
+### 4. Co bylo odstraněno z live shell-private graph access
+
+**Z `__main__._run_sprint_mode()` (řádky 2548-2562):**
+```python
+# REMOVED:
+_compat_scheduler = getattr(store_instance, "_ioc_graph", None) if store_instance else None
+if _compat_scheduler is not None:
+    gs = _compat_scheduler.stats()
+    ...
+    connected = _compat_scheduler.find_connected(first_ioc, max_hops=2)
+```
+
+**Z `_windup_synthesis()` (řádky 2655-2658):**
+```python
+# REMOVED:
+elif hasattr(store, "_ioc_graph") and store._ioc_graph is not None:
+    runner.inject_graph(store._ioc_graph)
+```
+
+### 5. Jaké nové store-facing seams vznikly
+
+| Seam | Účel | Návrat | Fail-open |
+|---|---|---|---|
+| `get_graph_stats()` | Náhrada `store._ioc_graph.stats()` | `dict {nodes, edges, pgq_active}` nebo `{}` | ✅ |
+| `get_connected_iocs(ioc, max_hops)` | Náhrada `store._ioc_graph.find_connected()` | `list` nebo `[]` | ✅ |
+| `get_analytics_graph_for_synthesis()` | Náhrada `store._ioc_graph` fallback v `_windup_synthesis()` | graph backend nebo `None` | ✅ explicitní None |
+
+Všechny seams jsou:
+- **Fail-open**: žádný hard fail pokud graph není dostupný
+- **Read-only**: žádná write operace
+- **Consumer-specific**: úzce zaměřené na konkrétní use case
+- **Non-authoritative**: store仍然是 sidecar, ne graph authority
+
+### 6. Proč store stále není graph authority
+
+Store má seams, které **pouze delegují** na attached graph backend:
+- `get_graph_stats()` → volá `DuckPGQGraph.stats()` (ne store)
+- `get_connected_iocs()` → volá `DuckPGQGraph.find_connected()` (ne store)
+- `get_analytics_graph_for_synthesis()` → vrací `_ioc_graph` reference (ne store data)
+
+Store **nezná** graph schema, neimplementuje graph logiku, a neukládá graph data.
+Je to stále sidecar adapter — pouze s explicitnějším, auditable rozhraním.
+
+### 7. Co zůstává pro další F7 kroky
+
+1. **IOCGraph v ACTIVE fázi** — viz sekce 16 / F7 krok 1
+2. **`get_top_graph_nodes()`** — stále chybí na store, export bere z scorecard
+3. **Shell boundary pro `DuckPGQGraph` specifická volání** — pokud nějaké existují v other modules (ne v __main__.py scope tohoto sprintu)
+4. **ACTUAL sprint scheduler cutover** — COMPAT LAYER comment říká "when SprintScheduler becomes canonical" — toto je oddělený sprint

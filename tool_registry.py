@@ -1325,6 +1325,58 @@ def list_registered_tasks() -> list[str]:
 
 
 # ============================================================================
+# Sprint F3.11: Read-Side Metadata Seam for Dispatch Preview
+# ============================================================================
+# CANONICAL READ-SIDE OWNER: tool_registry.py
+# This mapping is DIAGNOSTIC ONLY — used by shadow_pre_decision.py preview
+# to map task_type → tool_name without executing anything.
+#
+# NOT execution-control authority — runtime dispatch uses get_task_handler()
+# and inline pivot logic. This mapping only supports dispatch parity preview.
+#
+# Rationale: previously lived in shadow_pre_decision.py as local constant,
+# creating drift risk. Centralized here as read-side metadata seam.
+
+TASK_TYPE_TO_TOOL_PREVIEW: dict[str, str] = {
+    "cve_to_github": "python_execute",
+    "cve_to_academic": "python_execute",
+    "ip_to_ct": "web_search",
+    "ip_to_greynoise": "web_search",
+    "shodan_enrich": "web_search",
+    "domain_to_dns": "web_search",
+    "domain_to_wayback": "web_search",
+    "domain_to_pdns": "web_search",
+    "domain_to_ct": "web_search",
+    "ahmia_search": "web_search",
+    "rdap_lookup": "web_search",
+    "hash_to_mb": "web_search",
+    "wayback_search": "web_search",
+    "commoncrawl_search": "web_search",
+    "paste_keyword_search": "web_search",
+    "github_dork": "web_search",
+    "multi_engine_search": "web_search",
+    "hypothesis_probe": "web_search",
+}
+
+
+def get_task_tool_preview_mapping() -> dict[str, str]:
+    """
+    Return read-only task_type → tool_name preview mapping.
+
+    CANONICAL READ-SIDE OWNER for dispatch preview mapping.
+
+    This is DIAGNOSTIC ONLY — used by preview_dispatch_parity() to show
+    which tool a task_type would route to in canonical dispatch path.
+
+    Does NOT affect actual runtime dispatch which uses get_task_handler().
+
+    Returns:
+        dict[str, str]: task_type → tool_name mapping (copy, immutable use)
+    """
+    return dict(TASK_TYPE_TO_TOOL_PREVIEW)
+
+
+# ============================================================================
 # Convenience Exports
 # ============================================================================
 
@@ -1354,4 +1406,7 @@ __all__ = [
     "register_task",
     "get_task_handler",
     "list_registered_tasks",
+    # Sprint F3.11
+    "TASK_TYPE_TO_TOOL_PREVIEW",
+    "get_task_tool_preview_mapping",
 ]

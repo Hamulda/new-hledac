@@ -1444,28 +1444,10 @@ def preview_dispatch_parity(
     - acquire() / load_model()
     - Provider activation
     """
-    # Known task_type → tool_name mappings
-    # Tyto mappingy jsou DIAGNOSTICKÉ — necanonical, pouze pro preview
-    TASK_TYPE_TO_TOOL: Dict[str, str] = {
-        "cve_to_github": "python_execute",
-        "cve_to_academic": "python_execute",
-        "ip_to_ct": "web_search",
-        "ip_to_greynoise": "web_search",
-        "shodan_enrich": "web_search",
-        "domain_to_dns": "web_search",
-        "domain_to_wayback": "web_search",
-        "domain_to_pdns": "web_search",
-        "domain_to_ct": "web_search",
-        "ahmia_search": "web_search",
-        "rdap_lookup": "web_search",
-        "hash_to_mb": "web_search",
-        "wayback_search": "web_search",
-        "commoncrawl_search": "web_search",
-        "paste_keyword_search": "web_search",
-        "github_dork": "web_search",
-        "multi_engine_search": "web_search",
-        "hypothesis_probe": "web_search",
-    }
+    # Sprint F3.11: Read mapping from canonical read-side owner (tool_registry.py)
+    # Previously this was a local constant — now centralized to prevent drift
+    from ..tool_registry import get_task_tool_preview_mapping
+    TASK_TYPE_TO_TOOL = get_task_tool_preview_mapping()
 
     # Load tools from registry (read-only, no execute)
     if registry_tools is None:

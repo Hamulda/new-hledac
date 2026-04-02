@@ -2,7 +2,8 @@
 **Audit Phase:** 8SF
 **Date:** 2026-04-01
 **Sprint:** 8SF — Authority Audit + Seam Extraction
-**Files in scope:** `coordinators/fetch_coordinator.py`, `transport/transport_resolver.py`, `transport/tor_transport.py`, `transport/nym_transport.py`, `transport/circuit_breaker.py`, `network/session_runtime.py`, `tools/session_manager.py`, `tools/darknet.py`, `tools/paywall.py`
+**Sprint 8VG update:** public_fetcher.py added as ACTUAL consumer of shared surface
+**Files in scope:** `coordinators/fetch_coordinator.py`, `transport/transport_resolver.py`, `transport/tor_transport.py`, `transport/nym_transport.py`, `transport/circuit_breaker.py`, `network/session_runtime.py`, `tools/session_manager.py`, `tools/darknet.py`, `tools/paywall.py`, `fetching/public_fetcher.py`
 
 ---
 
@@ -53,7 +54,7 @@ resilient_fetch()             ──► circuit_breaker.py fallback chain
 | **Source Ingress** | `FetchCoordinator._fetch_url()` | `fetch_coordinator.py:921` | ACTIVE | `start()`/`step()` via pipeline | None | N/A — stasis |
 | **Transport Policy (candidate)** | `TransportResolver.resolve()` | `transport_resolver.py:152` | **DORMANT** | None (not wired) | Not wired into hot path | TorTransport lifecycle mgmt, persistent session pool |
 | **Transport Policy (fast path)** | `SourceTransportMap.get()` | `transport_resolver.py:40` | ACTIVE | Used by callers via `resolve_url()` | Sync-only, no runtime context | After `resolve()` wired |
-| **Shared HTTP Session Surface** | `async_get_aiohttp_session()` | `session_runtime.py:65` | ACTIVE | NONE in fetch path | PaywallBypass, DarknetConnector, resilient_fetch all create own sessions | Redirect consumers to shared surface |
+| **Shared HTTP Session Surface** | `async_get_aiohttp_session()` | `session_runtime.py:65` | ACTIVE | `public_fetcher.py`, `live_feed_pipeline._fetch_article_text()` | PaywallBypass, DarknetConnector, resilient_fetch all create own sessions | Redirect PaywallBypass (MA-1), then DarknetConnector (MA-2) |
 | **Persisted/Credentialed Session** | `SessionManager` | `session_manager.py:27` | ACTIVE | `_fetch_url()` line ~1003 | Separate from transport session | N/A — stable |
 | **Domain Circuit Breaker State** | `get_breaker()` | `circuit_breaker.py:71` | ACTIVE | FetchCoordinator domain CB logic | `_BREAKERS` global is shared | N/A — stable |
 | **Tor Session Pool (production)** | `FetchCoordinator._get_tor_session()` | `fetch_coordinator.py:657` | ACTIVE | `_fetch_with_tor()` | Dual pool conflict (TorTransport also has `_session_tor`) | Replace with resolver-backed pool |
@@ -151,11 +152,17 @@ resilient_fetch()             ──► circuit_breaker.py fallback chain
 
 ## 8. SMALL SEAM EXTRACTIONS (This Sprint)
 
-Only 1 small seam helper was added, consistent with guardrails:
+Only small seam comments and documentation updates, consistent with guardrails:
 
 1. **`_url_priority()` comment** — explicit authority note in FetchCoordinator clarifying that `.onion` URL priority handling is the canonical production path, not via TransportResolver.
+2. **`session_runtime.py` authority comment (Sprint 8VG)** — updated to name `public_fetcher.py` as the ACTUAL active consumer of shared surface (previously unnamed in the comment).
 
 No behavior changes. No new APIs. No refactors.
+
+**Sprint 8VG additions:**
+- `public_fetcher.py` confirmed as runtime-usable consumer of `async_get_aiohttp_session()`
+- `live_feed_pipeline._fetch_article_text()` article fallback seam confirmed as second consumer
+- Migration path MA-1 (PaywallBypass → shared surface) remains TODO — low risk, no preconditions
 
 ---
 

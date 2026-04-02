@@ -56,19 +56,27 @@ TOR_READ_TIMEOUT_S: float = 75.0
 # Shared Lazy aiohttp Session Surface
 # =============================================================================
 #
-# AUTHORITY SPLIT (Sprint 8UX):
+# AUTHORITY SPLIT (Sprint 8UX / 8VG):
 #   This module provides the SHARED async HTTP session surface.
 #   It is NOT the source-ingress owner — that is FetchCoordinator.
 #   It is NOT the persisted session authority — that is SessionManager.
 #
-#   Current consumers:
-#     - _fetch_article_text() in live_feed_pipeline.py (article fallback seam)
-#     - PaywallBypass, DarknetConnector (NOT redirected yet — see AUDIT_SOURCE_TRANSPORT_SESSION.md)
+#   ACTUAL CONSUMERS (runtime-usable, passive/passive+public path):
+#     - fetching/public_fetcher.py — passive text/HTML fetcher (active consumer)
+#     - pipeline/live_feed_pipeline.py:_fetch_article_text() — article fallback seam
+#
+#   NOT (yet) redirected to shared surface (see AUDIT_SOURCE_TRANSPORT_SESSION.md):
+#     - PaywallBypass._get_session() — own ClientSession pool (limit=10, limit_per_host=3)
+#     - DarknetConnector — per-request sessions
+#     - FetchCoordinator._fetch_url() — own transport layer
 #
 #   AsyncSessionFactory in __main__.py is a LEGACY/RUNTIME-SHELL artifact.
 #   It is NOT the same as async_get_aiohttp_session() — separate singleton,
 #   different connector limits, different lifecycle owner.
 #   They must NOT be unified without a full migration plan.
+#
+#   Migration: PaywallBypass → shared surface is MA-1 (low risk, no preconditions).
+#   After that, DarknetConnector → shared surface is MA-2.
 # =============================================================================
 
 _session_instance: Optional[aiohttp.ClientSession] = None

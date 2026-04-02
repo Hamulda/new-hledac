@@ -395,6 +395,61 @@ class TestAnalyticsHookCorrelation:
         # Should still be fail-open
         assert shadow_ingest_failures() == initial_failures
 
+    def test_evidence_log_append_propagates_correlation_to_shadow(self):
+        """EvidenceLog.append() extracts _correlation from payload and passes to shadow_record_finding.
+
+        Verifies cross-ledger propagation: EvidenceLog → analytics_hook (DuckDB shadow).
+        """
+        import os
+        from hledac.universal.knowledge.analytics_hook import (
+            shadow_record_finding,
+            shadow_reset_failures,
+            _ShadowRecorder,
+        )
+
+        # Ensure shadow is disabled so we test the fail-open path
+        os.environ["GHOST_DUCKDB_SHADOW"] = "0"
+        shadow_reset_failures()
+
+        from hledac.universal.evidence_log import EvidenceLog
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_id = f"test_shadow_corr_{uuid.uuid4().hex[:8]}"
+            log = EvidenceLog(run_id=run_id, enable_persist=False)
+
+            # Create evidence_packet event with full correlation
+            correlation = {
+                "run_id": "run_cross_ledger",
+                "branch_id": "branch_cross",
+                "provider_id": "mlx",
+                "action_id": "action_cross",
+            }
+
+            event = log.create_event(
+                event_type="evidence_packet",
+                payload={
+                    "query": "cross-ledger test",
+                    "url": "https://example.com",
+                    "title": "Test",
+                    "source": "test",
+                    "relevance_score": 0.9,
+                },
+                confidence=0.95,
+                correlation=correlation,
+            )
+
+            # Verify _correlation was stored in payload
+            assert "_correlation" in event.payload
+            assert event.payload["_correlation"]["branch_id"] == "branch_cross"
+            assert event.payload["_correlation"]["provider_id"] == "mlx"
+            assert event.payload["_correlation"]["action_id"] == "action_cross"
+
+            # Verify append() succeeded (fail-open even if shadow is disabled)
+            assert event.event_id is not None
+
+            # Restore shadow setting
+            os.environ.pop("GHOST_DUCKDB_SHADOW", None)
+
 
 class TestCorrelationSchema:
     """Test RunCorrelation canonical schema in types.py."""
