@@ -1564,7 +1564,36 @@ class ExportHandoff:
         scorecard: Dict[str, Any],
         correlation: Optional[RunCorrelation] = None,
     ) -> "ExportHandoff":
-        """Create ExportHandoff from windup phase output."""
+        """
+        Create ExportHandoff from windup phase output (scorecard dict).
+
+        Producer-side construction point — called by __main__._print_scorecard_report()
+        to bridge windup_engine's dict output into typed ExportHandoff.
+
+        CURRENT COMPAT SEAM:
+        windup_engine.run_windup() returns a scorecard dict; this method extracts
+        typed fields from that dict. Specifically:
+          - top_nodes ← scorecard["top_graph_nodes"] (populated by windup_engine
+            from scheduler._ioc_graph.get_top_nodes_by_degree(n=10))
+          - synthesis_engine ← scorecard["synthesis_engine_used"]
+          - gnn_predictions ← scorecard["gnn_predicted_links"]
+
+        Two chained compat seams:
+          1. windup dict → scorecard dict (windup_engine writes to scorecard)
+          2. scorecard dict → ExportHandoff fields (this method extracts)
+
+        REMOVAL CONDITION: windup_engine returns typed ExportHandoff directly;
+        at that point __main__ calls ExportHandoff(...) constructor instead
+        of from_windup(scorecard), and this classmethod can be deprecated.
+
+        Args:
+            sprint_id: sprint identifier
+            scorecard: dict from windup phase (contains windup facts)
+            correlation: optional run correlation context
+
+        Returns:
+            ExportHandoff — typed handoff with fields extracted from scorecard dict
+        """
         return cls(
             sprint_id=sprint_id,
             scorecard=scorecard,

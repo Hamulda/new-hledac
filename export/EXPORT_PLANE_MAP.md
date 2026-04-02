@@ -1,6 +1,6 @@
 # Export Plane Map
 # Sprint 8VJ §B
-# Stav: 2026-04-01
+# Stav: 2026-04-02 — Sprint 8VY §A: producer convergence audit
 
 ---
 
@@ -70,6 +70,58 @@
 
 **Canonical renderer:** `export/sprint_markdown_reporter.py`
 **Shell delegace:** `__main__._render_sprint_report_markdown()` — thin bridge
+
+---
+
+## Canonical Producer-Side Handoff Truth (Sprint 8VY)
+
+### Current (Sprint 8VY)
+
+```
+windup_engine.run_windup() → scorecard dict
+    └─ scorecard["top_graph_nodes"] ← from scheduler._ioc_graph.get_top_nodes_by_degree(n=10)
+
+__main__._print_scorecard_report() → scorecard_data dict
+    └─ ExportHandoff.from_windup(sprint_id, scorecard_data) ← CANONICAL producer construction
+
+sprint_exporter.export_sprint(store, handoff)
+    └─ handoff: ExportHandoff (typed) ← CANONICAL consumer input
+```
+
+**Canonical producer construction today:** `ExportHandoff.from_windup(sprint_id, scorecard_data)`
+— called by `__main__._print_scorecard_report()` at line ~2340.
+
+**Compat seams:**
+1. `scorecard["top_graph_nodes"]` extraction (windup dict → ExportHandoff.top_nodes)
+2. `store.get_top_seed_nodes()` fallback in `export_sprint()` (when top_nodes empty)
+
+### Future Target (post-cutover)
+
+```
+windup_engine.run_windup() → typed ExportHandoff (no dict intermediary)
+    └─ ExportHandoff.top_nodes ← directly from graph (no scorecard dict)
+
+__main__._print_scorecard_report() → ExportHandoff(...) ← direct constructor
+    └─ NO from_windup(scorecard) call needed
+
+sprint_exporter.export_sprint(store, handoff)
+    └─ handoff: ExportHandoff (typed, always populated)
+```
+
+**Removal conditions:**
+| Seam | Removal condition |
+|------|-------------------|
+| `from_windup(scorecard)` dict path | windup_engine returns typed ExportHandoff |
+| `ensure_export_handoff(None)` | __main__ always passes typed ExportHandoff |
+| `scorecard["top_graph_nodes"]` compat | windup fills `ExportHandoff.top_nodes` directly |
+| `store.get_top_seed_nodes()` fallback | `ExportHandoff.top_nodes` always populated |
+
+### What Was NOT Done (Sprint 8VY)
+- No new export framework — sprint_exporter.py unchanged
+- No new DTO — ExportHandoff (types.py) remains sole typed handoff
+- No path semantics change — ~/.hledac/reports/ paths unchanged
+- No new production file created
+- No feature flags or toggles added
 
 ---
 

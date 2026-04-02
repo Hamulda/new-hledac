@@ -531,6 +531,12 @@ class DuckDBShadowStore:
         self._ioc_graph: Any = None
         self._graph_attachment_kind: Optional[str] = None  # class name of attached backend
 
+        # Sprint 8VQ: Dedicated STIX-only graph slot.
+        # TRUTH-STORE ONLY: only IOCGraph (Kuzu) has export_stix_bundle().
+        # DuckPGQGraph is analytics/donor — never inject into _stix_graph.
+        # _stix_graph is independent of _ioc_graph (analytics) and _graph_attachment_kind.
+        self._stix_graph: Any = None
+
         # Sprint 8SB: Semantic store (FastEmbed + LanceDB)
         self._semantic_store: Optional[Any] = None
 
@@ -589,6 +595,32 @@ class DuckDBShadowStore:
             callable(getattr(self._ioc_graph, "buffer_ioc", None))
             and callable(getattr(self._ioc_graph, "flush_buffers", None))
         )
+
+    def inject_stix_graph(self, graph: Any) -> None:
+        """
+        Sprint 8VQ: Inject truth-store STIX graph for synthesis consumption.
+
+        TRUTH-STORE ONLY: only IOCGraph (Kuzu) has export_stix_bundle().
+        DuckPGQGraph must NEVER be injected here — it lacks STIX capability.
+
+        This slot is INDEPENDENT of _ioc_graph (analytics/donor graph).
+        _stix_graph is used exclusively by synthesis runners for STIX context.
+
+        Args:
+            graph: IOCGraph (Kuzu) instance or None to clear.
+        """
+        self._stix_graph = graph
+
+    def get_stix_graph(self) -> Any:
+        """
+        Sprint 8VQ: Get injected STIX graph for synthesis consumers.
+
+        Returns the injected truth-store graph (IOCGraph/Kuzu) if available,
+        else None. DuckPGQGraph is never returned — it lacks export_stix_bundle().
+
+        This is a CONSUMER-SPECIFIC seam, not a generic graph accessor.
+        """
+        return self._stix_graph
 
     # ------------------------------------------------------------------
     # Sprint 8TF: Export/Store Seed Seam

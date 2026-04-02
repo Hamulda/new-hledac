@@ -690,3 +690,315 @@ class TestRicherReadinessPreview:
         assert "load_order" not in field_names
         assert "provider_state" not in field_names
         assert "activation_sequence" not in field_names
+
+
+class TestAdvisoryGateSnapshot:
+    """Sprint 8VQ: Tests for advisory gate snapshot."""
+
+    def test_advisory_gate_snapshot_fields(self):
+        """AdvisoryGateSnapshot must have required fields."""
+        from hledac.universal.runtime.shadow_pre_decision import AdvisoryGateSnapshot
+
+        ag = AdvisoryGateSnapshot(
+            gate_outcome="proceed",
+            gate_status="ready",
+            blocker_count=0,
+            unknown_count=1,
+            compat_seam_count=1,
+            blocker_reasons=[],
+            unknown_reasons=["graph backend unknown"],
+            compat_seam_reasons=["windup_local_phase"],
+            defer_to_provider=True,
+            gate_evaluated_at_monotonic=1234.0,
+            gate_evaluated_at_wall="2026-04-02T00:00:00Z",
+            source_pd_timestamp=1233.5,
+        )
+
+        assert ag.gate_outcome == "proceed"
+        assert ag.gate_status == "ready"
+        assert ag.blocker_count == 0
+        assert ag.defer_to_provider is True
+
+    def test_advisory_gate_snapshot_to_dict(self):
+        """AdvisoryGateSnapshot.to_dict() must return all fields."""
+        from hledac.universal.runtime.shadow_pre_decision import AdvisoryGateSnapshot
+
+        ag = AdvisoryGateSnapshot(
+            gate_outcome="blocked",
+            gate_status="blocked",
+            blocker_count=2,
+            unknown_count=0,
+            compat_seam_count=0,
+            blocker_reasons=["lifecycle not ready", "graph backend unknown"],
+            unknown_reasons=[],
+            compat_seam_reasons=[],
+            defer_to_provider=False,
+            gate_evaluated_at_monotonic=1234.0,
+            gate_evaluated_at_wall="2026-04-02T00:00:00Z",
+            source_pd_timestamp=1233.5,
+        )
+
+        d = ag.to_dict()
+        assert d["gate_outcome"] == "blocked"
+        assert d["gate_status"] == "blocked"
+        assert d["blocker_count"] == 2
+        assert len(d["blocker_reasons"]) == 2
+
+    def test_compose_advisory_gate_proceed(self):
+        """compose_advisory_gate must return proceed when no blockers."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            compose_advisory_gate,
+            PreDecisionSummary,
+            LifecycleInterpretation,
+            GraphCapabilitySummary,
+            ExportReadinessSummary,
+            ModelControlSummary,
+            PrecursorSummary,
+            DiffTaxonomy,
+            DecisionGateReadiness,
+        )
+
+        pd = PreDecisionSummary(
+            parity_timestamp_monotonic=1234.0,
+            parity_timestamp_wall="2026-04-02T00:00:00Z",
+            runtime_mode="scheduler_shadow",
+            lifecycle=LifecycleInterpretation(
+                workflow_phase="WINDUP",
+                workflow_phase_entered_at=0.0,
+                control_phase_mode="normal",
+                control_phase_thermal="nominal",
+                windup_local_mode="synthesis",
+                is_active=False,
+                is_windup=True,
+                is_export_ready=False,
+                is_terminal=False,
+                can_accept_work=False,
+                should_prune=False,
+                synthesis_mode_known=True,
+                phase_conflict=False,
+                phase_conflict_reason=None,
+            ),
+            graph=GraphCapabilitySummary(
+                backend="duckpgq", nodes=100, edges=500, pgq_active=True,
+                top_nodes_count=10, is_initialized=True, has_structured_data=True,
+                is_rich=True, readiness="rich",
+            ),
+            export_readiness=ExportReadinessSummary(
+                sprint_id="test", synthesis_engine="test",
+                ranked_parquet_present=True, gnn_predictions=10,
+                is_ready=True, has_gnn_predictions=True, has_ranked_data=True,
+                readiness="ready",
+            ),
+            model_control=ModelControlSummary(
+                tools_count=5, sources_count=3, privacy="STANDARD", depth="DEEP",
+                models_needed=[], has_tools=True, has_sources=True,
+                is_high_quality=True, readiness="ready",
+            ),
+            precursors=PrecursorSummary(
+                branch_decision_id=None, provider_recommend=None,
+                correlation_run_id=None, correlation_branch_id=None,
+                has_branch_decision=False, has_provider_recommend=False,
+                has_correlation=False, is_correlation_linked=False,
+                readiness="unknown",
+            ),
+            diff_taxonomy=[DiffTaxonomy.NONE],
+            blockers=[],
+            unknowns=["provider recommendation not available"],
+            mismatch_reasons={},
+            compat_seams=["windup_local_phase"],
+            decision_gate=DecisionGateReadiness(
+                gate_status="ready",
+                blocker_count=0,
+                unknown_count=1,
+                compat_seam_count=1,
+                blocker_categories=[],
+                unknown_categories=["provider"],
+                is_proceed_allowed=True,
+                defer_to_provider=True,
+            ),
+        )
+
+        ag = compose_advisory_gate(pd)
+
+        assert ag.gate_outcome == "proceed"
+        assert ag.gate_status == "ready"
+        assert ag.blocker_count == 0
+        assert ag.unknown_count == 1
+        assert ag.defer_to_provider is True
+
+    def test_compose_advisory_gate_blocked(self):
+        """compose_advisory_gate must return blocked when blockers present."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            compose_advisory_gate,
+            PreDecisionSummary,
+            LifecycleInterpretation,
+            GraphCapabilitySummary,
+            ExportReadinessSummary,
+            ModelControlSummary,
+            PrecursorSummary,
+            DiffTaxonomy,
+            DecisionGateReadiness,
+        )
+
+        pd = PreDecisionSummary(
+            parity_timestamp_monotonic=1234.0,
+            parity_timestamp_wall="2026-04-02T00:00:00Z",
+            runtime_mode="scheduler_shadow",
+            lifecycle=LifecycleInterpretation(
+                workflow_phase="ACTIVE",
+                workflow_phase_entered_at=0.0,
+                control_phase_mode="normal",
+                control_phase_thermal="nominal",
+                windup_local_mode=None,
+                is_active=True,
+                is_windup=False,
+                is_export_ready=False,
+                is_terminal=False,
+                can_accept_work=True,
+                should_prune=False,
+                synthesis_mode_known=False,
+                phase_conflict=False,
+                phase_conflict_reason=None,
+            ),
+            graph=GraphCapabilitySummary(
+                backend="unknown", nodes=0, edges=0, pgq_active=False,
+                top_nodes_count=0, is_initialized=False, has_structured_data=False,
+                is_rich=False, readiness="unknown",
+            ),
+            export_readiness=ExportReadinessSummary(
+                sprint_id="unknown", synthesis_engine="unknown",
+                ranked_parquet_present=False, gnn_predictions=0,
+                is_ready=False, has_gnn_predictions=False, has_ranked_data=False,
+                readiness="unknown",
+            ),
+            model_control=ModelControlSummary(
+                tools_count=0, sources_count=0, privacy="UNKNOWN", depth="UNKNOWN",
+                models_needed=[], has_tools=False, has_sources=False,
+                is_high_quality=False, readiness="unknown",
+            ),
+            precursors=PrecursorSummary(
+                branch_decision_id=None, provider_recommend=None,
+                correlation_run_id=None, correlation_branch_id=None,
+                has_branch_decision=False, has_provider_recommend=False,
+                has_correlation=False, is_correlation_linked=False,
+                readiness="unknown",
+            ),
+            diff_taxonomy=[DiffTaxonomy.GRAPH_CAPABILITY_AMBIGUITY],
+            blockers=["graph backend unknown — cannot determine graph capability"],
+            unknowns=[],
+            mismatch_reasons={},
+            compat_seams=[],
+            decision_gate=DecisionGateReadiness(
+                gate_status="blocked",
+                blocker_count=1,
+                unknown_count=0,
+                compat_seam_count=0,
+                blocker_categories=["graph"],
+                unknown_categories=[],
+                is_proceed_allowed=False,
+                defer_to_provider=False,
+            ),
+        )
+
+        ag = compose_advisory_gate(pd)
+
+        assert ag.gate_outcome == "blocked"
+        assert ag.gate_status == "blocked"
+        assert ag.blocker_count == 1
+        assert len(ag.blocker_reasons) == 1
+
+
+class TestAdvisoryGateSchedulerIntegration:
+    """Sprint 8VQ: Tests for evaluate_advisory_gate in SprintScheduler."""
+
+    def test_evaluate_advisory_gate_clears_pd_summary_field(self):
+        """_advisory_gate_snapshot must be cleared in _reset_result."""
+        original = os.environ.get("HLEDAC_RUNTIME_MODE")
+        try:
+            os.environ["HLEDAC_RUNTIME_MODE"] = "scheduler_shadow"
+
+            scheduler = SprintScheduler(SprintSchedulerConfig())
+            scheduler._advisory_gate_snapshot = "fake_value"
+
+            scheduler._reset_result()
+
+            assert scheduler._advisory_gate_snapshot is None
+        finally:
+            if original is not None:
+                os.environ["HLEDAC_RUNTIME_MODE"] = original
+            else:
+                os.environ.pop("HLEDAC_RUNTIME_MODE", None)
+
+    def test_evaluate_advisory_gate_no_dispatch(self):
+        """evaluate_advisory_gate must NOT create bg_tasks or dispatch."""
+        original = os.environ.get("HLEDAC_RUNTIME_MODE")
+        try:
+            os.environ["HLEDAC_RUNTIME_MODE"] = "scheduler_shadow"
+
+            scheduler = SprintScheduler(SprintSchedulerConfig())
+            mock_lc = MagicMock()
+            mock_lc.snapshot.return_value = {
+                "current_phase": "WINDUP",
+                "entered_phase_at": 10.0,
+                "started_at_monotonic": 0.0,
+                "sprint_duration_s": 1800.0,
+                "windup_lead_s": 180.0,
+            }
+            mock_lc.recommended_tool_mode.return_value = "normal"
+            mock_lc.remaining_time.return_value = 10.0
+            scheduler._lc_adapter = MagicMock()
+            scheduler._lc_adapter._lc = mock_lc
+            scheduler._config = SprintSchedulerConfig()
+            scheduler._synthesis_engine = "test-engine"
+
+            bg_tasks_before = len(scheduler._bg_tasks)
+
+            scheduler.evaluate_advisory_gate()
+
+            assert len(scheduler._bg_tasks) == bg_tasks_before
+
+        finally:
+            if original is not None:
+                os.environ["HLEDAC_RUNTIME_MODE"] = original
+            else:
+                os.environ.pop("HLEDAC_RUNTIME_MODE", None)
+
+    def test_readiness_preview_includes_advisory_gate(self):
+        """_build_shadow_readiness_preview must include advisory_gate when set."""
+        original = os.environ.get("HLEDAC_RUNTIME_MODE")
+        try:
+            os.environ["HLEDAC_RUNTIME_MODE"] = "scheduler_shadow"
+
+            scheduler = SprintScheduler(SprintSchedulerConfig())
+            scheduler._lc_adapter = MagicMock()
+            scheduler._lc_adapter._lc = MagicMock()
+            scheduler._synthesis_engine = "test-engine"
+
+            # Set fake advisory gate snapshot
+            from hledac.universal.runtime.shadow_pre_decision import AdvisoryGateSnapshot
+            scheduler._advisory_gate_snapshot = AdvisoryGateSnapshot(
+                gate_outcome="proceed",
+                gate_status="ready",
+                blocker_count=0,
+                unknown_count=1,
+                compat_seam_count=1,
+                blocker_reasons=[],
+                unknown_reasons=["provider recommendation not available"],
+                compat_seam_reasons=["windup_local_phase"],
+                defer_to_provider=True,
+                gate_evaluated_at_monotonic=1234.0,
+                gate_evaluated_at_wall="2026-04-02T00:00:00Z",
+                source_pd_timestamp=1233.5,
+            )
+
+            preview = scheduler._build_shadow_readiness_preview()
+
+            assert "advisory_gate" in preview
+            assert preview["advisory_gate"]["gate_outcome"] == "proceed"
+            assert preview["advisory_gate"]["blocker_count"] == 0
+
+        finally:
+            if original is not None:
+                os.environ["HLEDAC_RUNTIME_MODE"] = original
+            else:
+                os.environ.pop("HLEDAC_RUNTIME_MODE", None)

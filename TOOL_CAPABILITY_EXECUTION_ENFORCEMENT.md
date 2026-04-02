@@ -395,6 +395,138 @@ Before integrating with SprintScheduler dispatch:
 
 ---
 
+## Files Changed in Sprint 8VF
+
+| File | Change |
+|------|--------|
+| `tool_registry.py` | Added optional exec_logger + correlation to execute_with_limits() as canonical audit hook |
+| `tool_exec_log.py` | No changes (already correct audit boundary) |
+| `tests/probe_8vf/test_tool_registry_audit.py` | 17 tests covering audit integration, correlation, hash-chain, canonical surface |
+| `TOOL_CAPABILITY_EXECUTION_ENFORCEMENT.md` | This update: canonical audit path, hook point, what logs, what doesn't |
+
+---
+
+## Canonical Execution Audit Path (Sprint 8VF)
+
+### Bird's Eye View
+
+**Why this is audit wrapping, not a new execution framework:**
+
+`execute_with_limits()` was already the sole canonical execution surface. Adding optional `exec_logger` support does NOT create a second execution authority — it adds an **optional side-effect** (audit logging) that:
+
+1. Does NOT change execution behavior when `exec_logger=None`
+2. Does NOT intercept or modify tool results
+3. Does NOT enforce anything (ToolExecLog is AUDIT only)
+4. Fails silently if logging fails (execution continues)
+
+This is equivalent to adding logging to a function — it doesn't create a new function.
+
+### Execution Audit Matrix
+
+| Scenario | exec_logger behavior | What is logged |
+|----------|---------------------|-----------------|
+| Success (handler returns) | `log()` called with status="success" | input_hash, output_hash, error=None |
+| Error inside handler | `log()` called with status="error" | input_hash, output_hash (or error bytes), error=Exception |
+| TimeoutError | `log()` called with status="error" | input_hash, output_hash=b"", error=TimeoutError |
+| CapabilityError (before semaphore) | `log()` NOT called | Audit happens AFTER semaphore entry |
+| RateLimitError (before semaphore) | `log()` NOT called | Same as above |
+
+### Canonical Audit Hook Point
+
+```
+execute_with_limits(tool_name, args, ...)
+    │
+    ├─ capability check (before semaphore)
+    ├─ rate limit check (before semaphore)
+    ├─ semaphore.acquire()
+    │       │
+    │       ├─ [success] result = await handler()
+    │       │           │
+    │       │           └─ finally: exec_logger.log(..., status="success")
+    │       │
+    │       └─ [error] raise ... (TimeoutError or handler exception)
+    │                   │
+    │                   └─ finally: exec_logger.log(..., status="error")
+    │
+    └─ return result
+```
+
+**Hook point is inside `async with semaphore:` block, wrapped in try/except/finally.**
+
+### What IS Logged
+
+- `input_hash`: SHA256 of serialized args (via orjson, sorted keys)
+- `output_hash`: SHA256 of serialized result (or error dict)
+- `output_len`: Actual output length (bounded to 1MB)
+- `status`: "success" | "error" | "cancelled"
+- `error_class`: Bounded error type (only safe classes, not full exception)
+- `correlation`: run_id, branch_id, provider_id, action_id (echoed from input)
+- Hash chain: tamper-evidence via SHA256 chain
+
+### What is NOT Logged
+
+- Raw inputs/outputs (hashes only — **security boundary**)
+- Full exception messages (bounded error class only)
+- Sensitive payload content
+- Exception stack traces
+
+### Correlation Keys Transfer
+
+```
+caller                                    execute_with_limits()
+─────────────────────────────────────────────────────────────────
+correlation = {run_id, branch_id, ...} → exec_logger.log(..., correlation=correlation)
+                                             │
+                                             └─ Stored in ToolExecEvent.correlation
+```
+
+Correlation is passed through `execute_with_limits(correlation=...)` → `exec_logger.log(..., correlation=...)`. No new correlation creation — keys come from call-site (e.g., SprintScheduler run context).
+
+### Why execute_with_limits() Remains the Sole Canonical Surface
+
+1. **Same method name** — no new entry point added
+2. **Same signature** (plus optional parameters) — backward compatible
+3. **Same enforcement** — capability checks, rate limits unchanged
+4. **Same handler dispatch** — `_execute_handler()` unchanged
+5. **exec_logger is optional** — passing `None` gives identical behavior to before
+
+### Why This Doesn't Create a Second Execution Authority
+
+| Property | ToolRegistry | ToolExecLog |
+|----------|--------------|-------------|
+| Executes tools? | YES | NO |
+| Enforces capabilities? | YES | NO |
+| Enforces rate limits? | YES | NO |
+| Owns handler dispatch? | YES | NO |
+| Records audit events? | NO | YES |
+| Hash-chain tamper-evidence? | NO | YES |
+| Is optional side-effect? | N/A | YES |
+
+ToolExecLog is **instrumentation**, not execution. It wraps around execution to observe, not to control.
+
+### Correlation Transfer Without New Execution Surface
+
+```
+Before (no audit):
+  ToolRegistry.execute_with_limits(tool_name, args)
+
+After (with audit):
+  ToolRegistry.execute_with_limits(tool_name, args, exec_logger=logger, correlation={...})
+
+ToolExecLog.log() is called as side-effect, NOT as separate execution path.
+```
+
+No new execution authority. No new entry point. No framework.
+
+### Next Steps Before Scheduler Wiring
+
+1. **Pass exec_logger from SprintScheduler context** — SprintScheduler already has run_id, pass it as correlation
+2. **Wire exec_logger into SprintScheduler.run()** — pass ToolExecLog instance to execute_with_limits calls
+3. **Verify hash-chain** — run `tool_exec_log.verify_all()` after sprint completion
+4. **No changes to GhostExecutor** — remains donor/compat, out of canonical audit path
+
+---
+
 ## Files Changed in Sprint 8TD
 
 | File | Change |

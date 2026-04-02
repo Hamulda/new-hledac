@@ -1,7 +1,7 @@
 {
   "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"python -c \\\"\\nfrom brain.model_lifecycle import get_model_lifecycle_status, unload_model, load_model\\nfrom brain.model_manager import ModelManager, get_model_manager\\nfrom capabilities imp...",
-  "error": "Exit code 1\nTraceback (most recent call last):\n  File \"<string>\", line 2, in <module>\n  File \"/Users/vojtechhamada/PycharmProjects/Hledac/hledac/universal/brain/__init__.py\", line 14, in <module>\n    from .hermes3_engine import Hermes3Engine\n  File \"/Users/vojtechhamada/PycharmProjects/Hledac/hledac/universal/brain/hermes3_engine.py\", line 47, in <module>\n    from ..security.pii_gate import fallback_sanitize\nImportError: attempted relative import beyond top-level package",
-  "timestamp": "2026-04-01T16:40:43.305Z",
+  "tool_input_preview": "{\"command\":\"python -c \\\"\\nimport sys\\nsys.path.insert(0, '.')\\nfrom brain.synthesis_runner import SynthesisRunner\\nr = SynthesisRunner.__new__(SynthesisRunner)\\nprint('slots:', SynthesisRunner.__slots...",
+  "error": "Exit code 1\nTraceback (most recent call last):\n  File \"<string>\", line 4, in <module>\n  File \"/Users/vojtechhamada/PycharmProjects/Hledac/hledac/universal/brain/__init__.py\", line 14, in <module>\n    from .hermes3_engine import Hermes3Engine\n  File \"/Users/vojtechhamada/PycharmProjects/Hledac/hledac/universal/brain/hermes3_engine.py\", line 47, in <module>\n    from ..security.pii_gate import fallback_sanitize\nImportError: attempted relative import beyond top-level package",
+  "timestamp": "2026-04-02T13:30:13.063Z",
   "retry_count": 1
 }

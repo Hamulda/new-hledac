@@ -688,6 +688,12 @@
       "type": "file"
     },
     {
+      "path": "brain/synthesis_runner.py",
+      "accessCount": 2,
+      "lastAccessed": 1775136580893,
+      "type": "directory"
+    },
+    {
       "path": "SHADOW_SCHEDULER_PARITY.md",
       "accessCount": 1,
       "lastAccessed": 1775096592416,
@@ -709,6 +715,18 @@
       "path": "export/COMPAT_DEBT_LEDGER.md",
       "accessCount": 1,
       "lastAccessed": 1775134053348,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vk",
+      "accessCount": 1,
+      "lastAccessed": 1775135896468,
+      "type": "directory"
+    },
+    {
+      "path": "tests/probe_8th/test_stix_degradation_not_silent.py",
+      "accessCount": 1,
+      "lastAccessed": 1775136563444,
       "type": "file"
     }
   ],

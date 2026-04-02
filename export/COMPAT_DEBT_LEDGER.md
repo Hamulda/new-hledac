@@ -108,27 +108,39 @@ Ale toto je bridge protože budoucí cíl je: scheduler dostane store reference 
 
 ## Ledger Entry #5: Typed ExportHandoff handoff spot (Sprint 8VJ §C)
 
-**Status: ✅ RESOLVED 8VJ**
+**Status: ✅ RESOLVED 8VJ — Sprint 8VY §A producer convergence audit**
 
 **Lokace:**
-- `export/COMPAT_HANDOFF.py` — `ensure_export_handoff()` adapter
+- `export/COMPAT_HANDOFF.py` — `ensure_export_handoff()` thin adapter
 - `export/sprint_exporter.py` — `export_sprint(handoff: ExportHandoff | dict | None)` signatura
-- `__main__.py:2419` — producer-side `ExportHandoff.from_windup()` construction
+- `__main__.py:2340` — producer-side `ExportHandoff.from_windup(sprint_id, scorecard_data)` construction
+- `types.py:1561` — `ExportHandoff.from_windup()` classmethod
 
 **Popis:**
-`export_sprint()` dosud přijímal raw `dict` (scorecard). Nově:
-- Přijímá `ExportHandoff | dict | None` (backward compat zachováno)
-- Producer (`__main__`) vytváří `ExportHandoff` přes `ExportHandoff.from_windup()`
-- `ensure_export_handoff()` normalizuje libovolný vstup na typed `ExportHandoff`
-- Path semantics beze změny — `scorecard["top_graph_nodes"]` zůstává compat seam
+`export_sprint()` přijímá `ExportHandoff | dict | None` (backward compat zachováno).
+Producer (`__main__`) vytváří `ExportHandoff` přes `ExportHandoff.from_windup()`.
+`ensure_export_handoff()` normalizuje libovolný vstup na typed `ExportHandoff`.
 
-**CO ZŮSTÁVÁ DOČASNÉ:**
-- `ExportHandoff.from_windup()` extrahuje z `scorecard["top_graph_nodes"]` — toto je dočasný seam
-- Windup engine zatím nevrací přímo `ExportHandoff`
+**Canonical producer-side handoff truth (Sprint 8VY):**
+`__main__._print_scorecard_report()` → `ExportHandoff.from_windup(sprint_id, scorecard_data)`
+TOTO JE dnes canonical producer construction — ne __main__ → dict → ensure.
 
-**Future owner:** Windup engine — až vrátí přímo `ExportHandoff`, adapter zmizí
+**Two chained compat seams remaining:**
+  1. `windup_engine.run_windup()` → `scorecard["top_graph_nodes"]` dict (windup writes graph nodes)
+  2. `scorecard["top_graph_nodes"]` → `ExportHandoff.top_nodes` (from_windup extraction)
 
-**Removal condition:** Windup phase vrátí `ExportHandoff` místo `scorecard` dict
+**Removal conditions (Sprint 8VY §A — explicitní):**
+  1. `from_windup(scorecard)` dict path → REMOVAL when windup_engine returns typed ExportHandoff directly
+  2. `ensure_export_handoff(None)` → REMOVAL when __main__ always passes typed ExportHandoff (never None)
+  3. `scorecard["top_graph_nodes"]` compat seam → REMOVAL when windup_engine fills `ExportHandoff.top_nodes` directly
+  4. `store.get_top_seed_nodes()` fallback in `export_sprint()` → REMOVAL when `ExportHandoff.top_nodes` always populated
+
+**Future owner:** Windup engine — až vrátí přímo `ExportHandoff`, `from_windup(scorecard)` se stane nepotřebným
+
+**What this module is NOT (Sprint 8VY):**
+  - NOT a new DTO system — `ExportHandoff` (types.py) is the only typed handoff
+  - NOT growing — new features go to windup_engine or types.py, not here
+  - NOT a producer factory — __main__ constructs via `from_windup()`, not via this module
 
 ---
 

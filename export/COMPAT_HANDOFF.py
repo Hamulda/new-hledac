@@ -1,41 +1,50 @@
 # hledac/universal/export/COMPAT_HANDOFF.py
-# Sprint 8VJ §A: Export plane compat handoff — runtime doc only
-# Sprint 8VX §A: Updated — export_sprint IS wired (removed outdated "not wired" claim)
-# ⚠️  DEPRECATED LAYER — DO NOT EXTEND
+# Sprint 8VX §C: ExportHandoff producer convergence audit
+# Sprint 8VY §A: Updated — removal conditions tightened, compat scope explicit
+# ⚠️  DEPRECATED THIN ADAPTER — DO NOT EXTEND
 """
-Dokumentační seam pro compat handoff mezi runtime state (store/scheduler)
-a export plane.
+Canonical producer-side handoff truth (Sprint 8VY):
 
-Hlavní body (Sprint 8VX):
-  1. export_sprint() JE wireovaný v __main__.py:2343 — removed "not wired" claim
-  2. ExportHandoff.from_windup() je producer-side construction point
-  3. scorecard["top_graph_nodes"] → top_nodes zůstává compat seam (viz removal cond)
-  4. __main__._export_markdown_report() deleguje na sprint_markdown_reporter.render_sprint_markdown()
-     — canonical renderer exists, path debt documented in __main__.py
+  PRIMARY PATH (canonical): __main__._print_scorecard_report() builds
+    ExportHandoff.from_windup(sprint_id, scorecard_data) where scorecard_data
+    is a dict. The .from_windup() extraction from scorecard["top_graph_nodes"]
+    is the CURRENT compat seam — windup_engine returns dict, not typed ExportHandoff.
 
-Remaining compat seams:
-  - COMPAT_HANDOFF.ensure_export_handoff(): thin adapter, removal when
-    export_sprint() accepts only ExportHandoff (not dict/None)
-  - store.get_top_seed_nodes() fallback in export_sprint():
-    Sprint 8VX §B: switched from store._ioc_graph.get_top_nodes_by_degree()
-    REMOVAL CONDITION: duckdb_store.get_top_seed_nodes() covers all export use cases
-  - __main__._compat_scheduler bridge: REMOVAL CONDITION: SprintScheduler cutover complete
+  COMPAT SEAM (current): scorecard["top_graph_nodes"] is populated by
+    windup_engine from scheduler._ioc_graph.get_top_nodes_by_degree(n=10).
+    Two chained compat seams: windup dict → scorecard dict → ExportHandoff.
+
+  FUTURE TARGET (post-cutover): windup_engine returns typed ExportHandoff
+    directly; from_windup(scorecard) disappears; ensure_export_handoff() shrinks
+    to None-only path.
+
+  REMOVAL CONDITIONS:
+    1. ensure_export_handoff() for dict → removal when windup returns typed ExportHandoff
+    2. ensure_export_handoff() for None → removal when __main__ always passes typed ExportHandoff
+    3. scorecard["top_graph_nodes"] compat → removal when windup_engine fills ExportHandoff.top_nodes directly
+    4. store.get_top_seed_nodes() fallback → removal when ExportHandoff.top_nodes always populated
+
+  WHAT THIS MODULE IS NOT:
+    - NOT a new DTO system — ExportHandoff (types.py) is the only typed handoff
+    - NOT an export framework — export plane is sprint_exporter.py
+    - NOT a producer factory — __main__ constructs via from_windup(), not via this module
+    - NOT growing — new features go to windup_engine or types.py, not here
 """
-
-# Accepted compat: duckdb_store → SprintScheduler IOC graph bridge
-# Lokace: __main__.py (store_instance._ioc_graph)
-# Poznámka: store._ioc_graph drží DuckPGQGraph — toto JE správná dnešní runtime cesta
-# REMOVAL CONDITION: SprintScheduler cutover complete
 
 # =============================================================================
-# Sprint 8VJ §C: Typed ExportHandoff adapter
-# Sprint 8VX §A: Header updated — wired reality reflected
+# Sprint 8VY §A: ExportHandoff producer convergence
 # =============================================================================
-# Thin adapter: ExportHandoff | dict → ExportHandoff
-# Zajišťuje že export_sprint() má vždy typed input bez změny path semantics.
-# scorecard["top_graph_nodes"] zůstává current compat seam.
-# Producer side: __main__.py:2343 — constructs ExportHandoff.from_windup()
-# REMOVAL CONDITION: export_sprint() accepts only ExportHandoff (not dict/None)
+# Thin adapter: ExportHandoff | dict | None → ExportHandoff
+# PRIMARY role: ensure export_sprint() always receives typed ExportHandoff.
+#
+# Two compat seams remaining:
+#   A. dict → ExportHandoff: via from_windup(scorecard) extracting scorecard["top_graph_nodes"]
+#      REMOVAL: when windup_engine returns typed ExportHandoff directly
+#   B. None → empty ExportHandoff: for defensive None handling
+#      REMOVAL: when __main__ always passes typed ExportHandoff (never None)
+#
+# Producer side: __main__._print_scorecard_report() → ExportHandoff.from_windup(sprint_id, scorecard_data)
+# Consumer side: export_sprint() — receives typed ExportHandoff
 # =============================================================================
 
 from typing import TYPE_CHECKING, Any, Dict, Union
@@ -51,25 +60,35 @@ def ensure_export_handoff(
     """
     Normalize ExportHandoff | dict | None → ExportHandoff.
 
-    Používá ExportHandoff.from_windup() pro dict,
-    vrací ExportHandoff unchanged, vrací prázdný handoff pro None.
+    Three dispatch cases:
+      1. ExportHandoff instance → returned unchanged (PRIMARY canonical path)
+      2. dict (scorecard) → via from_windup(scorecard) — COMPAT SEAM A
+      3. None → empty ExportHandoff — COMPAT SEAM B
 
-    Current compat seam: scorecard["top_graph_nodes"] → top_nodes extraction.
-    Toto zůstává dočasné — po cutover windup_engine vrátí přímo ExportHandoff.
+    Compat seam A (dict path):
+      from_windup() extracts scorecard["top_graph_nodes"] → top_nodes.
+      Two chained compat seams: windup dict → scorecard dict → ExportHandoff.
+      REMOVAL CONDITION: windup_engine returns typed ExportHandoff directly.
+
+    Compat seam B (None path):
+      Returns empty ExportHandoff with default_sprint_id.
+      REMOVAL CONDITION: __main__ always passes typed ExportHandoff, never None.
 
     Args:
         handoff: ExportHandoff instance, dict (scorecard-style), or None
-        default_sprint_id: fallback sprint_id pokud handoff neobsahuje
+        default_sprint_id: fallback sprint_id if handoff is None
 
     Returns:
-        ExportHandoff — vždy typed, nikdy None
+        ExportHandoff — always typed, never None
 
-    NOTE: Toto je thin compat adapter, ne nový DTO. Nemění path semantics.
+    NOTE: Thin compat adapter only. Does NOT create typed objects from raw facts.
+          New features go to windup_engine or types.py ExportHandoff.from_windup().
     """
     # Import we need it at runtime
     from hledac.universal.types import ExportHandoff as TypesExportHandoff
 
     if handoff is None:
+        # Compat seam B: defensive None handling
         return TypesExportHandoff(
             sprint_id=default_sprint_id,
             scorecard={},
@@ -77,10 +96,12 @@ def ensure_export_handoff(
         )
 
     if isinstance(handoff, TypesExportHandoff):
+        # PRIMARY canonical path — ExportHandoff passed through unchanged
         return handoff
 
     if isinstance(handoff, dict):
-        # Use from_windup for dict → typed conversion
+        # Compat seam A: dict → typed via from_windup()
+        # scorecard["top_graph_nodes"] → top_nodes is the current compat extraction
         sprint_id = handoff.get("sprint_id", default_sprint_id)
         return TypesExportHandoff.from_windup(
             sprint_id=sprint_id,

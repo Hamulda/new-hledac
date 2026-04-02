@@ -235,7 +235,8 @@ class SynthesisRunner:
                  "_custom_synthesis_prompt", "_prompt_modifier", "_duckdb_store",
                  "_last_synthesis_engine", "_last_arm", "_bandit_rewards",
                  "_stix_status", "_stix_reason", "_stix_backend",
-                 "_lifecycle_gate_source", "_lifecycle_gate_mode", "_lifecycle_adapter")
+                 "_lifecycle_gate_source", "_lifecycle_gate_mode", "_lifecycle_adapter",
+                 "_stix_graph")
 
     def __init__(self, lifecycle: "ModelLifecycle") -> None:
         self._lifecycle = lifecycle
@@ -263,10 +264,28 @@ class SynthesisRunner:
         self._lifecycle_gate_source: str = "unknown"
         self._lifecycle_gate_mode: str = "unknown"
         self._lifecycle_adapter: Any = None
+        # Sprint 8VQ: Dedicated STIX truth-store graph (IOCGraph/Kuzu only)
+        self._stix_graph: Any = None
 
     def inject_graph(self, graph: Any) -> None:
         """Inject IOCGraph instance from 8QA for STIX context injection."""
         self._ioc_graph = graph
+
+    def inject_stix_graph(self, graph: Any) -> None:
+        """
+        Sprint 8VQ: Inject dedicated truth-store STIX graph.
+
+        TRUTH-STORE ONLY: only IOCGraph (Kuzu) has export_stix_bundle().
+        This is a CONSUMER-SPECIFIC seam — not a generic graph abstraction.
+
+        Priority in _build_stix_context:
+          1. _stix_graph (injected here) — PREFERRED truth path
+          2. _ioc_graph (injected via inject_graph) — fallback/analytics path
+
+        Args:
+            graph: IOCGraph (Kuzu) instance with export_stix_bundle(), or None.
+        """
+        self._stix_graph = graph
 
     def inject_lifecycle_adapter(self, adapter: Any) -> None:
         """
@@ -1061,6 +1080,7 @@ class SynthesisRunner:
         """
         B.6: STIX context z ioc_graph.export_stix_bundle() pokud dostupný.
 
+        SPRINT 8VQ: Truth-store priority path via _stix_graph (inject_stix_graph).
         SPRINT 8TH: Returns empty string on degradation, BUT sets structured
         instance attributes FIRST so caller can audit why:
 
@@ -1068,13 +1088,51 @@ class SynthesisRunner:
           _stix_reason  = concrete reason string (not a generic message)
           _stix_backend = backend class name if safe to extract
 
+        Graph priority (Sprint 8VQ):
+          1. _stix_graph — dedicated truth-store STIX slot (IOCGraph/Kuzu only)
+          2. _ioc_graph — analytics/donor fallback (DuckPGQGraph — no STIX)
+
         Truth store (IOCGraph/Kuzu) HAS export_stix_bundle (async).
         Donor backend (DuckPGQGraph/DuckDB) DOES NOT.
-        Silent degradation = caller got empty string with no explanation.
         """
+        # Sprint 8VQ: Priority 1 — dedicated truth-store STIX graph
+        stix_graph = self._stix_graph
+        if stix_graph is not None:
+            try:
+                export_fn = getattr(stix_graph, "export_stix_bundle", None)
+                if export_fn is None:
+                    backend_name = type(stix_graph).__name__
+                    self._stix_status = "unavailable"
+                    self._stix_reason = f"stix_graph '{backend_name}' lacks export_stix_bundle"
+                    self._stix_backend = backend_name
+                    return ""
+                nodes = await export_fn()
+                if not nodes:
+                    self._stix_status = "available"
+                    self._stix_reason = "stix_graph export_stix_bundle returned empty — graph has no IOC nodes"
+                    self._stix_backend = type(stix_graph).__name__
+                    return ""
+                values = [n.get("value", "") for n in nodes[:20] if isinstance(n, dict)]
+                if values:
+                    self._stix_status = "available"
+                    self._stix_reason = f"stix_graph exported {len(nodes)} nodes, truncated to {len(values)} for prompt"
+                    self._stix_backend = type(stix_graph).__name__
+                    return f"\nKnown IOCs from graph ({len(values)} entities): {', '.join(values)}"
+                else:
+                    self._stix_status = "available"
+                    self._stix_reason = "stix_graph export_stix_bundle returned nodes but none had extractable 'value' field"
+                    self._stix_backend = type(stix_graph).__name__
+                    return ""
+            except Exception as e:
+                self._stix_status = "error"
+                self._stix_reason = f"stix_graph STIX export raised {type(e).__name__}: {e}"
+                self._stix_backend = type(stix_graph).__name__
+                return ""
+
+        # Sprint 8VQ: Priority 2 — analytics/donor graph (DuckPGQGraph — no STIX)
         if self._ioc_graph is None:
             self._stix_status = "unavailable"
-            self._stix_reason = "ioc_graph is None — no graph injected"
+            self._stix_reason = "no graph injected — both _stix_graph and _ioc_graph are None"
             self._stix_backend = ""
             return ""
         try:

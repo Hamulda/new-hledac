@@ -314,6 +314,55 @@ class WindupReadinessPreview:
 
 
 @dataclass
+class AdvisoryGateSnapshot:
+    """
+    Advisory gate snapshot — computed at scheduler decision points (WINDUP entry).
+
+    DIAGNOSTIC ONLY — this artifact NESMÍ ovlivnit dispatch ani source ordering.
+    Pouze ukládá výsledek advisory gate evaluation pro diagnostiku/telemetry.
+
+    Na rozdíl od PreDecisionSummary (celkový stav), AdvisoryGateSnapshot
+    je scoped na konkrétní rozhodovací bod v scheduler loopu.
+
+    Rozlišuje:
+    - gate_outcome: "proceed" | "blocked" | "insufficient" | "unknown"
+    - blocker_reasons: konkrétní důvody blocking
+    - compat_seam_reasons: fyziologické compat seam důvody
+    - unknown_reasons: co je neznámé
+    - defer_to_provider: zda je provider activation deferred
+    """
+    gate_outcome: str  # "proceed" | "blocked" | "insufficient" | "unknown"
+    gate_status: str  # "ready" | "blocked" | "insufficient" | "unknown"
+    blocker_count: int
+    unknown_count: int
+    compat_seam_count: int
+    blocker_reasons: List[str]
+    unknown_reasons: List[str]
+    compat_seam_reasons: List[str]
+    defer_to_provider: bool
+    gate_evaluated_at_monotonic: float
+    gate_evaluated_at_wall: str
+    # Reference na source PreDecisionSummary (not copied — for debugging only)
+    source_pd_timestamp: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "gate_outcome": self.gate_outcome,
+            "gate_status": self.gate_status,
+            "blocker_count": self.blocker_count,
+            "unknown_count": self.unknown_count,
+            "compat_seam_count": self.compat_seam_count,
+            "blocker_reasons": self.blocker_reasons,
+            "unknown_reasons": self.unknown_reasons,
+            "compat_seam_reasons": self.compat_seam_reasons,
+            "defer_to_provider": self.defer_to_provider,
+            "gate_evaluated_at_monotonic": self.gate_evaluated_at_monotonic,
+            "gate_evaluated_at_wall": self.gate_evaluated_at_wall,
+            "source_pd_timestamp": self.source_pd_timestamp,
+        }
+
+
+@dataclass
 class ProviderActivationNote:
     """
     Provider activation note — deferred/unknown only, NO simulation.
@@ -1162,6 +1211,76 @@ def _compose_provider_activation_note(
         has_recommendation=precursors.has_provider_recommend,
         recommendation=precursors.provider_recommend,
         next_phase_hint=next_phase_hint,
+    )
+
+
+def compose_advisory_gate(
+    pd: "PreDecisionSummary",
+) -> AdvisoryGateSnapshot:
+    """
+    Sestaví AdvisoryGateSnapshot z PreDecisionSummary.
+
+    Toto je PURE FUNCTION — žádné side effects, žádné I/O.
+
+    Advisory gate snapshot je COMPUTED AT SCHEDULER DECISION POINTS (WINDUP entry).
+    Na rozdíl od PreDecisionSummary (celkový stav), AdvisoryGateSnapshot je
+    scoped na konkrétní rozhodovací bod v scheduler loopu.
+
+    DIAGNOSTIC ONLY — NESMÍ ovlivnit dispatch ani source ordering.
+
+    Rozlišuje:
+    - gate_outcome = "proceed": žádné blockers, může proceed
+    - gate_outcome = "blocked": hard blockers present
+    - gate_outcome = "insufficient": insufficient facts
+    - gate_outcome = "unknown": cannot determine
+    """
+    import time
+
+    gate = pd.decision_gate
+    now_mono = time.monotonic()
+    now_wall = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    if gate is None:
+        return AdvisoryGateSnapshot(
+            gate_outcome="unknown",
+            gate_status="unknown",
+            blocker_count=0,
+            unknown_count=len(pd.unknowns),
+            compat_seam_count=len(pd.compat_seams),
+            blocker_reasons=[],
+            unknown_reasons=list(pd.unknowns),
+            compat_seam_reasons=list(pd.compat_seams),
+            defer_to_provider=False,
+            gate_evaluated_at_monotonic=now_mono,
+            gate_evaluated_at_wall=now_wall,
+            source_pd_timestamp=pd.parity_timestamp_monotonic,
+        )
+
+    # Determine gate outcome (actionable vs non-actionable)
+    if gate.gate_status == "blocked":
+        gate_outcome = "blocked"
+    elif gate.gate_status == "insufficient":
+        gate_outcome = "insufficient"
+    elif gate.gate_status == "unknown":
+        gate_outcome = "unknown"
+    elif gate.is_proceed_allowed:
+        gate_outcome = "proceed"
+    else:
+        gate_outcome = "unknown"
+
+    return AdvisoryGateSnapshot(
+        gate_outcome=gate_outcome,
+        gate_status=gate.gate_status,
+        blocker_count=gate.blocker_count,
+        unknown_count=gate.unknown_count,
+        compat_seam_count=gate.compat_seam_count,
+        blocker_reasons=list(pd.blockers) if gate.blocker_categories else list(pd.blockers),
+        unknown_reasons=list(pd.unknowns),
+        compat_seam_reasons=list(pd.compat_seams),
+        defer_to_provider=gate.defer_to_provider,
+        gate_evaluated_at_monotonic=now_mono,
+        gate_evaluated_at_wall=now_wall,
+        source_pd_timestamp=pd.parity_timestamp_monotonic,
     )
 
 

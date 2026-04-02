@@ -513,3 +513,211 @@ def inject_lifecycle_adapter(self, adapter: Any) -> None:
 5. **Žádné nové cross-plane DTO** — structured state jsou instance attributes na SynthesisRunner
 6. **Nepřepisoval jsem `__main__.py` lifecycle creation** — ten zůstává v režii dalšího sprintu
 
+---
+
+## 14. Sprint 8VQ — STIX Truth-Store-Only Capability Path (2026-04-02)
+
+### Co bylo silent mismatch
+
+`synthesis_runner._build_stix_context()` používal jako jedinou graph source `_ioc_graph`.
+V produkčním kódu `_run_sprint_mode`:
+- `store._ioc_graph` byl vždy **None** (duckdb_store.inject_graph se nikdy nevolal)
+- `scheduler._ioc_graph` byl DuckPGQGraph (analytics/donor, nemá `export_stix_bundle`)
+- **IOCGraph (Kuzu truth-store) se do consumer path NEDOSTAL**
+
+Výsledek: `_build_stix_context()` vždy skončil na `unavailable` pro DuckPGQGraph, i když IOCGraph truth-store existoval odděleně.
+
+### Co je teď explicitně řešeno
+
+**1. Dedicated STIX graph slot v duckdb_store:**
+```python
+# knowledge/duckdb_store.py
+self._stix_graph: Any = None  # INDEPENDENT of _ioc_graph (analytics)
+
+def inject_stix_graph(self, graph: Any) -> None:
+    """TRUTH-STORE ONLY: pouze IOCGraph (Kuzu) sem patří."""
+
+def get_stix_graph(self) -> Any:
+    """Returns injected truth-store STIX graph or None."""
+```
+
+**2. Dedicated STIX graph slot v synthesis_runner:**
+```python
+# brain/synthesis_runner.py __slots__
+"_stix_graph"  # NEW
+
+def inject_stix_graph(self, graph: Any) -> None:
+    """TRUTH-STORE ONLY: priorita 1 pro STIX context."""
+```
+
+**3. `_build_stix_context()` — dvě priority:**
+```python
+# Priority 1: _stix_graph (truth-store STIX)
+if self._stix_graph is not None:
+    # použij truth-store IOCGraph
+
+# Priority 2: _ioc_graph (analytics/donor fallback)
+if self._ioc_graph is not None:
+    # DuckPGQGraph → unavailable (nemá export_stix_bundle)
+```
+
+**4. Production wire v `__main__._run_sprint_mode`:**
+```python
+# Sprint 8VQ: Create IOCGraph truth-store for STIX capability.
+# Vytváří se v WINDUP bloku (po ACTIVE fázi) a injektuje do store.
+if store_instance is not None:
+    from .knowledge.ioc_graph import IOCGraph
+    ioc_graph = IOCGraph()
+    await ioc_graph.initialize()
+    store_instance.inject_stix_graph(ioc_graph)
+```
+
+**5. `_windup_synthesis()` — STIX priority seam:**
+```python
+# Priority 1: store.get_stix_graph() → runner.inject_stix_graph()
+# Priority 2: store._ioc_graph → runner.inject_graph() (analytics, no STIX)
+```
+
+### Změněné soubory
+
+| Soubor | Změna |
+|---|---|
+| `knowledge/duckdb_store.py` | `_stix_graph` slot, `inject_stix_graph()`, `get_stix_graph()` |
+| `brain/synthesis_runner.py` | `_stix_graph` v `__slots__` + `__init__`, `inject_stix_graph()`, Priority 1 path v `_build_stix_context()` |
+| `__main__.py` | WINDUP block: IOCGraph creation + `inject_stix_graph()`, `_windup_synthesis()`: STIX priority wire |
+| `tests/probe_8th/test_stix_degradation_not_silent.py` | Aktualizovány testy pro Priority 1/2 path |
+| `GRAPH_BACKEND_RECONCILIATION.md` | Sekce 14 — Sprint 8VQ výsledky |
+
+### Graph consumer truth matrix (aktualizovaná)
+
+| Consumer | Graph source | Backend | STIX capable |
+|---|---|---|---|
+| `_run_sprint_mode` WINDUP block | `IOCGraph()` nový | Kuzu | ✅ |
+| `store.inject_stix_graph()` | IOCGraph (truth) | Kuzu | ✅ |
+| `runner.inject_stix_graph()` | Priority 1 | Kuzu | ✅ |
+| `_run_sprint_mode` compat | `scheduler._ioc_graph` | DuckPGQGraph | ❌ |
+| `runner.inject_graph()` | Priority 2 fallback | DuckPGQGraph | ❌ (unavailable label) |
+| `duckdb_store._ioc_graph` | (mimo scope) | DuckPGQGraph | ❌ |
+
+### Co bylo schválně NEděláno
+
+1. **Žádný nový graph framework** — pouze dedicated STIX slot, ne GraphProtocol
+2. **Žádná změna DuckPGQGraph** — zůstává analytics/donor, není STIX owner
+3. **Žádná změna IOCGraph** — truth-store zůstává Kuzu-only
+4. **Žádná změna `duckdb_store._ioc_graph`** — ten zůstává analytics path
+5. **Nepřepisoval jsem windup_engine** — ten zůstává na `scheduler._ioc_graph` (DuckPGQGraph)
+6. **Žádná změna scheduler cutover** — IOCGraph v ACTIVE fázi zůstává pro pozdější sprint
+
+### Debt sekce — aktualizace
+
+**[DEBT-1] STIX export degradován → RESOLVED (Sprint 8VQ)**
+- Původní stav: `_build_stix_context()` měl jedinou path přes `_ioc_graph`, který byl vždy DuckPGQGraph v production
+- Akce: Sprint 8VQ přidává dedicated `_stix_graph` slot s Priority 1 path
+- Kanonická semantika: `_stix_graph` (truth) → `_ioc_graph` (analytics fallback) → unavailable
+- Uzamčení: `tests/probe_8th/test_stix_degradation_not_silent.py` — 4 testy vč. Priority 1/2 invariantů
+
+**[DEBT-3] duckdb_store._ioc_graph schizofrenie → PARTIALLY MITIGATED (Sprint 8VQ)**
+- Nový `_stix_graph` slot je INDEPENDENT of `_ioc_graph` — oddělené concernsy
+- `inject_stix_graph` TRUTH-STORE ONLY contract — DuckPGQGraph sem nepatří
+- Stále přetrvává: `duckdb_store._ioc_graph` je stále DuckPGQGraph path
+
+
+---
+
+## 14. Sprint 8VQ — STIX Truth-Store-Only Capability Path (2026-04-02)
+
+### Co bylo silent mismatch
+
+`synthesis_runner._build_stix_context()` používal jako jedinou graph source `_ioc_graph`.
+V produkčním kódu `_run_sprint_mode`:
+- `store._ioc_graph` byl vždy **None** (duckdb_store.inject_graph se nikdy nevolal)
+- `scheduler._ioc_graph` byl DuckPGQGraph (analytics/donor, nemá `export_stix_bundle`)
+- **IOCGraph (Kuzu truth-store) se do consumer path NEDOSTAL**
+
+Výsledek: `_build_stix_context()` vždy skončil na `unavailable` pro DuckPGQGraph, i když IOCGraph truth-store existoval odděleně.
+
+### Co je teď explicitně řešeno
+
+**1. Dedicated STIX graph slot v duckdb_store:**
+```python
+# knowledge/duckdb_store.py
+self._stix_graph: Any = None  # INDEPENDENT of _ioc_graph (analytics)
+
+def inject_stix_graph(self, graph: Any) -> None:
+    """TRUTH-STORE ONLY: pouze IOCGraph (Kuzu) sem patří."""
+
+def get_stix_graph(self) -> Any:
+    """Returns injected truth-store STIX graph or None."""
+```
+
+**2. Dedicated STIX graph slot v synthesis_runner:**
+```python
+# brain/synthesis_runner.py __slots__
+"_stix_graph"  # NEW
+
+def inject_stix_graph(self, graph: Any) -> None:
+    """TRUTH-STORE ONLY: priorita 1 pro STIX context."""
+```
+
+**3. `_build_stix_context()` — dvě priority:**
+```python
+# Priority 1: _stix_graph (truth-store STIX)
+if self._stix_graph is not None:
+    # použij truth-store IOCGraph
+
+# Priority 2: _ioc_graph (analytics/donor fallback)
+if self._ioc_graph is not None:
+    # DuckPGQGraph → unavailable (nemá export_stix_bundle)
+```
+
+**4. Production wire v `__main__._run_sprint_mode`:**
+```python
+# Sprint 8VQ: Create IOCGraph truth-store for STIX capability.
+if store_instance is not None:
+    from .knowledge.ioc_graph import IOCGraph
+    ioc_graph = IOCGraph()
+    await ioc_graph.initialize()
+    store_instance.inject_stix_graph(ioc_graph)
+```
+
+### Změněné soubory
+
+| Soubor | Změna |
+|---|---|
+| `knowledge/duckdb_store.py` | `_stix_graph` slot, `inject_stix_graph()`, `get_stix_graph()` |
+| `brain/synthesis_runner.py` | `_stix_graph` v `__slots__` + `__init__`, `inject_stix_graph()`, Priority 1 path v `_build_stix_context()` |
+| `__main__.py` | WINDUP block: IOCGraph creation + `inject_stix_graph()`, `_windup_synthesis()`: STIX priority wire |
+| `tests/probe_8th/test_stix_degradation_not_silent.py` | Aktualizovány testy pro Priority 1/2 path |
+| `GRAPH_BACKEND_RECONCILIATION.md` | Sekce 14 — Sprint 8VQ výsledky |
+
+### Graph consumer truth matrix (aktualizovaná)
+
+| Consumer | Graph source | Backend | STIX capable |
+|---|---|---|---|
+| `_run_sprint_mode` WINDUP block | `IOCGraph()` nový | Kuzu | ✅ |
+| `store.inject_stix_graph()` | IOCGraph (truth) | Kuzu | ✅ |
+| `runner.inject_stix_graph()` | Priority 1 | Kuzu | ✅ |
+| `_run_sprint_mode` compat | `scheduler._ioc_graph` | DuckPGQGraph | ❌ |
+| `runner.inject_graph()` | Priority 2 fallback | DuckPGQGraph | ❌ (unavailable label) |
+
+### Co bylo schválně NEděláno
+
+1. **Žádný nový graph framework** — pouze dedicated STIX slot, ne GraphProtocol
+2. **Žádná změna DuckPGQGraph** — zůstává analytics/donor, není STIX owner
+3. **Žádná změna IOCGraph** — truth-store zůstává Kuzu-only
+4. **Žádná změna `duckdb_store._ioc_graph`** — ten zůstává analytics path
+5. **Nepřepisoval jsem windup_engine** — ten zůstává na `scheduler._ioc_graph` (DuckPGQGraph)
+6. **Žádná změna scheduler cutover** — IOCGraph v ACTIVE fázi zůstává pro pozdější sprint
+
+### Debt sekce — aktualizace
+
+**[DEBT-1] STIX export degradován → RESOLVED (Sprint 8VQ)**
+- Původní stav: `_build_stix_context()` měl jedinou path přes `_ioc_graph`, který byl vždy DuckPGQGraph v production
+- Akce: Sprint 8VQ přidává dedicated `_stix_graph` slot s Priority 1 path
+- Kanonická semantika: `_stix_graph` (truth) → `_ioc_graph` (analytics fallback) → unavailable
+- Uzamčení: `tests/probe_8th/test_stix_degradation_not_silent.py` — 4 testy vč. Priority 1/2 invariantů
+
+**[DEBT-3] duckdb_store._ioc_graph schizofrenie → PARTIALLY MITIGATED (Sprint 8VQ)**
+- Nový `_stix_graph` slot je INDEPENDENT of `_ioc_graph` — oddělené concernsy
+- `inject_stix_graph` TRUTH-STORE ONLY contract — DuckPGQGraph sem nepatří
+- Stále přetrvává: `duckdb_store._ioc_graph` je stále DuckPGQGraph path

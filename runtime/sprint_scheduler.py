@@ -386,6 +386,8 @@ class SprintScheduler:
         self._all_findings: list[dict] = []
         # Sprint 8VM: Shadow pre-decision consumer — read-only, no mutable state
         self._shadow_pd_summary: Any = None
+        # Sprint 8VQ: Advisory gate snapshot — ephemeral, computed at WINDUP entry, diagnostic only
+        self._advisory_gate_snapshot: Any = None
 
     # ── Sprint 8VI §B: RL Adaptive Pivot ────────────────────────────────
 
@@ -512,6 +514,8 @@ class SprintScheduler:
                         phase = adapter._current_phase
                     # Sprint 8RA: Flush dedup at WINDUP entry
                     await self._flush_dedup()
+                    # Sprint 8VQ: Evaluate advisory gate at WINDUP entry (diagnostic only)
+                    self.evaluate_advisory_gate()
                     break  # exit work loop → teardown
 
                 # ── Sprint 8SA: Source scoring re-ordering ───────────────────
@@ -1617,6 +1621,32 @@ class SprintScheduler:
         self._shadow_pd_summary = pd_summary
         return pd_summary
 
+    def evaluate_advisory_gate(self) -> None:
+        """
+        Sprint 8VQ: Evaluate advisory gate at WINDUP entry — DIAGNOSTIC ONLY.
+
+        Reads from cached PreDecisionSummary (computed by consume_shadow_pre_decision)
+        and composes AdvisoryGateSnapshot. Does NOT:
+        - Influence dispatch or source ordering
+        - Activate providers or tools
+        - Write to any ledgers as runtime truth
+        - Create new scheduler framework
+
+        Stores ephemeral result in _advisory_gate_snapshot (cleared in _reset_result).
+        Output goes into diagnostic report via _build_shadow_readiness_preview().
+        """
+        from hledac.universal.runtime.shadow_pre_decision import compose_advisory_gate
+
+        pd = self.consume_shadow_pre_decision()
+        if pd is None:
+            self._advisory_gate_snapshot = None
+            return
+
+        try:
+            self._advisory_gate_snapshot = compose_advisory_gate(pd)
+        except Exception:
+            self._advisory_gate_snapshot = None
+
     def _build_shadow_readiness_preview(self) -> dict[str, Any]:
         """
         Sprint 8VM + 8VQ: Build a machine-readable shadow readiness preview dict.
@@ -1713,6 +1743,23 @@ class SprintScheduler:
         if hasattr(pd, "_tool_readiness_preview"):
             result["tool_readiness_preview"] = pd._tool_readiness_preview
 
+        # Sprint 8VQ: Advisory gate snapshot (computed at WINDUP entry, diagnostic only)
+        if self._advisory_gate_snapshot is not None:
+            ag = self._advisory_gate_snapshot
+            result["advisory_gate"] = {
+                "gate_outcome": ag.gate_outcome,
+                "gate_status": ag.gate_status,
+                "blocker_count": ag.blocker_count,
+                "unknown_count": ag.unknown_count,
+                "compat_seam_count": ag.compat_seam_count,
+                "blocker_reasons": ag.blocker_reasons,
+                "unknown_reasons": ag.unknown_reasons,
+                "compat_seam_reasons": ag.compat_seam_reasons,
+                "defer_to_provider": ag.defer_to_provider,
+                "gate_evaluated_at_monotonic": ag.gate_evaluated_at_monotonic,
+                "gate_evaluated_at_wall": ag.gate_evaluated_at_wall,
+            }
+
         return result
 
     # ── Internal reset ────────────────────────────────────────────────────
@@ -1735,6 +1782,8 @@ class SprintScheduler:
             self._duckdb_read_con = None
         # Sprint 8VM: Clear shadow pre-decision summary
         self._shadow_pd_summary = None
+        # Sprint 8VQ: Clear advisory gate snapshot
+        self._advisory_gate_snapshot = None
 
 
 # ---------------------------------------------------------------------------

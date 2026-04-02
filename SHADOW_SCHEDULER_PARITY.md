@@ -527,3 +527,87 @@ NESMÍ:
 | `runtime/shadow_pre_decision.py` | Přidány DiffTaxonomy enum values, DecisionGateReadiness, ToolReadinessPreview, WindupReadinessPreview, ProviderActivationNote dataclasses, _compose_* funkce |
 | `runtime/sprint_scheduler.py` | Rozšířen `_build_shadow_readiness_preview()` o 4 nové readiness sekce |
 | `SHADOW_SCHEDULER_PARITY.md` | Přidána F3.9 sekce |
+
+---
+
+## F3.10: Advisory Decision-Gate Hook (Sprint 8VQ)
+
+### Bird's-Eye View: Proč je advisory gate hook mezikrok
+
+Shadow scheduler uměl WINDUP-entry advisory snapshot (export-time), ale:
+- Advisory gate snapshot neběžel v scheduler loopu, pouze v diagnostice
+- Chybělo explicitní rozlišení gate_outcome (proceed/blocked/insufficient/unknown)
+- Advisory snapshot nebyl připojen do scheduler telemetry
+
+**Advisory gate hook** posouvá scheduler-shadow z čistě export-time preview na advisory decision-gate:
+- V scheduler loopu na WINDUP entry se zavolá `evaluate_advisory_gate()`
+- Výsledek jde do `_advisory_gate_snapshot` (ephemeral cache)
+- Připojí se do diagnostic reportu pod klíčem `advisory_gate`
+- Neovlivňuje dispatch ani source ordering
+
+### Co je nové v F3.10
+
+#### 1. AdvisoryGateSnapshot
+Explicitní snapshot advisory gate evaluation:
+
+| Field | Meaning |
+|-------|---------|
+| `gate_outcome` | "proceed" \| "blocked" \| "insufficient" \| "unknown" |
+| `gate_status` | "ready" \| "blocked" \| "insufficient" \| "unknown" |
+| `blocker_count`, `unknown_count`, `compat_seam_count` | Počty |
+| `blocker_reasons`, `unknown_reasons`, `compat_seam_reasons` | Konkrétní důvody |
+| `defer_to_provider` | Zda je provider activation deferred |
+| `gate_evaluated_at_*` | Timestamp evaluation |
+
+#### 2. compose_advisory_gate()
+Pure function která sestaví `AdvisoryGateSnapshot` z `PreDecisionSummary`.
+
+#### 3. evaluate_advisory_gate() v SprintScheduler
+- Volán na WINDUP entry (vedle `_flush_dedup()`)
+- Čte z cached `consume_shadow_pre_decision()` result
+- NIC neaktivuje, NIC neovlivňuje dispatch
+- Ukládá do `_advisory_gate_snapshot` (ephemeral)
+
+#### 4. _build_shadow_readiness_preview() rozšířeno
+Přidána sekce `advisory_gate` s flat gate_outcome fields.
+
+### Scheduler Shadow Advisory-Gate Matrix
+
+| Hook Point | Kdy | Co se volá | Výstup | Side Effect |
+|-----------|-----|-------------|--------|-------------|
+| `_build_diagnostic_report()` | Export time | `consume_shadow_pre_decision()` | `PreDecisionSummary` → `shadow_pre_decision` key | Žádný |
+| `evaluate_advisory_gate()` | WINDUP entry | `compose_advisory_gate()` | `AdvisoryGateSnapshot` → `advisory_gate` key | Žádný |
+| `_build_shadow_readiness_preview()` | Export time | `compose_pre_decision()` | dict pro report | Žádný |
+
+### Co scheduler-shadow TEĎ UMÍ (F3.10)
+
+1. **Advisory decision-gate evaluation** — gate_outcome rozlišení v scheduler loopu
+2. **Ephemeral advisory cache** — `_advisory_gate_snapshot` cleared per sprint
+3. **Diagnostic gate telemetry** — připojeno do diagnostic reportu
+4. **Provider deferral awareness** — defer_to_provider flag
+
+### Co scheduler-shadow STÁLE NESMÍ (hard boundaries)
+
+| Zakázáno | Proč |
+|----------|------|
+| Tool execution (execute_with_limits) | Side effect |
+| Provider activation (acquire/load_model) | Mění runtime state |
+| Dispatch / enqueue work | Čistě diagnostické |
+| Persistent state kromě ephemeral cache | Shadow zůstává read-only |
+
+### Guardraily Implementované v F3.10
+
+1. **Advisory gate je ephemeral cache** — `_advisory_gate_snapshot` cleared v `_reset_result()`
+2. **evaluate_advisory_gate() neaktivuje nic** — pouze volá `compose_advisory_gate()`
+3. **WINDUP entry bod** — voláno vedle `_flush_dedup()`, ne v decision loopu
+4. **Žádné nové bg_tasks** — žádné asyncio tasky
+5. **Žádné ledger writes** — pouze diagnostic dict output
+
+### Soubory Změněné v F3.10
+
+| Soubor | Změna |
+|--------|--------|
+| `runtime/shadow_pre_decision.py` | Přidán `AdvisoryGateSnapshot` dataclass, `compose_advisory_gate()` funkce |
+| `runtime/sprint_scheduler.py` | Přidán `evaluate_advisory_gate()`, pole `_advisory_gate_snapshot`, volání na WINDUP entry, rozšířen `_build_shadow_readiness_preview()` |
+| `tests/probe_8vm/test_shadow_consumer_seam.py` | Přidány testy pro advisory gate |
+| `SHADOW_SCHEDULER_PARITY.md` | Přidána F3.10 sekce |

@@ -2326,12 +2326,22 @@ async def _print_scorecard_report(
     # Sprint 8VI §A: Wire export_sprint() do EXPORT fáze
     # Sprint 8VJ §C: Producer-side ExportHandoff construction
     # Sprint 8VX §A: Comments aligned — ExportHandoff is PRIMARY handoff surface.
+    # Sprint 8VY §A: Producer convergence — canonical path IS from_windup(scorecard)
+    #                today; compat seam is scorecard["top_graph_nodes"] extraction.
     #
-    # Graph fallback (store._ioc_graph.get_top_nodes_by_degree) is ACCEPTED COMPAT SEAM.
-    # REMOVAL CONDITION: duckdb_store.get_top_seed_nodes() covers all export use cases.
-    #                     Until then, fallback remains — it covers the path where
-    #                     windup ran but did not populate top_graph_nodes in scorecard.
-    # Future owner: duckdb_store.get_top_seed_nodes()
+    # PRIMARY PATH (canonical today): __main__ constructs ExportHandoff.from_windup()
+    # from the scorecard dict. This IS the canonical producer construction point.
+    #
+    # CURRENT COMPAT SEAM: windup_engine writes scorecard["top_graph_nodes"] from
+    # scheduler._ioc_graph.get_top_nodes_by_degree(n=10). Two chained seams:
+    #   1. windup dict → scorecard dict (windup_engine)
+    #   2. scorecard dict → ExportHandoff fields (from_windup extraction)
+    # REMOVAL CONDITION: windup_engine returns typed ExportHandoff directly;
+    # at that point from_windup(scorecard) disappears and __main__ calls the
+    # ExportHandoff constructor directly.
+    #
+    # Graph fallback (store.get_top_seed_nodes) is ACCEPTED COMPAT SEAM.
+    # REMOVAL CONDITION: ExportHandoff.top_nodes always populated in all windup paths.
     try:
         from export.sprint_exporter import export_sprint as _export_sprint
         from types import ExportHandoff
@@ -2493,6 +2503,22 @@ async def _run_sprint_mode(
         _boot_record("sprint_mode", "WINDUP")
         _mark_phase("WINDUP")
 
+        # Sprint 8VQ: Create IOCGraph truth-store for STIX capability.
+        # IOCGraph is the ONLY backend with export_stix_bundle().
+        # DuckPGQGraph is analytics/donor — lacks STIX capability.
+        # We create it here in WINDUP (after ACTIVE phase collected IOCs)
+        # and inject into store for synthesis consumption.
+        if store_instance is not None:
+            try:
+                from .knowledge.ioc_graph import IOCGraph
+                ioc_graph = IOCGraph()
+                await ioc_graph.initialize()
+                # Sprint 8VQ: Dedicated STIX-only slot — independent of analytics graph
+                store_instance.inject_stix_graph(ioc_graph)
+                logger.info("[SPRINT 8VQ] IOCGraph truth-store created and injected for STIX")
+            except Exception as e:
+                logger.warning(f"[SPRINT 8VQ] IOCGraph init failed (STIX unavailable): {e}")
+
         # Sprint 8VB: Circuit Breaker stats
         from transport.circuit_breaker import get_all_breaker_states
         _cb = get_all_breaker_states()
@@ -2610,9 +2636,15 @@ async def _windup_synthesis(
 
     runner = SynthesisRunner(ModelLifecycle())
 
-    # Optional: inject IOCGraph from duckdb_store if it has graph access
+    # Sprint 8VQ: Priority 1 — dedicated STIX truth-store graph (IOCGraph/Kuzu)
+    # Created in _run_sprint_mode WINDUP block and injected via store.inject_stix_graph()
     try:
-        if hasattr(store, "_ioc_graph"):
+        stix_graph = store.get_stix_graph() if hasattr(store, "get_stix_graph") else None
+        if stix_graph is not None:
+            runner.inject_stix_graph(stix_graph)
+        elif hasattr(store, "_ioc_graph") and store._ioc_graph is not None:
+            # Sprint 8VQ: Priority 2 — analytics/donor graph (DuckPGQGraph — no STIX)
+            # This path has no STIX capability, but we still wire it for diagnostics
             runner.inject_graph(store._ioc_graph)
     except Exception:
         pass

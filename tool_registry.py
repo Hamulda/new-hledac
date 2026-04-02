@@ -21,9 +21,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal, Optional, Set, TypeVar, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, Optional, Set, TypeVar, get_type_hints
 
 from pydantic import BaseModel, Field, ValidationError, create_model
+
+if TYPE_CHECKING:
+    from .tool_exec_log import ToolExecLog
 
 # Sprint 41: DNS Tunnel Detector
 try:
@@ -653,6 +656,8 @@ class ToolRegistry:
         args: dict[str, Any],
         timeout_ms: int | None = None,
         available_capabilities: set[str] | None = None,
+        exec_logger: Optional["ToolExecLog"] = None,
+        correlation: Optional[dict[str, Optional[str]]] = None,
     ) -> Any:
         """Execute tool with rate limiting and capability enforcement.
 
@@ -662,6 +667,11 @@ class ToolRegistry:
             timeout_ms: Optional timeout override
             available_capabilities: Set of available capability names for enforcement.
                                   If None, capability check is skipped (backward compatible).
+            exec_logger: Optional ToolExecLog for audit logging.
+                        When provided, execution is logged with hash-chain tamper-evidence.
+                        This is an OPTIONAL side-effect — exec_logger is NOT execution authority.
+            correlation: Optional correlation dict (run_id, branch_id, provider_id, action_id).
+                        Passed through to exec_logger if provided.
 
         Returns:
             Tool return value
@@ -673,6 +683,20 @@ class ToolRegistry:
 
         NOTE: None-skip is intentional backward compatibility. This will emit a
         deprecation warning in a future sprint. Pass explicit capability sets.
+
+        CANONICAL AUDIT HOOK (Sprint 8VF):
+        ══════════════════════════════════
+        When exec_logger is provided, execute_with_limits() records:
+        - input_hash: SHA256 of serialized args (not raw args)
+        - output_hash: SHA256 of result bytes (not raw result)
+        - status: "success" | "error" | "cancelled"
+        - error_class: bounded error type name (not full exception)
+        - correlation: run_id, branch_id, provider_id, action_id
+
+        WHAT IS NOT LOGGED (security boundary):
+        - Raw inputs/outputs (hashes only)
+        - Full exception messages (bounded error class only)
+        - Sensitive payload content
         """
         tool = self.get_tool(tool_name)
 
@@ -705,19 +729,69 @@ class ToolRegistry:
         # Increment counter
         self._call_counts[tool_name] += 1
 
+        # Serialize inputs for audit (hashed, not stored raw)
+        try:
+            import orjson
+            input_bytes = orjson.dumps(args, option=orjson.OPT_SORT_KEYS)
+        except Exception:
+            input_bytes = str(args).encode("utf-8")
+
         # Execute with semaphore for parallelism control
         semaphore = self._semaphores[tool_name]
         timeout = timeout_ms or tool.cost_model.time_ms_est * 2
 
         async with semaphore:
+            result = None
+            error: Optional[Exception] = None
+            status = "success"
+            output_bytes: bytes = b""  # Always initialized before finally block
+
             try:
                 result = await asyncio.wait_for(
                     self._execute_handler(tool, validated),
                     timeout=timeout / 1000,  # Convert to seconds
                 )
-                return result
+                # Serialize output for audit (hashed, not stored raw)
+                try:
+                    import orjson
+                    output_bytes = orjson.dumps(result)
+                except Exception:
+                    output_bytes = str(result).encode("utf-8") if result is not None else b""
             except asyncio.TimeoutError:
-                raise RuntimeError(f"Tool '{tool_name}' timed out after {timeout}ms")
+                error = asyncio.TimeoutError(f"Tool '{tool_name}' timed out after {timeout}ms")
+                status = "error"
+                output_bytes = b""
+                raise
+            except Exception as e:
+                error = e
+                status = "error"
+                try:
+                    import orjson
+                    output_bytes = orjson.dumps({"error": str(e)})
+                except Exception:
+                    output_bytes = str(e).encode("utf-8")
+                raise
+            finally:
+                # Sprint 8VF: Optional audit logging as canonical side-effect
+                # exec_logger is AUDIT boundary, NOT execution authority
+                if exec_logger is not None:
+                    try:
+                        exec_logger.log(
+                            tool_name=tool_name,
+                            input_data=input_bytes,
+                            output_data=output_bytes,
+                            status=status,
+                            error=error,
+                            correlation=correlation,
+                        )
+                    except Exception as logger_error:
+                        # Audit logging failures must NOT affect execution
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            f"[TOOL REGISTRY] exec_logger.log() failed: {logger_error}"
+                        )
+
+        return result
 
     async def _execute_handler(self, tool: Tool, validated_args: BaseModel) -> Any:
         """Execute tool handler with validated arguments."""
