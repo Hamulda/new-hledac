@@ -411,3 +411,104 @@ tests/probe_8tf/test_graph_attachment_guards.py — 12 PASSED
 - **Stále přetrvává**: `duckdb_store._ioc_graph` stále drží DuckPGQGraph po windupu — to je mimo scope tohoto sprintu
 - Uzamčení: `tests/probe_8tf/test_graph_attachment_guards.py` — 12 testů
 
+---
+
+## 13. Sprint 8VL — Synthesis Lifecycle Gate Truth Cleanup (2026-04-02)
+
+### Co bylo silent mismatch
+
+`_is_windup_allowed()` v `synthesis_runner.py` používal jako primární truth:
+```python
+# utils.sprint_lifecycle — COMPAT SHIM, not lifecycle authority
+from ..utils.sprint_lifecycle import SprintLifecycleManager
+manager = SprintLifecycleManager.get_instance()  # singleton z utils
+return manager.is_windup_phase()
+```
+
+Ale canonical lifecycle truth je `runtime/sprint_lifecycle.SprintLifecycleManager` (dataclass, bez singletonu).
+Utils verze je **compat shim** — 85% orchestration residue, 15% compat aliases.
+
+Windup engine volá `synthesize_findings(force_synthesis=True)` — force flag bypassuje gate,
+ale internal diagnostics stále preferovaly utils singleton.
+
+### Co je teď explicitně řešeno
+
+**1. Lifecycle gate truth priority (structured, auditable):**
+
+| Priority | Path | Source label |
+|---|---|---|
+| 1 | Injected `_lifecycle_adapter` (windup_engine → scheduler._lc_adapter) | `"runtime"` |
+| 2 | Direct runtime SprintLifecycleManager check | `"runtime"` |
+| 3 | utils SprintLifecycleManager.get_instance() | `"compat"` |
+| — | žádná dostupná | `"unavailable"` |
+
+**2. Structured state in SynthesisRunner:**
+- `_lifecycle_gate_source`: `"runtime"` | `"compat"` | `"unavailable"` | `"forced"`
+- `_lifecycle_gate_mode`: `"windup"` | `"forced"` | `"blocked"`
+- `_lifecycle_adapter`: injected `_LifecycleAdapter` instance or None
+
+**3. windup_engine injectuje lifecycle adapter:**
+```python
+# windup_engine.py:136-140
+runner = SynthesisRunner(ModelLifecycle())
+if hasattr(scheduler, "_ioc_graph") and scheduler._ioc_graph is not None:
+    runner.inject_graph(scheduler._ioc_graph)
+# Sprint 8VL: Inject lifecycle adapter — PREFERRED truth path for windup gate
+if hasattr(scheduler, "_lc_adapter") and scheduler._lc_adapter is not None:
+    runner.inject_lifecycle_adapter(scheduler._lc_adapter)
+```
+
+**4. New method `inject_lifecycle_adapter()` in SynthesisRunner:**
+```python
+def inject_lifecycle_adapter(self, adapter: Any) -> None:
+    """
+    SPRINT 8VL: Inject runtime lifecycle adapter for windup gate.
+    windup_engine passes scheduler._lc_adapter (runtime _LifecycleAdapter wrapping
+    the canonical SprintLifecycleManager). This is the PREFERRED truth path.
+    """
+    self._lifecycle_adapter = adapter
+```
+
+### Graph capability consumption v synthesis/windup — status
+
+| Capability | Path | Status |
+|---|---|---|
+| STIX export | `_build_stix_context()` → IOCGraph only | ✅ Explicitní degradation s `_stix_status/reason/backend` (Sprint 8TH) |
+| GraphRAG `find_connections()` | `GraphRAGOrchestrator` → persistent layer | ✅ Graceful no-op pokud nedostupný |
+| `stats()` / `get_top_nodes_by_degree()` | DuckPGQGraph only | ✅ Jediný zdroj, žádná tichá degradace |
+| `export_edge_list()` | DuckPGQGraph only → GNN | ✅ Jediný zdroj, žádná tichá degradace |
+| `flush_buffers()` | IOCGraph only | ✅ Guard: `callable(getattr(g, "flush_buffers", None))` |
+| Buffered writes | IOCGraph only | ✅ Guard: `graph_supports_buffered_writes()` (Sprint 8TF) |
+
+**Truth-store-only:** `export_stix_bundle()`, `buffer_ioc()`, `flush_buffers()`
+**Donor/analytics-only:** `stats()`, `get_top_nodes_by_degree()`, `export_edge_list()`
+**DuckPGQGraph jako donor:** negarantuje truth-store capabilities — structured degradation labeled
+
+### Debt sekce — aktualizace
+
+**[DEBT-1] STIX export degradován → RESOLVED (Sprint 8TH)**
+
+**[DEBT-6] Synthesis lifecycle gate utils-singleton drift → RESOLVED (Sprint 8VL)**
+- Původní stav: `_is_windup_allowed()` preferoval utils singleton jako primary truth
+- Akce: 3-path priority (runtime adapter → runtime direct → utils compat), structured state attributes
+- Kanonická semantika: žádná tichá volba — vždy existuje `_lifecycle_gate_source` label
+- Uzamčení: `tests/probe_8vl/test_lifecycle_gate_truth.py` — probe testy
+
+### Změněné soubory
+
+| Soubor | Změna |
+|---|---|
+| `brain/synthesis_runner.py` | `__slots__` + `__init__` přidány `_lifecycle_gate_*`; nová `_is_windup_allowed` 3-path logika; nová `inject_lifecycle_adapter()` |
+| `runtime/windup_engine.py` | Injektuje `scheduler._lc_adapter` do runneru |
+| `GRAPH_BACKEND_RECONCILIATION.md` | Sekce 13 — Sprint 8VL výsledky |
+| `tests/probe_8vl/test_lifecycle_gate_truth.py` | **NOVÝ** — probe testy |
+
+### Co bylo schválně NEděláno
+
+1. **Žádný nový lifecycle framework** — použit existující `_LifecycleAdapter` + `SprintLifecycleManager`
+2. **Žádný nový graph framework** — žádný GraphProtocol, adapter layer
+3. **Nepřidána nová lifecycle autorita** — runtime manager zůstává kanonický, utils zůstává compat shim
+4. **Žádné nové background tasky** — lifecycle adapter je synchroní read-only wrapper
+5. **Žádné nové cross-plane DTO** — structured state jsou instance attributes na SynthesisRunner
+6. **Nepřepisoval jsem `__main__.py` lifecycle creation** — ten zůstává v režii dalšího sprintu
+

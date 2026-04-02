@@ -1,8 +1,8 @@
-# LIFECYCLE CONVERGENCE — Sprint 8VX + 8WA
+# LIFECYCLE CONVERGENCE — Sprint 8VX + 8WA + 8VY
 
 **Datum:** 2026-04-02
 **Cíl:** Jeden canonical lifecycle contract, utils = skutečný compat shim, žádný třetí lifecycle owner.
-**Stav:** ✅ HOT-PATH CUTOVER COMPLETE — `__main__._run_sprint_mode()` nyní běží na `runtime/sprint_lifecycle.py`
+**Stav:** ✅ HOT-PATH CUTOVER COMPLETE + ✅ WARMUP CONVERGENCE (Sprint 8VY)
 
 ---
 
@@ -19,11 +19,39 @@
 - `utils/sprint_lifecycle.py` = čistý compat shim + orchestration residue
 - Scheduler shadow/active běží na stejné lifecycle verzi jako produkce
 
-**Změněné soubory:**
-- `__main__.py` — import + call-site přepnut na runtime verzi
-- `runtime/sprint_lifecycle.py` — přidány COMPAT ALIASES s idempotentními guardy
-- `tests/probe_8pc/test_sprint_mode_lifecycle_states.py` — přepnut na runtime import
-- `LIFECYCLE_CONVERGENCE.md` — aktualizováno
+**Sprint 8VY — WARMUP Convergence:**
+- Dříve: inline WARMUP blok v `_run_sprint_mode()` (preflight + sleep(5s) + lifecycle.mark_warmup_done() + ANE warmup) VEDLE `run_warmup()` helper (DuckPGQ + IOCScorer + ring buffers) — dvojí realita
+- Nyní: jediná WARMUP truth = `run_warmup(scheduler, config, lifecycle, do_ane_warmup)`
+- Inline WARMUP block removed from `_run_sprint_mode()`
+- `run_warmup()` enhanced: lifecycle transition, phase telemetry, ANE warmup all absorbed
+- `SprintScheduler` instance created before WARMUP to support `run_warmup()`
+
+**Změněné soubory (Sprint 8VY):**
+- `__main__.py` — inline WARMUP block replaced by `run_warmup()` call; SprintScheduler instance pre-created
+- `tests/test_e2e_dry_run.py` — import fixed to use `importlib.util` (pytest __main__ module conflict)
+- `LIFECYCLE_CONVERGENCE.md` — this update
+
+---
+
+## 1b. WARMUP Convergence Matrix
+
+| Krok | Inline blok (STARÉ) | `run_warmup()` (STARÉ) | `run_warmup()` (NOVÉ — Sprint 8VY) |
+|---|---|---|---|
+| Preflight check | ✅ | ✅ | ✅ |
+| `asyncio.sleep(5.0)` | ✅ (caller) | ❌ | ❌ (caller handles timing) |
+| `lifecycle.mark_warmup_done()` | ✅ | ❌ | ✅ (when lifecycle passed) |
+| `_boot_record()` / `_mark_phase()` | ✅ | ❌ | ✅ (when lifecycle passed) |
+| ANE embedder warmup | ✅ | ❌ | ✅ (`do_ane_warmup=True`) |
+| DuckPGQGraph init + merge | ❌ | ✅ | ✅ |
+| IOCScorer init | ❌ | ✅ | ✅ |
+| Ring buffers | ❌ | ✅ | ✅ |
+| NONE file guard | ❌ | ✅ | ✅ |
+
+**Klíčové změny:**
+- Inline WARMUP block removed from `_run_sprint_mode()` (lines 2402–2416)
+- `_run_sprint_mode()` now calls: `await asyncio.sleep(5.0)` then `await run_warmup(scheduler, {}, lifecycle=lifecycle, do_ane_warmup=True)`
+- `run_warmup()` now accepts optional `lifecycle` and `do_ane_warmup` params
+- `SprintScheduler` instance created before WARMUP: `scheduler = SprintScheduler(SprintSchedulerConfig(sprint_duration_s=duration_s))`
 
 ---
 
@@ -85,9 +113,21 @@ Utils verze byla fail-open (no-op na dvojité volání). Runtime verze vyhodí `
 
 ## 4. run_warmup() Status
 
-**Status: MOVED (Sprint 8VX)**
+**Status: ✅ WARMUP CONVERGENCE COMPLETE (Sprint 8VY)**
 
-`run_warmup()` přesunuto z `runtime/sprint_lifecycle.py` do `__main__.py` — je to WARMUP-fáze orchestration helper, ne lifecycle state machine.
+`run_warmup()` je nyní jediná WARMUP orchestration truth:
+- **Location:** `__main__.py` (module-level, async function)
+- **Signature:** `run_warmup(scheduler, config, lifecycle=None, do_ane_warmup=False) → dict`
+- **Volána z:** `_run_sprint_mode()` (sprint hot-path), `test_e2e_dry_run.py` (test)
+- **Lifecycle authority:** `runtime/sprint_lifecycle.SprintLifecycleManager` zůstává čistá (WARMUP→ACTIVE přechod přes `mark_warmup_done()` alias)
+
+**Co bylo odstraněno:**
+- Inline WARMUP block v `_run_sprint_mode()` (preflight, sleep, lifecycle call, ANE) — nahrazeno jediným `run_warmup()` voláním
+- Dvojí realita: inline block vs orphan helper — vyřešeno jedinou funkcí
+
+**Backward compatibility:**
+- Test `test_e2e_dry_run.py` volá `run_warmup(scheduler, {})` bez lifecycle — funguje (lifecycle=None)
+- `SprintScheduler` instance vytvořena v `_run_sprint_mode()` před WARMUP pro podporu `run_warmup()`
 
 ---
 
@@ -160,7 +200,7 @@ Utils verze byla fail-open (no-op na dvojité volání). Runtime verze vyhodí `
 
 - **SprintScheduler** — orchestration vrstva, ne lifecycle (již na runtime verzi)
 - **windup_engine.py** — windup sub-fáze management
-- **run_warmup()** — DEFERRED (viz sekce 4)
+- **run_warmup()** — ✅ RESOLVED (Sprint 8VY — jediná WARMUP truth)
 - **UMA watchdog** — resource management, orchestration helper
 - **Checkpoint seam** — perzistence, lifecycle pouze poskytuje snapshot
 
@@ -191,7 +231,7 @@ Utils verze byla fail-open (no-op na dvojité volání). Runtime verze vyhodí `
 | `load_from_checkpoint()` | ❌ chybí | ✅ method | — | utils | — | — |
 | `maybe_resume()` | ❌ chybí | ✅ free function | — | utils | test_probe_7a používá | — |
 | `_LifecycleAdapter` | ❌ chybí | ✅ | — | utils | scheduler používá | — |
-| `run_warmup()` | ✅ async function | ❌ chybí | runtime | — | definován, nikdy nevolán | — |
+| `run_warmup()` | ✅ async function (Sprint 8VY) | ❌ chybí | __main__ | — | ✅ volán z _run_sprint_mode() | Canonical WARMUP orchestration |
 | SIGINT/SIGTERM handlers | ❌ chybí | ✅ `register_signal_handlers()` | — | utils | — | — |
 | `track_task()` | ❌ chybí | ✅ method | — | utils | — | — |
 | Hooks (`_on_windup`) | ❌ chybí | ✅ `_on_windup`, `_on_export`, `_on_teardown` | — | utils | — | — |

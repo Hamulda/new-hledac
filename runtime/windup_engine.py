@@ -136,6 +136,9 @@ async def run_windup(
         runner = SynthesisRunner(ModelLifecycle())
         if hasattr(scheduler, "_ioc_graph") and scheduler._ioc_graph is not None:
             runner.inject_graph(scheduler._ioc_graph)
+        # Sprint 8VL: Inject lifecycle adapter — PREFERRED truth path for windup gate
+        if hasattr(scheduler, "_lc_adapter") and scheduler._lc_adapter is not None:
+            runner.inject_lifecycle_adapter(scheduler._lc_adapter)
 
         # Extract finding texts for synthesis
         finding_texts = []

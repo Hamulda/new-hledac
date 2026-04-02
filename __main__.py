@@ -2377,6 +2377,7 @@ async def _run_sprint_mode(
         UMA_STATE_EMERGENCY,
     )
     from .runtime.sprint_lifecycle import SprintLifecycleManager, SprintPhase
+    from .runtime.sprint_scheduler import SprintScheduler, SprintSchedulerConfig
 
     global _sprint_frontier_stopped
     _sprint_frontier_stopped = False
@@ -2387,6 +2388,10 @@ async def _run_sprint_mode(
 
     lifecycle = SprintLifecycleManager()
     lifecycle.sprint_duration_s = duration_s
+
+    # Sprint 8VY: SprintScheduler for WARMUP orchestration (DuckPGQ, IOCScorer, ring buffers)
+    # Created here so run_warmup() can initialize scheduler state during WARMUP phase.
+    scheduler = SprintScheduler(SprintSchedulerConfig(sprint_duration_s=duration_s))
 
     # B.5: AsyncExitStack for LIFO teardown
     exit_stack: Optional[contextlib.AsyncExitStack] = None
@@ -2399,21 +2404,12 @@ async def _run_sprint_mode(
         _boot_record("sprint_mode", "BOOT")
         _mark_phase("BOOT")
 
-        # ---- WARMUP (5s) ----
-        # Sprint 8VD §E: Run preflight checks
-        await _preflight_check()
+        # ---- WARMUP (5s) ---- Sprint 8VY: single WARMUP truth via run_warmup()
+        # Inline WARMUP block replaced by canonical run_warmup() call.
+        # run_warmup() handles: preflight, DuckPGQ, IOCScorer, ring buffers,
+        # lifecycle transition (WARMUP→ACTIVE), phase telemetry, and ANE warmup.
         await asyncio.sleep(5.0)
-        lifecycle.mark_warmup_done()
-        _boot_record("sprint_mode", "WARMUP→ACTIVE")
-        _mark_phase("WARMUP")
-
-        # Sprint 8TC B.5: ANE embedder warmup
-        try:
-            from .brain.ane_embedder import ANEEmbedder
-            ane = ANEEmbedder()
-            await ane.warmup()
-        except Exception as e:
-            logger.debug(f"[SPRINT] ANE warmup skipped: {e}")
+        await run_warmup(scheduler, {}, lifecycle=lifecycle, do_ane_warmup=True)
 
         # ---- ACTIVE: start UMA monitoring ----
         dispatcher = UMAAlarmDispatcher()
@@ -2774,12 +2770,26 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-async def run_warmup(scheduler: "SprintScheduler", config: dict) -> dict:
+async def run_warmup(
+    scheduler: "SprintScheduler",
+    config: dict,
+    lifecycle: "Optional[Any]" = None,
+    do_ane_warmup: bool = False,
+) -> dict:
     """
-    WARMUP fáze — inicializace, preflight, resource check.
+    WARMUP fáze — jediná canonical WARMUP orchestration truth.
 
-    Vrátí: warmup_result dict s preflight výsledky.
-    Nikdy nevyhodí výjimku — graceful degradation.
+    Tato funkce je SPRINT 8VY — jediná WARMUP orchestration truth.
+    Volá se z:
+      - _run_sprint_mode() (sprint hot-path)
+      - test_e2e_dry_run.py (test, bez lifecycle)
+
+    Args:
+        scheduler: SprintScheduler instance (或其 mock)
+        config: sprint config dict
+        lifecycle: SprintLifecycleManager instance pro lifecycle transitions.
+                  Pokud None, přeskočí se lifecycle ops (test compatibility).
+        do_ane_warmup: True = provést ANE embedder warmup (pouze v sprint hot-path)
     """
     t_start = time.monotonic()
 
@@ -2826,6 +2836,21 @@ async def run_warmup(scheduler: "SprintScheduler", config: dict) -> dict:
         scheduler._pivot_rewards = {}
     if not hasattr(scheduler, "_all_findings"):
         scheduler._all_findings = []
+
+    # 6. Lifecycle WARMUP→ACTIVE transition (pouze když máme lifecycle manager)
+    if lifecycle is not None:
+        lifecycle.mark_warmup_done()
+        _boot_record("sprint_mode", "WARMUP→ACTIVE")
+        _mark_phase("WARMUP")
+
+    # 7. ANE embedder warmup (pouze v sprint hot-path, kde je potřeba)
+    if do_ane_warmup:
+        try:
+            from .brain.ane_embedder import ANEEmbedder
+            ane = ANEEmbedder()
+            await ane.warmup()
+        except Exception as e:
+            _logger.debug(f"[WARMUP] ANE warmup skipped: {e}")
 
     return {
         "preflight": preflight,

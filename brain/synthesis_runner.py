@@ -234,7 +234,8 @@ class SynthesisRunner:
     __slots__ = ("_lifecycle", "_ioc_graph", "_cached_model_path", "_last_outlines_used",
                  "_custom_synthesis_prompt", "_prompt_modifier", "_duckdb_store",
                  "_last_synthesis_engine", "_last_arm", "_bandit_rewards",
-                 "_stix_status", "_stix_reason", "_stix_backend")
+                 "_stix_status", "_stix_reason", "_stix_backend",
+                 "_lifecycle_gate_source", "_lifecycle_gate_mode", "_lifecycle_adapter")
 
     def __init__(self, lifecycle: "ModelLifecycle") -> None:
         self._lifecycle = lifecycle
@@ -248,7 +249,6 @@ class SynthesisRunner:
         self._duckdb_store: Optional[Any] = None
         # Sprint 8UC B.3: Last synthesis engine used
         self._last_synthesis_engine: str = "none"
-        self._prompt_modifier: str = ""
         # Sprint 8VH: Bandit tracking
         self._last_arm: str | None = None
         self._bandit_rewards: dict = {}
@@ -256,10 +256,29 @@ class SynthesisRunner:
         self._stix_status: str = "unknown"
         self._stix_reason: str = ""
         self._stix_backend: str = ""
+        # Sprint 8VL: Lifecycle gate truth — structured degradation state
+        # _lifecycle_gate_source: "runtime" | "compat" | "unavailable"
+        # _lifecycle_gate_mode: "windup" | "forced" | "blocked"
+        # _lifecycle_adapter: _LifecycleAdapter | None (for runtime path)
+        self._lifecycle_gate_source: str = "unknown"
+        self._lifecycle_gate_mode: str = "unknown"
+        self._lifecycle_adapter: Any = None
 
     def inject_graph(self, graph: Any) -> None:
         """Inject IOCGraph instance from 8QA for STIX context injection."""
         self._ioc_graph = graph
+
+    def inject_lifecycle_adapter(self, adapter: Any) -> None:
+        """
+        SPRINT 8VL: Inject runtime lifecycle adapter for windup gate.
+
+        windup_engine passes scheduler._lc_adapter (runtime _LifecycleAdapter wrapping
+        the canonical SprintLifecycleManager). This is the PREFERRED truth path —
+        it bypasses the need to find a global singleton.
+
+        Also accepts direct runtime SprintLifecycleManager instances.
+        """
+        self._lifecycle_adapter = adapter
 
     # ------------------------------------------------------------------
     # Sprint 8TD: Custom prompt injection
@@ -788,14 +807,65 @@ class SynthesisRunner:
         return min(1.0, round(score, 3))
 
     def _is_windup_allowed(self, force: bool) -> bool:
-        """B.7: Check windup phase or force flag."""
+        """
+        B.7: Check windup phase or force flag.
+
+        SPRINT 8VL: Lifecycle gate truth — prefer runtime lifecycle, compat fallback.
+
+        Truth priority:
+          1. Injected runtime lifecycle adapter (_lifecycle_adapter) — SET by windup_engine
+          2. Runtime sprint_lifecycle.SprintLifecycleManager.get_instance() — preferred
+          3. utils.sprint_lifecycle.SprintLifecycleManager.get_instance() — COMPAT fallback
+
+        Sets structured state BEFORE returning:
+          _lifecycle_gate_source: "runtime" | "compat" | "unavailable"
+          _lifecycle_gate_mode: "windup" | "forced" | "blocked"
+
+        Force flag: always returns True, sets mode="forced", source="n/a".
+        """
+        # Force path — always allowed, no lifecycle truth needed
         if force:
+            self._lifecycle_gate_source = "forced"
+            self._lifecycle_gate_mode = "forced"
             return True
+
+        # Path 1: injected runtime lifecycle adapter (windup_engine path)
+        if self._lifecycle_adapter is not None:
+            try:
+                should_windup = self._lifecycle_adapter.should_enter_windup()
+                self._lifecycle_gate_source = "runtime"
+                self._lifecycle_gate_mode = "windup" if should_windup else "blocked"
+                return should_windup
+            except Exception:
+                pass  # Fall through to Path 2
+
+        # Path 2: runtime sprint_lifecycle (canonical) — no singleton, it's a dataclass
+        # Runtime manager is created by __main__ and passed to scheduler; we check if it
+        # was injected as _runtime_lifecycle attribute on self (set by windup_engine)
+        try:
+            from ..runtime.sprint_lifecycle import SprintLifecycleManager as RuntimeLC
+            for _name in ("_runtime_lifecycle", "_lc"):
+                if hasattr(self, _name):
+                    lc = getattr(self, _name)
+                    if isinstance(lc, RuntimeLC):
+                        should_windup = lc.should_enter_windup()
+                        self._lifecycle_gate_source = "runtime"
+                        self._lifecycle_gate_mode = "windup" if should_windup else "blocked"
+                        return should_windup
+        except Exception:
+            pass  # Fall through to Path 3
+
+        # Path 3: utils.sprint_lifecycle (COMPAT fallback — labeled as such)
         try:
             from ..utils.sprint_lifecycle import SprintLifecycleManager
             manager = SprintLifecycleManager.get_instance()
-            return manager.is_windup_phase()
+            should_windup = manager.is_windup_phase()
+            self._lifecycle_gate_source = "compat"
+            self._lifecycle_gate_mode = "windup" if should_windup else "blocked"
+            return should_windup
         except Exception:
+            self._lifecycle_gate_source = "unavailable"
+            self._lifecycle_gate_mode = "blocked"
             return False
 
     def _check_uma_guard(self) -> bool:

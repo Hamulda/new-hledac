@@ -28,6 +28,13 @@ from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 from hledac.universal.patterns.pattern_matcher import match_text
 from hledac.universal.runtime.sprint_lifecycle import SprintLifecycleManager, SprintPhase
+from hledac.universal.runtime.shadow_inputs import (
+    collect_lifecycle_snapshot,
+    collect_graph_summary,
+    collect_model_control_facts,
+)
+from hledac.universal.runtime.shadow_parity import run_shadow_parity
+from hledac.universal.runtime.shadow_pre_decision import compose_pre_decision
 
 if TYPE_CHECKING:
     pass
@@ -377,6 +384,8 @@ class SprintScheduler:
         self._ioc_graph: Any = None
         # Sprint 8VI §C: All findings collected during sprint
         self._all_findings: list[dict] = []
+        # Sprint 8VM: Shadow pre-decision consumer — read-only, no mutable state
+        self._shadow_pd_summary: Any = None
 
     # ── Sprint 8VI §B: RL Adaptive Pivot ────────────────────────────────
 
@@ -864,7 +873,7 @@ class SprintScheduler:
 
     def _build_diagnostic_report(self, lifecycle) -> dict:
         """Build a diagnostic report dict for exporters."""
-        return {
+        report = {
             "run_id": f"8bk_sprint_{int(_time.time())}",
             "phase": lifecycle._current_phase.name,
             "cycles_started": self._result.cycles_started,
@@ -880,6 +889,11 @@ class SprintScheduler:
             "entries_per_source": dict(self._entries_per_source),
             "hits_per_source": dict(self._hits_per_source),
         }
+        # Sprint 8VM: Append shadow pre-decision readiness preview (read-only, diagnostic)
+        shadow_preview = self._build_shadow_readiness_preview()
+        if shadow_preview:
+            report["shadow_pre_decision"] = shadow_preview
+        return report
 
     # ── Sprint 8RC: IOC-aware prioritisation ───────────────────────────────
 
@@ -1453,6 +1467,205 @@ class SprintScheduler:
                 interval = 30
             await _asyncio.sleep(interval)
 
+    # ── Sprint 8VM: Shadow Pre-Decision Consumer ───────────────────────────
+    # Read-only seam: consumes existing shadow/pre-decision layer
+    # WITHOUT creating new scheduler framework, mutable state, or execution path
+
+    def consume_shadow_pre_decision(self) -> Any:
+        """
+        Sprint 8VM: Read-only shadow pre-decision consumer.
+
+        Collects shadow inputs from current scheduler state,
+        runs parity check and pre-decision composition,
+        and returns PreDecisionSummary.
+
+        Caching: stores result in _shadow_pd_summary to avoid recomputation.
+        Cache is cleared in _reset_result().
+
+        THIS IS DIAGNOSTIC ONLY — all hard boundaries enforced:
+        - Does NOT execute any tools (no execute_with_limits calls)
+        - Does NOT activate any providers
+        - Does NOT write to any ledgers as runtime truth
+        - Does NOT modify scheduler mutable state
+        - Does NOT create new scheduler framework
+        - Does NOT dispatch or enqueue work
+        - Returns PreDecisionSummary artifact, NOT a truth store
+
+        Injection point: called from _build_diagnostic_report() at export time.
+        The method is also available for ad-hoc calls during sprint for
+        diagnostic purposes only.
+
+        Returns None if shadow mode is not active.
+        """
+        from hledac.universal.runtime.shadow_inputs import RuntimeMode
+
+        # Only run when shadow mode is explicitly enabled
+        if not RuntimeMode.is_shadow_mode():
+            return None
+
+        # Return cached value if already computed this sprint
+        if self._shadow_pd_summary is not None:
+            return self._shadow_pd_summary
+
+        lc = None
+        if self._lc_adapter is not None:
+            lc = self._lc_adapter._lc
+        if lc is None:
+            return None
+
+        # Collect lifecycle snapshot
+        try:
+            now_mono = _time.monotonic()
+            # Derive thermal state from latency EMA (read-only heuristic)
+            thermal = "nominal"
+            if self._fetch_latency_ema:
+                max_ema = max(self._fetch_latency_ema.values()) if self._fetch_latency_ema else 10.0
+                if max_ema > 20.0:
+                    thermal = "critical"
+                elif max_ema > 15.0:
+                    thermal = "throttled"
+                elif max_ema > 10.0:
+                    thermal = "fair"
+
+            lifecycle_bundle = collect_lifecycle_snapshot(
+                lc, now_mono, thermal,
+                windup_synthesis_mode="synthesis",
+                windup_error=False,
+                windup_engine=self._synthesis_engine or "unknown",
+            )
+        except Exception:
+            return None
+
+        # Collect graph summary (may be None if no graph injected yet)
+        try:
+            graph_bundle = collect_graph_summary(self._ioc_graph)
+        except Exception:
+            from hledac.universal.runtime.shadow_inputs import GraphSummaryBundle
+            graph_bundle = GraphSummaryBundle()
+
+        # Collect model/control facts from scheduler config
+        try:
+            mc_bundle = collect_model_control_facts(
+                analyzer_result=None,
+                raw_profile={
+                    "tools": [],
+                    "sources": list(self._config.source_tier_map.keys()),
+                    "privacy_level": "STANDARD",
+                    "use_tor": False,
+                    "depth": "STANDARD",
+                    "use_tot": False,
+                    "tot_mode": "standard",
+                    "models_needed": [],
+                },
+            )
+        except Exception:
+            from hledac.universal.runtime.shadow_inputs import ModelControlFactsBundle
+            mc_bundle = ModelControlFactsBundle()
+
+        # Export handoff facts (synthesized from scheduler state)
+        export_facts = {
+            "sprint_id": self.sprint_id or "unknown",
+            "synthesis_engine": self._synthesis_engine or "unknown",
+            "gnn_predictions": 0,
+            "top_nodes_count": 0,
+            "ranked_parquet_present": False,
+            "phase_durations": {},
+        }
+
+        try:
+            parity = run_shadow_parity(
+                lifecycle_bundle=lifecycle_bundle,
+                graph_bundle=graph_bundle,
+                model_control_bundle=mc_bundle,
+                export_handoff_facts=export_facts,
+                branch_decision=None,
+                provider_recommend=None,
+                correlation=None,
+                runtime_mode=RuntimeMode.get_current(),
+            )
+        except Exception:
+            return None
+
+        try:
+            pd_summary = compose_pre_decision(parity)
+        except Exception:
+            return None
+
+        # Tool readiness preview — DIAGNOSTIC ONLY, no dispatch, no execute_with_limits
+        # Lazily access ToolRegistry to avoid cold-import cost in non-shadow mode
+        try:
+            registry = None
+            # Try to get default registry (read-only inspection)
+            from hledac.universal.tool_registry import create_default_registry
+            registry = create_default_registry()
+            all_tools = registry.list_tools()
+            tool_names = [t.name for t in all_tools]
+            tool_cards = registry.get_tool_cards_for_hermes()
+            # Attach as read-only diagnostic annotations to pd_summary
+            pd_summary._tool_readiness_preview = {
+                "tool_count": len(all_tools),
+                "tool_names": tool_names,
+                "has_network_tools": bool(registry.get_network_tools()),
+                "has_high_memory_tools": bool(registry.get_high_memory_tools()),
+                "tool_cards_sample": tool_cards[:3] if tool_cards else [],
+            }
+        except Exception:
+            # ToolRegistry unavailable — skip, this is diagnostic only
+            pass
+
+        # Cache for repeated calls within the same sprint
+        self._shadow_pd_summary = pd_summary
+        return pd_summary
+
+    def _build_shadow_readiness_preview(self) -> dict[str, Any]:
+        """
+        Sprint 8VM: Build a machine-readable shadow readiness preview dict.
+
+        Called from _build_diagnostic_report() when shadow mode is active.
+        This is a READ-ONLY summary extracted from PreDecisionSummary
+        for diagnostic/logging purposes — NOT a truth store.
+        """
+        pd = self.consume_shadow_pre_decision()
+        if pd is None:
+            return {}
+
+        result: dict[str, Any] = {
+            "runtime_mode": pd.runtime_mode,
+            "parity_timestamp_monotonic": pd.parity_timestamp_monotonic,
+            "lifecycle_readiness": {
+                "phase": pd.lifecycle.workflow_phase,
+                "is_active": pd.lifecycle.is_active,
+                "is_windup": pd.lifecycle.is_windup,
+                "can_accept_work": pd.lifecycle.can_accept_work,
+                "should_prune": pd.lifecycle.should_prune,
+                "phase_conflict": pd.lifecycle.phase_conflict,
+            },
+            "graph_readiness": {
+                "backend": pd.graph.backend,
+                "readiness": pd.graph.readiness,
+                "nodes": pd.graph.nodes,
+                "edges": pd.graph.edges,
+            },
+            "export_readiness": {
+                "readiness": pd.export_readiness.readiness,
+                "synthesis_engine": pd.export_readiness.synthesis_engine,
+            },
+            "model_control_readiness": {
+                "readiness": pd.model_control.readiness,
+                "tools_count": pd.model_control.tools_count,
+            },
+            "diff_taxonomy": [d.name for d in pd.diff_taxonomy],
+            "blockers": pd.blockers,
+            "unknowns": pd.unknowns,
+            "compat_seams": pd.compat_seams,
+        }
+
+        # Tool readiness preview (if available)
+        if hasattr(pd, "_tool_readiness_preview"):
+            result["tool_readiness_preview"] = pd._tool_readiness_preview
+
+        return result
+
     # ── Internal reset ────────────────────────────────────────────────────
 
     def _reset_result(self) -> None:
@@ -1471,6 +1684,8 @@ class SprintScheduler:
             except Exception:
                 pass
             self._duckdb_read_con = None
+        # Sprint 8VM: Clear shadow pre-decision summary
+        self._shadow_pd_summary = None
 
 
 # ---------------------------------------------------------------------------

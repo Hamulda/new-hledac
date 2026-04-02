@@ -301,3 +301,109 @@ shadow scaffold mohl začít působit jako authority:
 8. **to_dict() obsahuje fact stability** — plná diagnostika bez přístupu k atributům
 9. **UNKNOWN readiness rozlišeno** — STABLE unknown → blocker, COMPAT/UNKNOWN unknown → unknown
 10. **Default unchanged** — bez env var běží legacy_runtime
+
+---
+
+## F3.8: Shadow Scheduler Consumer Seam (Sprint 8VM)
+
+### Bird's-Eye View: Proč je scheduler-side consumer správný další krok
+
+Po F3.5+F3.6+F3.7 shadow vrstva existuje jako nezávislý scaffold.
+Nyní je čas ji přiblížit ke SprintScheduleru — ale pouze jako **read-only diagnostický
+seam**, ne jako nový execution path.
+
+Cíl F3.8:
+- SprintScheduler může **read-only** konzumovat ParityArtifact a PreDecisionSummary
+- Scheduler-side consumer **nevytváří** nový mutable scheduler state
+- Tool/capability readiness preview je **čistě diagnostický** — žádný dispatch
+- Local shadow scaffold zůstává local scaffold
+
+### Co scheduler-side consumer UMÍ
+
+| Schopnost | Detail |
+|-----------|--------|
+| `consume_shadow_pre_decision()` | Read-only method, vrací PreDecisionSummary |
+| `_build_shadow_readiness_preview()` | Strojově čitelný dict pro diagnostiku/logging |
+| Caching | Výsledek uložen do `_shadow_pd_summary`, cleared v `_reset_result()` |
+| Legacy mode guard | Vrací None v legacy módu (výpočet se neprovádí) |
+| Tool readiness preview | Read-only přehled z ToolRegistry (list_tools, get_tool_cards_for_hermes) |
+
+### Injection Point
+
+Voláno z `_build_diagnostic_report()` těsně před export — to je nejbezpečnější místo:
+- Lifecycle snapshot je k dispozici
+- Scheduler má všechny potřebné references
+- Žádný vliv na decision loop
+- Výstup jde pouze do diagnostického reportu
+
+### Tool Readiness Preview — DIAGNOSTIC ONLY
+
+Čte z ToolRegistry pouze tyto read-only metody:
+- `list_tools()` — seznam názvů
+- `get_tool_cards_for_hermes()` — kartičky pro hermes
+- `get_network_tools()`, `get_high_memory_tools()` — filtrování
+
+**NIKDY** se nevolá:
+- `execute_with_limits()` — tool execution
+- `acquire()` na provider pool — provider activation
+- `load_model()` — model load
+- Žádný dispatch
+
+### Scheduler-Side Consumer Matrix
+
+| Co | Kam | Jak |
+|----|-----|-----|
+| Lifecycle snapshot | `consume_shadow_pre_decision()` | `collect_lifecycle_snapshot(self._lc_adapter._lc, ...)` |
+| Graph summary | stejná methoda | `collect_graph_summary(self._ioc_graph)` |
+| Model control facts | stejná methoda | `collect_model_control_facts(raw_profile=...)` z config |
+| ParityArtifact | stejná methoda | `run_shadow_parity(...)` |
+| PreDecisionSummary | stejná methoda | `compose_pre_decision(parity)` |
+| Tool readiness preview | v except bloku | `create_default_registry().list_tools()` — try/except |
+| Výstup | `_build_diagnostic_report()` | `shadow_pre_decision` key v reportu |
+
+### Co NESMÍ (hard boundaries)
+
+| Zakázáno | Proč |
+|----------|------|
+| Tool execution (execute_with_limits) | Bylo by side effect |
+| Provider activation (acquire/load_model) | Mění runtime state |
+| Ledger writes (DuckDB/LMDB/parquet) | Není truth store pro shadow data |
+| Nový scheduler framework | Nesmí vzniknout nový execution path |
+| Background tasks (asyncio.create_task) | V shadow consumer nemají co dělat |
+| Dispatch/enqueue work | Čistě diagnostické, ne execution |
+
+### Co zůstává local scaffold
+
+| Class | Local scaffold | Proč |
+|-------|----------------|------|
+| `_shadow_pd_summary` | YES (field na SprintScheduler) | Ephemeral cache, cleared per sprint, NOT canonical truth |
+| ParityArtifact | YES (z shadow_parity.py) | DIAGNOSTIC OUTPUT, není truth store |
+| PreDecisionSummary | YES (z shadow_pre_decision.py) | DIAGNOSTIC ARTIFACT, není truth store |
+| `_tool_readiness_preview` | YES (attr na PreDecisionSummary) | Attachnutý diagnostický metadata, ne scheduler-owned state |
+
+### Co chybí do skutečného runtime hooku (F4+)
+
+1. **Decision gate** — za jakých podmínek by PreDecisionSummary ovlivnil scheduler decisions (zatím NIC)
+2. **Tool dispatch parity** — porovnání tool selection decision vs actual execution
+3. **Provider activation parity** — scheduler-side view vs actual provider state
+4. **Windup execution parity** — scheduler's windup readiness vs actual windup flow
+5. **Flag mechanism pro runtime injection** — `HLEDAC_RUNTIME_MODE=scheduler_shadow` dnes jen zpřístupňuje diagnostiku
+
+### Guardraily Implementované v F3.8
+
+1. **Legacy mode guard** — bez `HLEDAC_RUNTIME_MODE=scheduler_shadow` se nic nepočítá
+2. **Caching** — `_shadow_pd_summary` se plní pouze jednou per sprint
+3. **No bg tasks** — consume_shadow_pre_decision nespuští žádné asyncio tasky
+4. **No ledger writes** — žádné zápisy do DuckDB/LMDB během consume
+5. **No dispatch** — tool readiness je pouze `list_tools()`, nikdy `execute_with_limits()`
+6. **Only one field mutated** — jediný persistent field změněný je `_shadow_pd_summary`
+7. **Reset propaguje** — `_reset_result()`clears `_shadow_pd_summary`
+
+### Soubory Změněné v F3.8
+
+| Soubor | Změna |
+|--------|-------|
+| `runtime/sprint_scheduler.py` | Přidán `consume_shadow_pre_decision()`, `_build_shadow_readiness_preview()`, `_shadow_pd_summary` field, integrace do `_build_diagnostic_report()` |
+| `runtime/sprint_scheduler.py` | Import shadow vrstvy (lazy, za TYPE_CHECKING guard) |
+| `tests/probe_8vm/test_shadow_consumer_seam.py` | 11 testů ověřujících read-only seam, caching, boundary |
+| `SHADOW_SCHEDULER_PARITY.md` | Přidána F3.8 sekce |
