@@ -22,6 +22,7 @@ __all__ = [
     "IOC_DB_PATH",
     "get_sprint_parquet_dir",
     "get_ioc_db_path",
+    "get_sprint_report_path",
     "assert_ramdisk_alive",
     "cleanup_fallback_artifacts",
     "lmdb_map_size",
@@ -273,6 +274,25 @@ IOC_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 def get_ioc_db_path() -> pathlib.Path:
     """Vrátí cestu k persistentnímu DuckDB IOC store."""
     return IOC_DB_PATH
+
+
+def get_sprint_report_path(sprint_id: str) -> Path:
+    """
+    Sprint 8VY §C: Canonical sprint report path computation.
+
+    Canonical owner: paths.py — all sprint report path computation lives here.
+    Shell (__main__) no longer holds path computation authority.
+
+    Path semantics: ~/.hledac/reports/{sprint_id}.md
+
+    Returns
+    -------
+    Path
+        Absolute path to sprint report markdown file.
+    """
+    reports_dir = Path.home() / ".hledac" / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    return reports_dir / f"{sprint_id}.md"
 
 
 # ---------------------------------------------------------------------------

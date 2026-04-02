@@ -721,3 +721,158 @@ if store_instance is not None:
 - Nový `_stix_graph` slot je INDEPENDENT of `_ioc_graph` — oddělené concernsy
 - `inject_stix_graph` TRUTH-STORE ONLY contract — DuckPGQGraph sem nepatří
 - Stále přetrvává: `duckdb_store._ioc_graph` je stále DuckPGQGraph path
+
+---
+
+## 15. Sprint 8WA — Truth-Write Graph Attachment Role Split (2026-04-02)
+
+### Co bylo silent mismatch
+
+`_graph_ingest_findings()` používala `self._ioc_graph` pro ACTIVE-phase buffered writes.
+V produkčním kódu po windupu `_ioc_graph` drží DuckPGQGraph (analytics/donor backend),
+který **nemá** `buffer_ioc`/`flush_buffers`. Výsledkem byl tichý no-op pro DuckPGQGraph path,
+protože volání `buffer_ioc` na objektu bez této metody by bylo `AttributeError`.
+
+Navíc trigger `async_ingest_findings_batch` volal `graph_supports_buffered_writes()` na
+analytics `_ioc_graph` slotu — špatný slot pro pravdu o buffered-write schopnosti.
+
+### Co je teď explicitně řešeno
+
+**Tři dedicated graph slots v DuckDBShadowStore:**
+
+| Slot | Účel | Kanonický backend | Capability |
+|---|---|---|---|
+| `_truth_write_graph` | ACTIVE-phase buffered IOC writes | IOCGraph (Kuzu) | `buffer_ioc`, `buffer_observation`, `flush_buffers` |
+| `_ioc_graph` | Analytics/donor — top-n, degree, edge export | DuckPGQGraph | `get_top_nodes_by_degree`, `stats`, `export_edge_list` |
+| `_stix_graph` | STIX synthesis context | IOCGraph (Kuzu) | `export_stix_bundle` |
+
+**Dedicated truth-write seam:**
+
+```python
+# knowledge/duckdb_store.py
+self._truth_write_graph: Any = None  # Sprint 8WA: NEW slot
+
+def inject_truth_write_graph(self, graph: Any) -> None:
+    """TRUTH-WRITE ONLY: pouze IOCGraph (Kuzu) sem patří."""
+
+def get_truth_write_graph(self) -> Any:
+    """Returns injected truth-write graph or None."""
+
+def truth_write_graph_supports_buffered_writes(self) -> bool:
+    """True pouze když _truth_write_graph má buffer_ioc AND flush_buffers."""
+```
+
+**_graph_ingest_findings — dedicated truth-write path:**
+
+```python
+# Sprint 8WA: používá _truth_write_graph, ne analytics _ioc_graph
+if self._truth_write_graph is None:
+    return  # early exit pro prázdný slot
+
+async def _run():
+    for finding in findings:
+        await self._truth_write_graph.buffer_ioc(ioc_type, value, 1.0)
+        await self._truth_write_graph.buffer_observation(...)
+```
+
+**async_ingest_findings_batch trigger — dedicated capability check:**
+
+```python
+# Sprint 8WA: truth_write_graph_supports_buffered_writes() místo graph_supports_buffered_writes()
+if results and any(r.get("lmdb_success") for r in results) and self.truth_write_graph_supports_buffered_writes():
+    self._graph_ingest_findings(findings)
+```
+
+**aclose — dva oddělené teardowny:**
+
+```python
+# Sprint 8WA: truth-write graph (IOCGraph) — flush + close
+if self._truth_write_graph is not None:
+    if callable(getattr(self._truth_write_graph, "flush_buffers", None)):
+        await self._truth_write_graph.flush_buffers()
+    if callable(getattr(self._truth_write_graph, "close", None)):
+        await self._truth_write_graph.close()
+
+# analytics/donor graph (DuckPGQGraph) — close only
+if self._ioc_graph is not None:
+    if callable(getattr(self._ioc_graph, "close", None)):
+        await self._ioc_graph.close()
+```
+
+### Graph attachment role matrix (aktualizovaná)
+
+| Consumer | Graph slot | Backend | Buffered writes | STIX | Analytics |
+|---|---|---|---|---|---|
+| `_graph_ingest_findings` | `_truth_write_graph` | IOCGraph (Kuzu) | ✅ | — | — |
+| `flush_buffers()` trigger | `_truth_write_graph` | IOCGraph (Kuzu) | ✅ | — | — |
+| `aclose()` teardown | `_truth_write_graph` | IOCGraph (Kuzu) | ✅ flush+close | — | — |
+| `aclose()` teardown | `_ioc_graph` | DuckPGQGraph | ❌ | — | ✅ close only |
+| `get_top_entities_for_ghost_global()` | `_ioc_graph` | DuckPGQGraph | ❌ | — | ✅ |
+| `get_top_seed_nodes()` | `_ioc_graph` | DuckPGQGraph | ❌ | — | ✅ |
+| `_build_stix_context()` Priority 1 | `_stix_graph` | IOCGraph (Kuzu) | — | ✅ | — |
+| `_build_stix_context()` Priority 2 | `_ioc_graph` | DuckPGQGraph | — | ❌ (unavailable) | ✅ |
+
+### Změněné soubory
+
+| Soubor | Změna |
+|---|---|
+| `knowledge/duckdb_store.py` | `_truth_write_graph` slot, `inject_truth_write_graph()`, `get_truth_write_graph()`, `truth_write_graph_supports_buffered_writes()`, `_graph_ingest_findings` používá `_truth_write_graph`, trigger v `async_ingest_findings_batch`, aclose má dva oddělené teardowny |
+| `tests/probe_8wa/test_truth_write_graph_slot.py` | **NOVÝ** — 19 probe testů |
+| `GRAPH_BACKEND_RECONCILIATION.md` | Sekce 15 — Sprint 8WA výsledky |
+
+### Co bylo schválně NEděláno
+
+1. **Žádný nový graph framework** — pouze dedicated slot, ne GraphProtocol
+2. **Žádná změna DuckPGQGraph** — zůstává analytics/donor
+3. **Žádná změna IOCGraph** — truth-store zůstává Kuzu-only
+4. **Nepřidán generic `get_graph()`** — každý slot má explicitní účel
+5. **`get_top_seed_nodes()` a `get_top_entities_for_ghost_global()` zůstaly na analytics path** — nemigrovaly na truth-write
+6. **Žádný nový produkční soubor**
+
+### Debt sekce — aktualizace
+
+**[DEBT-3] duckdb_store._ioc_graph schizofrenie → RESOLVED (Sprint 8WA)**
+- Původní stav: `_graph_ingest_findings` používala špatný slot (`_ioc_graph`) pro buffered writes
+- Akce: Sprint 8WA přidává dedicated `_truth_write_graph` slot pro ACTIVE-phase writes
+- Kanonická semantika: `_truth_write_graph` (truth) → `_ioc_graph` (analytics/donor)
+- Uzamčení: `tests/probe_8wa/test_truth_write_graph_slot.py` — 19 testů
+
+**[DEBT-5] duckdb_store._ioc_graph.flush_buffers mrtvý kód → RESOLVED (Sprint 8WA)**
+- Původní stav: `aclose()` volal `flush_buffers()` na `_ioc_graph` — pro DuckPGQGraph to byl mrtvý kód
+- Akce: `aclose()` nyní volá `flush_buffers()` na `_truth_write_graph`, `close()` na obou
+- Kanonická semantika: `_truth_write_graph` → flush+close, `_ioc_graph` → close only
+- Uzamčení: `test_aclose_flushes_truth_write_graph`, `test_aclose_closes_analytics_graph_separately`
+
+---
+
+## 16. Attachment Role Cleanup Summary — Three-Slot Architecture
+
+### Proč není "attachment role cleanup" graph unification
+
+Graph unification by znamenalo sloučit tři různé graph backendy do jedné autority.
+Sprint 8WA nedělá nic takového — pouze **explicitně odděluje tři existující sloty**,
+každý s jasně definovanou rolí:
+
+1. **Truth-write slot** (`_truth_write_graph`): Kuzu-backed IOCGraph pro ACTIVE-phase buffered writes
+2. **Analytics/donor slot** (`_ioc_graph`): DuckDB-backed DuckPGQGraph pro top-n, degree, edge export
+3. **STIX synthesis slot** (`_stix_graph`): Kuzu-backed IOCGraph pro STIX bundle export
+
+Toto je **role cleanup, ne capability merger**. Každý slot má svůj backend a svou sadu capability.
+Žádný nový generic abstraction layer nevznikl.
+
+### Graph attachment role matrix — finální stav
+
+| Role | Slot | Backend |Write | Read | STIX |
+|---|---|---|---|---|---|
+| **Truth-write** | `_truth_write_graph` | IOCGraph (Kuzu) | `buffer_ioc`, `flush_buffers` | — | — |
+| **Analytics/donor** | `_ioc_graph` | DuckPGQGraph | `add_ioc` | `get_top_nodes_by_degree`, `stats`, `export_edge_list` | — |
+| **STIX synthesis** | `_stix_graph` | IOCGraph (Kuzu) | — | — | `export_stix_bundle` |
+
+### Co zůstává pro F7
+
+1. **IOCGraph v ACTIVE fázi** — truth-write graph je vytvořen v `__main__._run_sprint_mode` WINDUP bloku,
+   ale **v ACTIVE bloku se nevytváří a neinjectuje** do `_truth_write_graph`. ACTIVE fáze stále
+   nemá IOCGraph pro buffered writes.
+2. **DuckDBShadowStore není graph owner** — store zůstává sidecar. Graph attachment seams
+   jsou consumer-facing adapters, ne authority shift.
+3. **`get_top_graph_nodes()` chybí** — stále není implementovaná na store, export bere z scorecard.

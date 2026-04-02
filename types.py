@@ -1567,24 +1567,18 @@ class ExportHandoff:
         """
         Create ExportHandoff from windup phase output (scorecard dict).
 
-        Producer-side construction point — called by __main__._print_scorecard_report()
-        to bridge windup_engine's dict output into typed ExportHandoff.
+        COMPAT-ONLY post-Sprint 8VZ: This classmethod is retained for legacy
+        call-sites that pass raw scorecard dicts. The canonical producer path
+        in __main__ now constructs ExportHandoff(...) directly, sourcing
+        top_nodes from store.get_top_seed_nodes().
 
-        CURRENT COMPAT SEAM:
-        windup_engine.run_windup() returns a scorecard dict; this method extracts
-        typed fields from that dict. Specifically:
-          - top_nodes ← scorecard["top_graph_nodes"] (populated by windup_engine
-            from scheduler._ioc_graph.get_top_nodes_by_degree(n=10))
-          - synthesis_engine ← scorecard["synthesis_engine_used"]
-          - gnn_predictions ← scorecard["gnn_predicted_links"]
+        CURRENT COMPAT SEAM (post-8VZ):
+        Used only by non-main call-sites that still pass scorecard dicts.
+        Canonical __main__ path uses ExportHandoff(...) constructor directly.
 
-        Two chained compat seams:
-          1. windup dict → scorecard dict (windup_engine writes to scorecard)
-          2. scorecard dict → ExportHandoff fields (this method extracts)
-
-        REMOVAL CONDITION: windup_engine returns typed ExportHandoff directly;
-        at that point __main__ calls ExportHandoff(...) constructor instead
-        of from_windup(scorecard), and this classmethod can be deprecated.
+        REMOVAL CONDITION (shortened post-8VZ):
+        __main__ now uses direct constructor; this classmethod remains only
+        for backward-compat callers. Full removal when all callers are gone.
 
         Args:
             sprint_id: sprint identifier

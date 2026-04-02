@@ -611,3 +611,122 @@ Přidána sekce `advisory_gate` s flat gate_outcome fields.
 | `runtime/sprint_scheduler.py` | Přidán `evaluate_advisory_gate()`, pole `_advisory_gate_snapshot`, volání na WINDUP entry, rozšířen `_build_shadow_readiness_preview()` |
 | `tests/probe_8vm/test_shadow_consumer_seam.py` | Přidány testy pro advisory gate |
 | `SHADOW_SCHEDULER_PARITY.md` | Přidána F3.10 sekce |
+
+---
+
+## F3.11: Dispatch Parity Preview (Sprint F3.11)
+
+### Bird's-Eye View: Proč je dispatch parity preview správný mezikrok
+
+Scheduler-shadow uměl WINDUP-entry advisory snapshot a tool readiness preview,
+ale postrádal explicitní rozlišení **jak scheduler-shadow previewuje dispatch readiness**
+pro jednotlivé task/tool kandidáty.
+
+**Dispatch parity preview** přidává:
+- Rozlišení mezi `canonical_tool_dispatch` (ToolRegistry) a `runtime_only_compat_dispatch` (inline task handlers)
+- Capability gap analysis bez volání `execute_with_limits()`
+- Explicitní rozlišení: `dispatch_ready`, `dispatch_blocked`, `dispatch_pruned`, `dispatch_unknown`
+- Rozpoznání že některé task types nemají ToolRegistry mapping a jsou `runtime_only_compat`
+
+Klíčové pravidlo: preview **NENÍ** simulace dnešního pivot dispatche.
+Pokud kandidát nemá čistý canonical ToolRegistry mapping, označí se jako `runtime_only_compat_dispatch`.
+
+### Co je nové v F3.11
+
+#### 1. DispatchTaxonomy Enum
+Explicitní taxonomie pro dispatch parity:
+
+| Kategorie | Meaning |
+|-----------|---------|
+| `CANONICAL_TOOL_DISPATCH` | Task/tool má čistý ToolRegistry mapping, jde přes `execute_with_limits` |
+| `RUNTIME_ONLY_COMPAT_DISPATCH` | Task/type používá inline `get_task_handler()`, nemá canonical ToolRegistry mapping |
+| `DISPATCH_READY` | Všechny podmínky pro dispatch jsou splněny |
+| `DISPATCH_BLOCKED` | Capability missing nebo hard constraint |
+| `DISPATCH_PRUNED` | Control mode prune/panic |
+| `DISPATCH_UNKNOWN` | Nelze určit readiness |
+| `CAPABILITY_MISSING` | Tool vyžaduje capabilities které nejsou v available set |
+| `NO_TOOL_MAPPING` | Task type nemá ToolRegistry tool mapping |
+
+#### 2. DispatchReadinessPreview
+Diagnostic artifact pro dispatch parity:
+
+| Field | Meaning |
+|-------|---------|
+| `readiness` | "ready" \| "blocked" \| "pruned" \| "unknown" |
+| `dispatch_path` | "canonical_tool" \| "runtime_only_compat" |
+| `tool_candidates` | Mapování task_type → tool_name |
+| `capability_gaps` | Detailní gap per tool (required, available, missing) |
+| `runtime_only_handlers` | Task types bez ToolRegistry mapping |
+| `canonical_count` | Počet tools s canonical dispatch path |
+| `runtime_only_count` | Počet task types s runtime_only_compat path |
+
+#### 3. preview_dispatch_parity()
+Pure function — DIAGNOSTIC ONLY, žádné `execute_with_limits()`, žádné provider activation.
+
+### Dispatch Matrix
+
+| Co | Read-only | No Dispatch | Capability Gap | Runtime Only Compat |
+|----|-----------|-------------|----------------|---------------------|
+| ToolRegistry metadata | ✅ | ✅ | ✅ | ✅ |
+| required_capabilities | ✅ | ✅ | ✅ | ❌ (není v registry) |
+| tool_cards | ✅ | ✅ | ✅ | ❌ |
+| execute_with_limits | ❌ | ❌ | ❌ | ❌ |
+| Provider activation | ❌ | ❌ | ❌ | ❌ |
+
+### Scheduler Shadow Dispatch-Parity Matrix
+
+| Readiness Domain | Source | Read-only | No Dispatch | Deferred Note |
+|-----------------|--------|-----------|-------------|---------------|
+| Lifecycle | SprintLifecycleManager | ✅ | ✅ | N/A |
+| Graph | DuckPGQGraph | ✅ | ✅ | N/A |
+| Export | ExportHandoff/scorecard | ✅ | ✅ | N/A |
+| Model/Control | AnalyzerResult/raw_profile | ✅ | ✅ | N/A |
+| Decision Gate | blockers/unknowns/compat | ✅ | ✅ | Provider only |
+| Tool Readiness | control_phase + graph hints | ✅ | ✅ | N/A |
+| Windup Readiness | lifecycle + export facts | ✅ | ✅ | N/A |
+| Provider Activation | precursors + lifecycle | ✅ | ✅ | ✅ Deferred only |
+| **Dispatch Parity** | ToolRegistry + task candidates | ✅ | ✅ | **runtime_only_compat only** |
+
+### Co scheduler-shadow TEĎ UMÍ previewovat (F3.11)
+
+1. **Dispatch readiness** — explicitní rozlišení dispatch_ready/blocked/pruned/unknown
+2. **Canonical vs runtime_only_compat** — které task types mají ToolRegistry mapping
+3. **Capability gap analysis** — které tools mají missing capabilities
+4. **Control mode impact** — které tools budou pruned při prune/panic módu
+
+### Co scheduler-shadow STÁLE NESMÍ (hard boundaries)
+
+| Zakázáno | Proč |
+|----------|------|
+| Tool execution (execute_with_limits) | Side effect |
+| Provider activation (acquire/load_model) | Mění runtime state |
+| Provider state machine simulation | Vznik pseudo-authority |
+| Provider load order simulation | Vznik pseudo-authority |
+| Windup engine activation | Mění runtime state |
+| Ledger writes | Není truth store |
+| Dispatch/enqueue work | Čistě diagnostické |
+
+### Co NENÍ v tomto sprintu
+
+| Co | Proč deferred |
+|----|---------------|
+| Skutečný dispatch přes ToolRegistry | Vyžaduje scheduler_active mode |
+| Provider plane simulace | Vznik pseudo-authority |
+| Plná capability enforcement | Vyžaduje real capability provider |
+
+### Guardraily Implementované v F3.11
+
+1. **Žádné execute_with_limits()** — pouze read-only ToolRegistry metadata
+2. **Žádné provider activation** — pouze deferred/unknown notes
+3. **Rozlišení canonical vs runtime_only_compat** — runtime_only neprezentuje jako canonical
+4. **Pure function** — žádné side effects v preview_dispatch_parity()
+5. **No bg_tasks** — dispatch parity počítáno synchronně v consume_shadow_pre_decision()
+
+### Soubory Změněné v F3.11
+
+| Soubor | Změna |
+|--------|--------|
+| `runtime/shadow_pre_decision.py` | Přidány `DispatchTaxonomy`, `ToolCapabilityGap`, `DispatchReadinessPreview`, `preview_dispatch_parity()` |
+| `runtime/sprint_scheduler.py` | Rozšířen `consume_shadow_pre_decision()` o dispatch parity, `_build_shadow_readiness_preview()` o `dispatch_parity` key |
+| `tests/probe_8vm/test_shadow_consumer_seam.py` | Přidány testy pro dispatch parity preview |
+| `SHADOW_SCHEDULER_PARITY.md` | Přidána F3.11 sekce |

@@ -45,7 +45,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 
 
 # =============================================================================
@@ -436,6 +436,9 @@ class PreDecisionSummary:
     windup_readiness: Optional[WindupReadinessPreview] = None
     provider_note: Optional[ProviderActivationNote] = None
 
+    # Sprint F3.11: Dispatch parity preview — diagnostic only, no execute_with_limits
+    dispatch_parity: Optional[DispatchReadinessPreview] = None
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "parity_timestamp_monotonic": self.parity_timestamp_monotonic,
@@ -544,6 +547,8 @@ class PreDecisionSummary:
                 "recommendation": self.provider_note.recommendation,
                 "next_phase_hint": self.provider_note.next_phase_hint,
             } if self.provider_note else None,
+            # Sprint F3.11: Dispatch parity preview
+            "dispatch_parity": self.dispatch_parity.to_dict() if self.dispatch_parity else None,
         }
 
 
@@ -1285,8 +1290,292 @@ def compose_advisory_gate(
 
 
 # =============================================================================
+# F3.11: Dispatch Parity Preview
+# =============================================================================
+
+class DispatchTaxonomy(Enum):
+    """
+    Dispatch taxonomy pro scheduler-shadow dispatch parity preview.
+
+    Rozlišuje mezi:
+    - CANONICAL_TOOL_DISPATCH: task/tool má čistý ToolRegistry mapping
+    - RUNTIME_ONLY_COMPAT_DISPATCH: task/type používá inline get_task_handler(),
+      nemá canonical ToolRegistry mapping
+    - DISPATCH_READY: všechny podmínky pro dispatch jsou splněny
+    - DISPATCH_BLOCKED: capability missing nebo hard constraint
+    - DISPATCH_PRUNED: control mode prune/panic
+    - DISPATCH_UNKNOWN: nelze určit readiness
+    """
+    # Dispatch path classification
+    CANONICAL_TOOL_DISPATCH = auto()   # Má ToolRegistry mapping, jde přes execute_with_limits
+    RUNTIME_ONLY_COMPAT_DISPATCH = auto()  # Inline task handler, ne ToolRegistry
+
+    # Readiness states (additive on path classification)
+    DISPATCH_READY = auto()           # Všechny podmínky splněny
+    DISPATCH_BLOCKED = auto()         # Capability missing nebo hard constraint
+    DISPATCH_PRUNED = auto()          # Control mode prune/panic
+    DISPATCH_UNKNOWN = auto()         # Nelze určit
+
+    # Blocker reasons
+    CAPABILITY_MISSING = auto()       # Tool requires capabilities not in available set
+    CONTROL_MODE_PRUNE = auto()       # Control phase je prune nebo panic
+    GRAPH_NOT_READY = auto()          # Graph není ready pro tuto operaci
+    NO_TOOL_MAPPING = auto()           # Task type nemá ToolRegistry tool mapping
+    RUNTIME_HANDLER_ONLY = auto()     # Používá get_task_handler(), ne execute_with_limits
+
+
+@dataclass
+class ToolCapabilityGap:
+    """
+    Capability gap pro jeden tool.
+    """
+    tool_name: str
+    required_capabilities: Set[str]
+    available_capabilities: Set[str]
+    missing_capabilities: Set[str]
+    is_satisfied: bool
+    is_network_tool: bool
+    is_high_memory: bool
+
+
+@dataclass
+class DispatchReadinessPreview:
+    """
+    Dispatch readiness preview — DIAGNOSTIC ONLY.
+
+    Previewuje dispatch readiness pro sadu task/tool kandidátů
+    bez volání execute_with_limits() nebo provider activation.
+
+    Rozlišuje:
+    - dispatch_ready: kandidát má čistý canonical path, capabilities satisfied
+    - dispatch_blocked: kandidát má path ale capability gap
+    - dispatch_pruned: kandidát je pruned control modem
+    - dispatch_unknown: nelze určit
+    - runtime_only_compat_dispatch: kandidát nemá ToolRegistry mapping,
+      používá inline get_task_handler()
+
+    Nikdy nevola:
+    - execute_with_limits()
+    - acquire() na provider pool
+    - load_model()
+    - Žádný dispatch
+    """
+    readiness: str  # "ready" | "blocked" | "pruned" | "unknown"
+    dispatch_path: str  # "canonical_tool" | "runtime_only_compat"
+
+    # Tool candidates (task_type → tool_name mapping kde existuje)
+    tool_candidates: Dict[str, str]  # task_type → tool_name
+
+    # Tool capability gaps (tool_name → ToolCapabilityGap)
+    capability_gaps: Dict[str, ToolCapabilityGap]
+
+    # Blocker reasons
+    blockers: List[str]
+    pruned_tools: List[str]
+    unknown_tools: List[str]
+    runtime_only_handlers: List[str]  # task types bez ToolRegistry mapping
+
+    # Control mode impact
+    control_mode: str
+    will_be_pruned: bool
+
+    # Canonical vs runtime-only summary
+    canonical_count: int
+    runtime_only_count: int
+    satisfied_count: int
+    blocked_count: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "readiness": self.readiness,
+            "dispatch_path": self.dispatch_path,
+            "tool_candidates": self.tool_candidates,
+            "capability_gaps": {
+                k: {
+                    "tool_name": v.tool_name,
+                    "required_capabilities": list(v.required_capabilities),
+                    "available_capabilities": list(v.available_capabilities),
+                    "missing_capabilities": list(v.missing_capabilities),
+                    "is_satisfied": v.is_satisfied,
+                    "is_network_tool": v.is_network_tool,
+                    "is_high_memory": v.is_high_memory,
+                }
+                for k, v in self.capability_gaps.items()
+            },
+            "blockers": self.blockers,
+            "pruned_tools": self.pruned_tools,
+            "unknown_tools": self.unknown_tools,
+            "runtime_only_handlers": self.runtime_only_handlers,
+            "control_mode": self.control_mode,
+            "will_be_pruned": self.will_be_pruned,
+            "canonical_count": self.canonical_count,
+            "runtime_only_count": self.runtime_only_count,
+            "satisfied_count": self.satisfied_count,
+            "blocked_count": self.blocked_count,
+        }
+
+
+def preview_dispatch_parity(
+    task_candidates: List[str],
+    available_capabilities: Set[str],
+    control_mode: str,
+    registry_tools: Optional[List["Tool"]] = None,
+) -> DispatchReadinessPreview:
+    """
+    Preview dispatch parity pro task kandidáty — DIAGNOSTIC ONLY.
+
+    Tato funkce:
+    - Čte ToolRegistry metadata (list_tools, required_capabilities)
+    - Mapuje task_type → tool_name přes known mappings
+    - Počítá capability gaps bez volání execute_with_limits()
+    - Rozlišuje canonical tool dispatch vs runtime_only_compat_dispatch
+
+    Args:
+        task_candidates: Seznam task_type řetězců kandidátů
+        available_capabilities: Set dostupných capability names
+        control_mode: "normal" | "prune" | "panic"
+        registry_tools: Optional[List[Tool]] — pokud None, použije create_default_registry()
+
+    Returns:
+        DispatchReadinessPreview — DIAGNOSTIC ONLY artifact
+
+    Nikdy nevola:
+    - execute_with_limits()
+    - acquire() / load_model()
+    - Provider activation
+    """
+    # Known task_type → tool_name mappings
+    # Tyto mappingy jsou DIAGNOSTICKÉ — necanonical, pouze pro preview
+    TASK_TYPE_TO_TOOL: Dict[str, str] = {
+        "cve_to_github": "python_execute",
+        "cve_to_academic": "python_execute",
+        "ip_to_ct": "web_search",
+        "ip_to_greynoise": "web_search",
+        "shodan_enrich": "web_search",
+        "domain_to_dns": "web_search",
+        "domain_to_wayback": "web_search",
+        "domain_to_pdns": "web_search",
+        "domain_to_ct": "web_search",
+        "ahmia_search": "web_search",
+        "rdap_lookup": "web_search",
+        "hash_to_mb": "web_search",
+        "wayback_search": "web_search",
+        "commoncrawl_search": "web_search",
+        "paste_keyword_search": "web_search",
+        "github_dork": "web_search",
+        "multi_engine_search": "web_search",
+        "hypothesis_probe": "web_search",
+    }
+
+    # Load tools from registry (read-only, no execute)
+    if registry_tools is None:
+        try:
+            from ..tool_registry import create_default_registry
+            registry = create_default_registry()
+            tools = registry.list_tools()
+        except Exception:
+            tools = []
+    else:
+        tools = registry_tools
+
+    # Build tool lookup: tool_name → Tool
+    tool_lookup: Dict[str, "Tool"] = {t.name: t for t in tools}
+
+    # Analyze each candidate
+    tool_candidates: Dict[str, str] = {}
+    capability_gaps: Dict[str, ToolCapabilityGap] = {}
+    runtime_only_handlers: List[str] = []
+    satisfied_tools: List[str] = []
+    blocked_tools: List[str] = []
+    pruned_tools: List[str] = []
+    unknown_tools: List[str] = []
+    blockers: List[str] = []
+
+    # Prune check
+    will_prune = control_mode in ("prune", "panic")
+
+    for task_type in task_candidates:
+        tool_name = TASK_TYPE_TO_TOOL.get(task_type)
+
+        if tool_name is None:
+            # No ToolRegistry mapping — runtime_only_compat_dispatch
+            runtime_only_handlers.append(task_type)
+            continue
+
+        tool_candidates[task_type] = tool_name
+        tool = tool_lookup.get(tool_name)
+
+        if tool is None:
+            # Tool exists in mapping but not in registry — unknown
+            unknown_tools.append(tool_name)
+            continue
+
+        required = tool.required_capabilities
+        missing = required - available_capabilities if required else set()
+        is_satisfied = len(missing) == 0
+
+        # Check network/high-memory
+        is_network = tool.cost_model.network
+        is_high_mem = tool.cost_model.ram_mb_est >= 500
+
+        gap = ToolCapabilityGap(
+            tool_name=tool_name,
+            required_capabilities=required,
+            available_capabilities=available_capabilities,
+            missing_capabilities=missing,
+            is_satisfied=is_satisfied,
+            is_network_tool=is_network,
+            is_high_memory=is_high_mem,
+        )
+        capability_gaps[tool_name] = gap
+
+        if will_prune and (is_network or is_high_mem):
+            pruned_tools.append(tool_name)
+        elif not is_satisfied:
+            blocked_tools.append(tool_name)
+            blockers.append(f"{tool_name}: missing capabilities {sorted(missing)}")
+        else:
+            satisfied_tools.append(tool_name)
+
+    # Determine overall readiness
+    if will_prune and (pruned_tools or blocked_tools):
+        readiness = "pruned"
+    elif blocked_tools:
+        readiness = "blocked"
+    elif unknown_tools or runtime_only_handlers:
+        readiness = "unknown"
+    else:
+        readiness = "ready"
+
+    # Determine dispatch path
+    dispatch_path = (
+        "runtime_only_compat"
+        if runtime_only_handlers
+        else "canonical_tool"
+    )
+
+    return DispatchReadinessPreview(
+        readiness=readiness,
+        dispatch_path=dispatch_path,
+        tool_candidates=tool_candidates,
+        capability_gaps=capability_gaps,
+        blockers=blockers,
+        pruned_tools=pruned_tools,
+        unknown_tools=unknown_tools,
+        runtime_only_handlers=runtime_only_handlers,
+        control_mode=control_mode,
+        will_be_pruned=will_prune,
+        canonical_count=len(satisfied_tools) + len(blocked_tools),
+        runtime_only_count=len(runtime_only_handlers),
+        satisfied_count=len(satisfied_tools),
+        blocked_count=len(blocked_tools),
+    )
+
+
+# =============================================================================
 # TYPE CHECKING imports — only used behind TYPE_CHECKING guard
 # =============================================================================
 
 if TYPE_CHECKING:
     from .shadow_parity import ParityArtifact
+    from ..tool_registry import Tool

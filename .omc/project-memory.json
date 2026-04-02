@@ -640,6 +640,18 @@
       "type": "file"
     },
     {
+      "path": "runtime/shadow_pre_decision.py",
+      "accessCount": 8,
+      "lastAccessed": 1775143158954,
+      "type": "file"
+    },
+    {
+      "path": "runtime/sprint_scheduler.py",
+      "accessCount": 7,
+      "lastAccessed": 1775143268038,
+      "type": "file"
+    },
+    {
       "path": "tests/probe_8td/test_retrieval_policy_annotations.py",
       "accessCount": 6,
       "lastAccessed": 1775128917118,
@@ -652,9 +664,9 @@
       "type": "file"
     },
     {
-      "path": "runtime/shadow_pre_decision.py",
-      "accessCount": 4,
-      "lastAccessed": 1775096493225,
+      "path": "tests/probe_8vi/test_export_wired_smoke.py",
+      "accessCount": 6,
+      "lastAccessed": 1775143477949,
       "type": "file"
     },
     {
@@ -676,9 +688,15 @@
       "type": "file"
     },
     {
-      "path": "tests/probe_8vi/test_export_wired_smoke.py",
+      "path": "SHADOW_SCHEDULER_PARITY.md",
       "accessCount": 3,
-      "lastAccessed": 1775134012450,
+      "lastAccessed": 1775143344800,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vm/test_shadow_consumer_seam.py",
+      "accessCount": 3,
+      "lastAccessed": 1775143417699,
       "type": "file"
     },
     {
@@ -692,12 +710,6 @@
       "accessCount": 2,
       "lastAccessed": 1775136580893,
       "type": "directory"
-    },
-    {
-      "path": "SHADOW_SCHEDULER_PARITY.md",
-      "accessCount": 1,
-      "lastAccessed": 1775096592416,
-      "type": "file"
     },
     {
       "path": "",

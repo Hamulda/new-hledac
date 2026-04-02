@@ -1,33 +1,40 @@
 # hledac/universal/export/COMPAT_HANDOFF.py
 # Sprint 8VX §C: ExportHandoff producer convergence audit
 # Sprint 8VY §A: Updated — removal conditions tightened, compat scope explicit
+# Sprint 8VZ §B: Updated — from_windup() is now explicitly compat-only
 # ⚠️  DEPRECATED THIN ADAPTER — DO NOT EXTEND
 """
-Canonical producer-side handoff truth (Sprint 8VY):
+Canonical producer-side handoff truth (Sprint 8VZ):
 
-  PRIMARY PATH (canonical): __main__._print_scorecard_report() builds
-    ExportHandoff.from_windup(sprint_id, scorecard_data) where scorecard_data
-    is a dict. The .from_windup() extraction from scorecard["top_graph_nodes"]
-    is the CURRENT compat seam — windup_engine returns dict, not typed ExportHandoff.
+  PRIMARY PATH (canonical post-8VZ): __main__._print_scorecard_report() builds
+    ExportHandoff(...) directly, sourcing top_nodes from store.get_top_seed_nodes().
+    This is the canonical producer construction point — no dict intermediary.
 
-  COMPAT SEAM (current): scorecard["top_graph_nodes"] is populated by
-    windup_engine from scheduler._ioc_graph.get_top_nodes_by_degree(n=10).
-    Two chained compat seams: windup dict → scorecard dict → ExportHandoff.
+  COMPAT SEAM (post-8VZ): from_windup(scorecard) is kept only for legacy
+    call-sites that pass raw scorecard dicts. It is NO LONGER the canonical
+    path in __main__.py.
 
-  FUTURE TARGET (post-cutover): windup_engine returns typed ExportHandoff
-    directly; from_windup(scorecard) disappears; ensure_export_handoff() shrinks
-    to None-only path.
+  SCORECARD ROLE (post-8VZ): scorecard_data dict is retained for:
+    - DuckDB persistence (upsert_scorecard)
+    - Markdown export (_export_markdown_report)
+    - JSON report serialization (export_sprint → eh.scorecard)
+    It is NOT the canonical source for top_nodes in the export handoff.
 
-  REMOVAL CONDITIONS:
-    1. ensure_export_handoff() for dict → removal when windup returns typed ExportHandoff
-    2. ensure_export_handoff() for None → removal when __main__ always passes typed ExportHandoff
-    3. scorecard["top_graph_nodes"] compat → removal when windup_engine fills ExportHandoff.top_nodes directly
-    4. store.get_top_seed_nodes() fallback → removal when ExportHandoff.top_nodes always populated
+  FUTURE TARGET (post-full-cutover): windup_engine returns typed ExportHandoff
+    directly; from_windup(scorecard) disappears entirely;
+    ensure_export_handoff() shrinks to None-only path.
+
+  REMOVAL CONDITIONS (updated post-8VZ):
+    1. ensure_export_handoff() for dict → SHORTER: only for non-main call-sites
+    2. ensure_export_handoff() for None → removal when all callers pass typed ExportHandoff
+    3. from_windup(scorecard) → REMOVED from __main__ canonical path (8VZ)
+    4. scorecard["top_graph_nodes"] as top_nodes source → REMOVED from canonical path (8VZ)
+    5. store.get_top_seed_nodes() fallback → removal when windup always populates top_nodes
 
   WHAT THIS MODULE IS NOT:
     - NOT a new DTO system — ExportHandoff (types.py) is the only typed handoff
     - NOT an export framework — export plane is sprint_exporter.py
-    - NOT a producer factory — __main__ constructs via from_windup(), not via this module
+    - NOT a producer factory — __main__ constructs via direct ExportHandoff(), not via this module
     - NOT growing — new features go to windup_engine or types.py, not here
 """
 

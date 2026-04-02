@@ -2120,17 +2120,15 @@ def _mark_phase(name: str) -> None:
 
 def _compute_sprint_report_path(sprint_id: str) -> "Path":
     """
-    Compute the sprint report output path.
+    Sprint 8VY §C: Delegates to canonical path owner.
 
-    Future owner: export/markdown_reporter.py
-    Removal condition: canonical markdown_reporter handles path computation
-                       for all report types; this function is deprecated.
+    Canonical owner: paths.get_sprint_report_path()
+    Shell no longer holds path computation authority.
+
+    Removal condition: NIKDY — thin delegation seam, not dead code
     """
-    from pathlib import Path as _Path
-
-    reports_dir = _Path.home() / ".hledac" / "reports"
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    return reports_dir / f"{sprint_id}.md"
+    from hledac.universal.paths import get_sprint_report_path as _get_path
+    return _get_path(sprint_id)
 
 
 def _render_sprint_report_markdown(
@@ -2154,16 +2152,13 @@ def _export_markdown_report(
     sprint_id: str,
 ) -> Path:
     """
-    Sprint 8TC B.4 (refactored): Deleguje rendering na _render_sprint_report_markdown.
+    Sprint 8TC B.4 (refactored 8VY §C): Deleguje rendering na _render_sprint_report_markdown.
 
-    Path computation je zachována v __main__.py — sémantika:
-      ~/.hledac/reports/{sprint_id}.md
-    Tato sémantika zůstává jako export/path debt na další fázi
-    (canonical markdown_reporter používá GHOST_EXPORT_DIR / RAMDISK_ROOT).
+    Path computation delegated to paths.get_sprint_report_path() (canonical owner).
+    File write stays in shell — orchestration concern.
 
-    Future owner: export/markdown_reporter.py
-    Removal condition: sprint report format přesunut do canonical reporter
-                       a path cutover dokončen.
+    Canonical owner: paths.get_sprint_report_path()
+    Shell role: orchestration + file write only
     """
     path = _compute_sprint_report_path(sprint_id)
     content = _render_sprint_report_markdown(report, scorecard, sprint_id)
@@ -2323,31 +2318,46 @@ async def _print_scorecard_report(
         except Exception:
             pass
 
-    # Sprint 8VI §A: Wire export_sprint() do EXPORT fáze
-    # Sprint 8VJ §C: Producer-side ExportHandoff construction
-    # Sprint 8VX §A: Comments aligned — ExportHandoff is PRIMARY handoff surface.
-    # Sprint 8VY §A: Producer convergence — canonical path IS from_windup(scorecard)
-    #                today; compat seam is scorecard["top_graph_nodes"] extraction.
+    # Sprint 8VZ §B: FIRST producer-side cutover — canonical path constructs
+    # ExportHandoff(...) directly. scorecard_data is kept for persistence and
+    # markdown (duckdb upsert, _export_markdown_report), but is NO LONGER the
+    # canonical source for top_nodes in the export handoff.
     #
-    # PRIMARY PATH (canonical today): __main__ constructs ExportHandoff.from_windup()
-    # from the scorecard dict. This IS the canonical producer construction point.
+    # CANONICAL PRODUCER TRUTH (post-8VZ):
+    #   ExportHandoff(...) — constructed directly at producer side
+    #   top_nodes sourced from store.get_top_seed_nodes() (store-facing seam)
     #
-    # CURRENT COMPAT SEAM: windup_engine writes scorecard["top_graph_nodes"] from
-    # scheduler._ioc_graph.get_top_nodes_by_degree(n=10). Two chained seams:
-    #   1. windup dict → scorecard dict (windup_engine)
-    #   2. scorecard dict → ExportHandoff fields (from_windup extraction)
-    # REMOVAL CONDITION: windup_engine returns typed ExportHandoff directly;
-    # at that point from_windup(scorecard) disappears and __main__ calls the
-    # ExportHandoff constructor directly.
+    # COMPAT LEFTOVERS (kept for backward compat / other consumers):
+    #   scorecard_data dict — still persisted to DuckDB, still used by markdown
+    #   from_windup(scorecard) — COMPAT ONLY, used only by legacy call-sites
+    #
+    # REMOVAL CONDITIONS SHORTENED by this cutover:
+    #   - from_windup(scorecard) now explicitly compat-only — __main__ uses direct ctor
+    #   - Two-chained-seams gone: no more windup dict → scorecard dict → ExportHandoff
+    #   - scorecard["top_graph_nodes"] no longer the canonical top_nodes source
     #
     # Graph fallback (store.get_top_seed_nodes) is ACCEPTED COMPAT SEAM.
     # REMOVAL CONDITION: ExportHandoff.top_nodes always populated in all windup paths.
     try:
         from export.sprint_exporter import export_sprint as _export_sprint
         from types import ExportHandoff
-        # Sprint 8VJ §C: Construct typed handoff at producer side
-        # scorecard["top_graph_nodes"] remains the compat seam (current canonical source)
-        handoff = ExportHandoff.from_windup(sprint_id, scorecard_data)
+
+        # Sprint 8VZ §B: Construct typed handoff directly — canonical producer truth
+        # top_nodes from store seam (DuckPGQGraph-backed store.get_top_seed_nodes)
+        _top_nodes: list = []
+        if store is not None:
+            try:
+                if hasattr(store, "get_top_seed_nodes"):
+                    _top_nodes = store.get_top_seed_nodes(n=10)
+            except Exception:
+                pass
+
+        handoff = ExportHandoff(
+            sprint_id=sprint_id,
+            scorecard=scorecard_data,
+            top_nodes=_top_nodes,
+            phase_durations=phase_timings,
+        )
         export_result = await _export_sprint(store, handoff)
         logger.info("[SCORECARD] Sprint export: JSON=%s, seeds=%s",
                      export_result.get("report_json", ""),

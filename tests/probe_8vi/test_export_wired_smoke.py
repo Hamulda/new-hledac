@@ -127,3 +127,107 @@ async def test_export_sprint_store_fallback():
 
         finally:
             paths.SPRINT_STORE_ROOT = orig_root
+
+
+@pytest.mark.asyncio
+async def test_export_handoff_direct_construction():
+    """
+    Sprint 8VZ §B: Canonical producer path uses ExportHandoff(...) directly,
+    NOT from_windup(scorecard). top_nodes sourced from store.get_top_seed_nodes().
+    """
+    import tempfile
+    import pathlib
+    from unittest.mock import MagicMock
+    import paths
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fake_sprint_root = pathlib.Path(tmpdir) / "sprints"
+        fake_sprint_root.mkdir(parents=True, exist_ok=True)
+        orig_root = paths.SPRINT_STORE_ROOT
+        paths.SPRINT_STORE_ROOT = fake_sprint_root
+
+        try:
+            from export.sprint_exporter import export_sprint
+            from hledac.universal.types import ExportHandoff
+
+            # Mock store with get_top_seed_nodes (canonical source post-8VZ)
+            mock_store = MagicMock()
+            mock_store.get_top_seed_nodes.return_value = [
+                {"value": "top-domain.com", "ioc_type": "domain", "confidence": 0.95, "degree": 15},
+                {"value": "second-domain.com", "ioc_type": "domain", "confidence": 0.88, "degree": 12},
+            ]
+
+            # Canonical path: direct ExportHandoff construction (post-8VZ)
+            # NOT from_windup(scorecard)
+            handoff = ExportHandoff(
+                sprint_id="test_canonical_001",
+                scorecard={"sprint_id": "test_canonical_001", "accepted_findings_count": 42},
+                top_nodes=mock_store.get_top_seed_nodes(n=10),
+                phase_durations={"warmup": 5.0, "active": 120.0, "windup": 30.0},
+            )
+
+            # Verify handoff has top_nodes from store seam (not from scorecard)
+            assert len(handoff.top_nodes) == 2
+            assert handoff.top_nodes[0]["value"] == "top-domain.com"
+            assert handoff.top_nodes[0]["degree"] == 15
+
+            # Verify scorecard is still present (for JSON report compat)
+            assert handoff.scorecard["sprint_id"] == "test_canonical_001"
+
+            result = await export_sprint(mock_store, handoff)
+
+            # Verify seeds were generated from top_nodes
+            mock_store.get_top_seed_nodes.assert_called_once_with(n=10)
+            seeds_path = pathlib.Path(result["seeds_json"])
+            assert seeds_path.exists()
+
+            import json
+            seeds_data = json.loads(seeds_path.read_text())
+            assert len(seeds_data) > 0
+            # Seeds come from top_nodes, not from scorecard["top_graph_nodes"]
+            values = [s["value"] for s in seeds_data]
+            assert "top-domain.com" in values
+
+        finally:
+            paths.SPRINT_STORE_ROOT = orig_root
+
+
+@pytest.mark.asyncio
+async def test_from_windup_still_works_for_legacy():
+    """
+    Sprint 8VZ §B: from_windup(scorecard) still works for legacy compat callers.
+    This is the COMPAT-ONLY path, not the canonical one.
+    """
+    import tempfile
+    import pathlib
+    import paths
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fake_sprint_root = pathlib.Path(tmpdir) / "sprints"
+        fake_sprint_root.mkdir(parents=True, exist_ok=True)
+        orig_root = paths.SPRINT_STORE_ROOT
+        paths.SPRINT_STORE_ROOT = fake_sprint_root
+
+        try:
+            from export.sprint_exporter import export_sprint
+            from hledac.universal.types import ExportHandoff
+
+            # Legacy scorecard with top_graph_nodes (old windup path)
+            legacy_scorecard = {
+                "sprint_id": "legacy_001",
+                "top_graph_nodes": [
+                    {"value": "legacy.com", "ioc_type": "domain", "confidence": 0.7, "degree": 3},
+                ],
+                "accepted_findings_count": 10,
+            }
+
+            # from_windup still works — COMPAT path
+            handoff = ExportHandoff.from_windup("legacy_001", legacy_scorecard)
+            assert handoff.top_nodes[0]["value"] == "legacy.com"
+            assert handoff.synthesis_engine == "unknown"  # default
+
+            result = await export_sprint(None, handoff, "legacy_001")
+            assert result.get("report_json") not in ("", "None")
+
+        finally:
+            paths.SPRINT_STORE_ROOT = orig_root

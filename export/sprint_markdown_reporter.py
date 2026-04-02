@@ -15,10 +15,10 @@ Sprint report format:
   - Source Leaderboard (from scorecard.source_yield_json)
   - Phase Timings (from scorecard.phase_timings_json)
 
-Path semantics (shell concern):
+Path semantics (Sprint 8VY §C):
+  - Canonical path computation: paths.get_sprint_report_path() — paths.py IS owner
+  - Shell role: orchestration + file write only
   - Output path: ~/.hledac/reports/{sprint_id}.md
-  - Path computation stays in __main__.py (never change passive path behavior)
-  - File write stays in __main__.py (orchestration concern)
 """
 from __future__ import annotations
 

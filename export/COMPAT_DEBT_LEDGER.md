@@ -1,6 +1,6 @@
 # Export Plane Compat Debt Ledger
-# Sprint 8VI §A / Sprint 8VJ §C
-# Stav: 2026-04-01 — Entry #1, #2 vyřešeny, #3 pending, #4 accepted
+# Sprint 8VI §A / Sprint 8VJ §C / Sprint 8VY §C
+# Stav: 2026-04-02 — Entry #3 RESOLVED 8VY §C, #4 accepted
 
 ---
 
@@ -57,7 +57,7 @@ NEBO `windup_engine.run_windup()` plní `scorecard["top_graph_nodes"]` ve všech
 
 ## Ledger Entry #3: Inline `_render_sprint_report_markdown` dupe
 
-**Status: ✅ RESOLVED (Sprint 8VJ §B)**
+**Status: ✅ RESOLVED (Sprint 8VJ §B) — Sprint 8VY §C PATH AUTHORITY FINISH**
 
 **Lokace:**
 - Old: `__main__.py:2136-2227` (inline, ~90 lines)
@@ -70,8 +70,12 @@ Tato duplicita vznikla protože sprint markdown format nebyl přesunut do export
 **Resolution (Sprint 8VJ §B):**
 - Pure rendering přesunuto do `export/sprint_markdown_reporter.py:render_sprint_markdown()`
 - `__main__._render_sprint_report_markdown()` je nyní thin bridge (1-line delegation)
-- Path computation (`_compute_sprint_report_path`) zůstává v shellu — sémantika `~/.hledac/reports/{sprint_id}.md` nikdy neměněna
-- File write (`_export_markdown_report`) zůstává v shellu — orchestrace zůstává tam kde je bezpečnější
+
+**Resolution (Sprint 8VY §C) — PATH AUTHORITY CLEANUP:**
+- `_compute_sprint_report_path()` DELEGATES na `paths.get_sprint_report_path()` (canonical owner)
+- Path computation (`~/.hledac/reports/{sprint_id}.md`) je nyní v `paths.py` — správce určen
+- Shell (`__main__._export_markdown_report()`) provádí pouze orchestraci + zápis
+- Sémantika cesty nikdy neměněna — pouze přesunuta na správného správce
 
 **Co bylo přesunuto:**
 - Všechny formatting helpery (`_render_research_metrics`, `_render_threat_actors`, `_render_top_findings`, `_render_source_leaderboard`, `_render_phase_timings`)
@@ -79,10 +83,13 @@ Tato duplicita vznikla protože sprint markdown format nebyl přesunut do export
 - Constants `_SYNTHESIS_ENGINE_LABELS`
 
 **Co zůstává v shellu a proč:**
-- `_compute_sprint_report_path()` — path computation; změna by nesla riziko driftu path sémantiky
-- `_export_markdown_report()` — orchestration + write; bezpečnější neměnit
+- `_compute_sprint_report_path()` — thin delegation seam (volá paths.get_sprint_report_path)
+- `_export_markdown_report()` — orchestration + write only; ne měnit
 
-**Future owner:** `export/sprint_markdown_reporter.py` je canonical — další sprint markdown změny jdou tam
+**Canonical owner dnes:**
+- Pure render: `export/sprint_markdown_reporter.py`
+- Path computation: `paths.get_sprint_report_path()`
+- Shell: orchestration + write only
 
 **Removal condition:** NIKDY — shell bridge zůstává jako delegation seam; canonical renderer žije v export plane
 

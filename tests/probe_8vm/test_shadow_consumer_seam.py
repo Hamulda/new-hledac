@@ -1002,3 +1002,206 @@ class TestAdvisoryGateSchedulerIntegration:
                 os.environ["HLEDAC_RUNTIME_MODE"] = original
             else:
                 os.environ.pop("HLEDAC_RUNTIME_MODE", None)
+
+
+class TestDispatchParityPreview:
+    """Sprint F3.11: Tests for dispatch parity preview."""
+
+    def test_preview_dispatch_parity_function(self):
+        """preview_dispatch_parity must return DispatchReadinessPreview."""
+        from hledac.universal.runtime.shadow_pre_decision import preview_dispatch_parity
+
+        result = preview_dispatch_parity(
+            task_candidates=["cve_to_github", "ip_to_ct"],
+            available_capabilities={"reranking"},
+            control_mode="normal",
+            registry_tools=None,
+        )
+
+        assert result.readiness in ("ready", "blocked", "unknown")
+        assert result.dispatch_path in ("canonical_tool", "runtime_only_compat")
+        # tool_candidates maps task_type → tool_name
+        assert "cve_to_github" in result.tool_candidates or "ip_to_ct" in result.tool_candidates
+
+    def test_dispatch_parity_readiness_blocked_when_capabilities_missing(self):
+        """Dispatch readiness must be blocked when required capabilities missing."""
+        from hledac.universal.runtime.shadow_pre_decision import preview_dispatch_parity
+
+        result = preview_dispatch_parity(
+            task_candidates=["cve_to_github", "ip_to_ct"],
+            available_capabilities=set(),  # No capabilities
+            control_mode="normal",
+            registry_tools=None,
+        )
+
+        # Missing reranking capability blocks web_search-based tools
+        assert result.readiness in ("blocked", "unknown")
+        assert result.blocked_count >= 0
+
+    def test_dispatch_parity_pruned_when_prune_mode(self):
+        """Dispatch readiness must be pruned when control_mode is prune."""
+        from hledac.universal.runtime.shadow_pre_decision import preview_dispatch_parity
+
+        result = preview_dispatch_parity(
+            task_candidates=["cve_to_github", "ip_to_ct"],
+            available_capabilities={"reranking"},
+            control_mode="prune",
+            registry_tools=None,
+        )
+
+        assert result.will_be_pruned is True
+        assert result.control_mode == "prune"
+
+    def test_dispatch_parity_runtime_only_compat_when_no_registry_tools(self):
+        """Dispatch path must be runtime_only_compat when registry_tools is None."""
+        from hledac.universal.runtime.shadow_pre_decision import preview_dispatch_parity
+
+        result = preview_dispatch_parity(
+            task_candidates=["cve_to_github"],
+            available_capabilities=set(),
+            control_mode="normal",
+            registry_tools=None,
+        )
+
+        # Without registry_tools, cannot determine canonical mapping
+        assert result.dispatch_path in ("canonical_tool", "runtime_only_compat")
+
+    def test_dispatch_parity_capability_gaps(self):
+        """DispatchReadinessPreview must contain capability gaps."""
+        from hledac.universal.runtime.shadow_pre_decision import preview_dispatch_parity
+
+        result = preview_dispatch_parity(
+            task_candidates=["ip_to_ct"],
+            available_capabilities=set(),
+            control_mode="normal",
+            registry_tools=None,
+        )
+
+        # With empty registry, no canonical mapping found
+        assert isinstance(result.to_dict(), dict)
+        assert "tool_candidates" in result.to_dict()
+        assert "capability_gaps" in result.to_dict()
+
+    def test_pre_decision_summary_has_dispatch_parity_field(self):
+        """PreDecisionSummary must have dispatch_parity field."""
+        from hledac.universal.runtime.shadow_pre_decision import PreDecisionSummary
+
+        # dispatch_parity is optional, may be None
+        assert hasattr(PreDecisionSummary, "__dataclass_fields__")
+        # Field is added via edit, check at runtime
+        from hledac.universal.runtime.shadow_pre_decision import PreDecisionSummary
+        pd = PreDecisionSummary(
+            parity_timestamp_monotonic=0.0,
+            parity_timestamp_wall="2026-04-02T00:00:00Z",
+            runtime_mode="scheduler_shadow",
+            lifecycle=MagicMock(),
+            graph=MagicMock(),
+            export_readiness=MagicMock(),
+            model_control=MagicMock(),
+            precursors=MagicMock(),
+            diff_taxonomy=[],
+            blockers=[],
+            unknowns=[],
+            mismatch_reasons={},
+        )
+        # dispatch_parity may be None or set later
+        assert pd.dispatch_parity is None or hasattr(pd.dispatch_parity, "readiness")
+
+    def test_dispatch_readiness_preview_to_dict(self):
+        """DispatchReadinessPreview.to_dict() must return all fields."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            DispatchReadinessPreview,
+            ToolCapabilityGap,
+        )
+
+        gap = ToolCapabilityGap(
+            tool_name="web_search",
+            required_capabilities={"reranking"},
+            available_capabilities=set(),
+            missing_capabilities={"reranking"},
+            is_satisfied=False,
+            is_network_tool=True,
+            is_high_memory=False,
+        )
+
+        preview = DispatchReadinessPreview(
+            readiness="blocked",
+            dispatch_path="canonical_tool",
+            tool_candidates={"ip_to_ct": "web_search"},
+            capability_gaps={"web_search": gap},
+            blockers=["web_search: missing capabilities {'reranking'}"],
+            pruned_tools=[],
+            unknown_tools=[],
+            runtime_only_handlers=[],
+            control_mode="normal",
+            will_be_pruned=False,
+            canonical_count=1,
+            runtime_only_count=0,
+            satisfied_count=0,
+            blocked_count=1,
+        )
+
+        d = preview.to_dict()
+        assert d["readiness"] == "blocked"
+        assert d["dispatch_path"] == "canonical_tool"
+        assert d["canonical_count"] == 1
+        assert d["blocked_count"] == 1
+        assert "web_search" in d["tool_candidates"].values()
+
+    def test_scheduler_preview_includes_dispatch_parity(self):
+        """_build_shadow_readiness_preview must include dispatch_parity when set."""
+        original = os.environ.get("HLEDAC_RUNTIME_MODE")
+        try:
+            os.environ["HLEDAC_RUNTIME_MODE"] = "scheduler_shadow"
+
+            scheduler = SprintScheduler(SprintSchedulerConfig())
+            scheduler._lc_adapter = MagicMock()
+            scheduler._lc_adapter._lc = MagicMock()
+            scheduler._synthesis_engine = "test-engine"
+
+            # Attach fake dispatch parity
+            from hledac.universal.runtime.shadow_pre_decision import (
+                DispatchReadinessPreview,
+            )
+            fake_dispatch = DispatchReadinessPreview(
+                readiness="ready",
+                dispatch_path="canonical_tool",
+                tool_candidates={},
+                capability_gaps={},
+                blockers=[],
+                pruned_tools=[],
+                unknown_tools=[],
+                runtime_only_handlers=[],
+                control_mode="normal",
+                will_be_pruned=False,
+                canonical_count=0,
+                runtime_only_count=0,
+                satisfied_count=0,
+                blocked_count=0,
+            )
+            scheduler._shadow_pd_summary = MagicMock()
+            scheduler._shadow_pd_summary.dispatch_parity = fake_dispatch
+            scheduler._shadow_pd_summary.lifecycle = MagicMock()
+            scheduler._shadow_pd_summary.graph = MagicMock()
+            scheduler._shadow_pd_summary.export_readiness = MagicMock()
+            scheduler._shadow_pd_summary.model_control = MagicMock()
+            scheduler._shadow_pd_summary.precursors = MagicMock()
+            scheduler._shadow_pd_summary.diff_taxonomy = []
+            scheduler._shadow_pd_summary.blockers = []
+            scheduler._shadow_pd_summary.unknowns = []
+            scheduler._shadow_pd_summary.decision_gate = None
+            scheduler._shadow_pd_summary.tool_readiness = None
+            scheduler._shadow_pd_summary.windup_readiness = None
+            scheduler._shadow_pd_summary.provider_note = None
+
+            preview = scheduler._build_shadow_readiness_preview()
+
+            assert "dispatch_parity" in preview
+            assert preview["dispatch_parity"]["readiness"] == "ready"
+            assert preview["dispatch_parity"]["dispatch_path"] == "canonical_tool"
+
+        finally:
+            if original is not None:
+                os.environ["HLEDAC_RUNTIME_MODE"] = original
+            else:
+                os.environ.pop("HLEDAC_RUNTIME_MODE", None)

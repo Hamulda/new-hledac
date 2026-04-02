@@ -1617,6 +1617,48 @@ class SprintScheduler:
             # ToolRegistry unavailable — skip, this is diagnostic only
             pass
 
+        # Sprint F3.11: Dispatch parity preview — DIAGNOSTIC ONLY
+        # Read-only task candidate analysis, no execute_with_limits, no dispatch
+        try:
+            from hledac.universal.runtime.shadow_pre_decision import preview_dispatch_parity
+
+            # Default task candidates for dispatch parity preview
+            # These represent the pivot task types from _execute_pivot()
+            task_candidates = [
+                "cve_to_github", "cve_to_academic",
+                "ip_to_ct", "ip_to_greynoise", "shodan_enrich",
+                "domain_to_dns", "domain_to_wayback", "domain_to_pdns",
+                "domain_to_ct", "ahmia_search", "rdap_lookup",
+                "hash_to_mb",
+                "wayback_search", "commoncrawl_search", "paste_keyword_search",
+                "github_dork", "multi_engine_search",
+                "hypothesis_probe",
+            ]
+
+            # Available capabilities from model_control facts (heuristic)
+            available_caps: set = set()
+            if mc_bundle.tools:
+                # Map tools to capabilities heuristically
+                for tool in mc_bundle.tools:
+                    if tool in ("web_search", "academic_search"):
+                        available_caps.add("reranking")
+                    if tool == "entity_extraction":
+                        available_caps.add("entity_linking")
+
+            # Control mode from lifecycle
+            ctrl_mode = lifecycle_bundle.control_phase.mode if hasattr(lifecycle_bundle, 'control_phase') else "normal"
+
+            dispatch_preview = preview_dispatch_parity(
+                task_candidates=task_candidates,
+                available_capabilities=available_caps,
+                control_mode=ctrl_mode,
+                registry_tools=registry.list_tools() if registry else None,
+            )
+            pd_summary.dispatch_parity = dispatch_preview
+        except Exception:
+            # Dispatch preview unavailable — skip, this is diagnostic only
+            pass
+
         # Cache for repeated calls within the same sprint
         self._shadow_pd_summary = pd_summary
         return pd_summary
@@ -1758,6 +1800,22 @@ class SprintScheduler:
                 "defer_to_provider": ag.defer_to_provider,
                 "gate_evaluated_at_monotonic": ag.gate_evaluated_at_monotonic,
                 "gate_evaluated_at_wall": ag.gate_evaluated_at_wall,
+            }
+
+        # Sprint F3.11: Dispatch parity preview — diagnostic only, no execute_with_limits
+        if pd.dispatch_parity is not None:
+            result["dispatch_parity"] = {
+                "readiness": pd.dispatch_parity.readiness,
+                "dispatch_path": pd.dispatch_parity.dispatch_path,
+                "canonical_count": pd.dispatch_parity.canonical_count,
+                "runtime_only_count": pd.dispatch_parity.runtime_only_count,
+                "satisfied_count": pd.dispatch_parity.satisfied_count,
+                "blocked_count": pd.dispatch_parity.blocked_count,
+                "runtime_only_handlers": pd.dispatch_parity.runtime_only_handlers,
+                "blockers": pd.dispatch_parity.blockers,
+                "pruned_tools": pd.dispatch_parity.pruned_tools,
+                "will_be_pruned": pd.dispatch_parity.will_be_pruned,
+                "control_mode": pd.dispatch_parity.control_mode,
             }
 
         return result

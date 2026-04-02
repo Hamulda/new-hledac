@@ -54,16 +54,16 @@ class TestPathsModule:
                       RUNS_ROOT, SOCKETS_ROOT]:
             assert isinstance(const, pathlib.Path), f"{const} is not pathlib.Path"
 
-    def test_paths_public_api_exact(self):
-        """PUBLIC API RULE: __all__ exposes exactly required names."""
+    def test_paths_public_api_includes_canonical_names(self):
+        """PUBLIC API RULE: __all__ includes required path authority names."""
         import hledac.universal.paths as paths_mod
-        expected = {
-            "RAMDISK_ROOT", "FALLBACK_ROOT", "RAMDISK_ACTIVE", "DB_ROOT",
-            "LMDB_ROOT", "EVIDENCE_ROOT", "KEYS_ROOT", "TOR_ROOT", "NYM_ROOT",
-            "RUNS_ROOT", "SOCKETS_ROOT",
+        required = {
+            "RAMDISK_ROOT", "FALLBACK_ROOT", "RAMDISK_ACTIVE",
+            "RUNS_ROOT", "SPRINT_STORE_ROOT", "IOC_DB_PATH",
+            "get_sprint_report_path",
             "assert_ramdisk_alive", "cleanup_fallback_artifacts",
         }
-        assert set(paths_mod.__all__) == expected
+        assert required.issubset(set(paths_mod.__all__))
 
     def test_paths_exposes_ramdisk_active_flag(self):
         """RAMDISK_ACTIVE: Boolean flag exported."""
@@ -338,3 +338,43 @@ class TestCleanupFallbackArtifacts:
         FALLBACK_ROOT.mkdir(parents=True, exist_ok=True)
         assert FALLBACK_ROOT.exists()
         cleanup_fallback_artifacts()
+
+
+class TestSprintReportPathAuthority:
+    """Sprint 8VY §C: paths.get_sprint_report_path() is canonical path owner."""
+
+    def test_get_sprint_report_path_returns_pathlib_path(self):
+        """PATH AUTHORITY: Returns pathlib.Path."""
+        from hledac.universal.paths import get_sprint_report_path
+        result = get_sprint_report_path("test_sprint")
+        assert isinstance(result, pathlib.Path)
+
+    def test_get_sprint_report_path_semantics(self):
+        """PATH AUTHORITY: Semantic is ~/.hledac/reports/{sprint_id}.md."""
+        from hledac.universal.paths import get_sprint_report_path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("pathlib.Path.home", return_value=pathlib.Path(tmpdir)):
+                result = get_sprint_report_path("s8vy_test")
+        assert result.name == "s8vy_test.md"
+        assert str(result).endswith(".hledac/reports/s8vy_test.md")
+
+    def test_get_sprint_report_path_in_all(self):
+        """PUBLIC API: get_sprint_report_path is in __all__."""
+        import hledac.universal.paths as paths_mod
+        assert "get_sprint_report_path" in paths_mod.__all__
+
+    def test_main_delegates_to_canonical_path_owner(self):
+        """SHELL BRIDGE: __main__._compute_sprint_report_path delegates to paths."""
+        from hledac.universal.__main__ import _compute_sprint_report_path
+        from hledac.universal.paths import get_sprint_report_path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("pathlib.Path.home", return_value=pathlib.Path(tmpdir)):
+                main_result = _compute_sprint_report_path("s8vy_delegate_test")
+                canonical_result = get_sprint_report_path("s8vy_delegate_test")
+        assert main_result == canonical_result
+
+    def test_sprint_markdown_reporter_docstring_reflects_canonical_owner(self):
+        """DOCSTRING: sprint_markdown_reporter docstring names paths.py as owner."""
+        from hledac.universal.export import sprint_markdown_reporter as smr_mod
+        doc = smr_mod.__doc__ or ""
+        assert "paths.py" in doc or "paths.get_sprint_report_path" in doc

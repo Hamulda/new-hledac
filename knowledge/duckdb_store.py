@@ -537,6 +537,12 @@ class DuckDBShadowStore:
         # _stix_graph is independent of _ioc_graph (analytics) and _graph_attachment_kind.
         self._stix_graph: Any = None
 
+        # Sprint 8WA: Dedicated truth-write graph slot for ACTIVE buffered writes.
+        # TRUTH-WRITE ONLY: only IOCGraph (Kuzu) supports buffer_ioc/flush_buffers.
+        # This slot is INDEPENDENT of _ioc_graph (analytics/donor) and _stix_graph (STIX).
+        # _truth_write_graph is used exclusively for ACTIVE-phase buffered IOC ingest.
+        self._truth_write_graph: Any = None
+
         # Sprint 8SB: Semantic store (FastEmbed + LanceDB)
         self._semantic_store: Optional[Any] = None
 
@@ -621,6 +627,54 @@ class DuckDBShadowStore:
         This is a CONSUMER-SPECIFIC seam, not a generic graph accessor.
         """
         return self._stix_graph
+
+    def inject_truth_write_graph(self, graph: Any) -> None:
+        """
+        Sprint 8WA: Inject dedicated truth-write graph for ACTIVE buffered writes.
+
+        TRUTH-WRITE ONLY: only IOCGraph (Kuzu) supports buffer_ioc/flush_buffers.
+        DuckPGQGraph must NEVER be injected here — it lacks buffered write capability.
+
+        This slot is INDEPENDENT of:
+          - _ioc_graph (analytics/donor graph — DuckPGQGraph in windup)
+          - _stix_graph (STIX synthesis graph)
+
+        _truth_write_graph is used exclusively for ACTIVE-phase buffered IOC ingest
+        via _graph_ingest_findings().
+
+        Args:
+            graph: IOCGraph (Kuzu) instance or None to clear.
+        """
+        self._truth_write_graph = graph
+
+    def get_truth_write_graph(self) -> Any:
+        """
+        Sprint 8WA: Get injected truth-write graph for ACTIVE-phase consumers.
+
+        Returns the injected truth-write graph (IOCGraph/Kuzu) if available,
+        else None. DuckPGQGraph is never returned — it lacks buffer_ioc/flush_buffers.
+
+        This is a CONSUMER-SPECIFIC seam for ACTIVE-phase buffered writes only.
+        """
+        return self._truth_write_graph
+
+    def truth_write_graph_supports_buffered_writes(self) -> bool:
+        """
+        Sprint 8WA: Does _truth_write_graph support ACTIVE-phase buffered writes?
+
+        Returns True only if _truth_write_graph is IOCGraph (Kuzu) with both:
+          - buffer_ioc()
+          - flush_buffers()
+
+        This is a dedicated check for the truth-write slot, independent of
+        the analytics _ioc_graph slot.
+        """
+        if self._truth_write_graph is None:
+            return False
+        return (
+            callable(getattr(self._truth_write_graph, "buffer_ioc", None))
+            and callable(getattr(self._truth_write_graph, "flush_buffers", None))
+        )
 
     # ------------------------------------------------------------------
     # Sprint 8TF: Export/Store Seed Seam
@@ -805,7 +859,8 @@ class DuckDBShadowStore:
         Called via _bg_tasks tracking after async_ingest_findings_batch succeeds.
         Fail-open: any exception is caught and logged.
         """
-        if self._ioc_graph is None:
+        # Sprint 8WA: Use dedicated truth-write graph, not analytics _ioc_graph.
+        if self._truth_write_graph is None:
             return
 
         loop = asyncio.get_running_loop()
@@ -842,7 +897,7 @@ class DuckDBShadowStore:
 
                     id_map: dict[str, str] = {}  # value → ioc_id (computed from value)
                     for value, ioc_type in iocs:
-                        await self._ioc_graph.buffer_ioc(ioc_type, value, 1.0)
+                        await self._truth_write_graph.buffer_ioc(ioc_type, value, 1.0)
                         ioc_id = f"{ioc_type}:{xxhash.xxh64(value.encode()).hexdigest()}"
                         id_map[value] = ioc_id
 
@@ -852,7 +907,7 @@ class DuckDBShadowStore:
                         id_a = id_map[v_a]
                         for v_b in values[i + 1:]:
                             id_b = id_map[v_b]
-                            await self._ioc_graph.buffer_observation(
+                            await self._truth_write_graph.buffer_observation(
                                 id_a, id_b, fid, ts, src
                             )
             except Exception:
@@ -2440,7 +2495,7 @@ class DuckDBShadowStore:
             if (
                 results
                 and any(r.get("lmdb_success") for r in results)
-                and self.graph_supports_buffered_writes()
+                and self.truth_write_graph_supports_buffered_writes()
             ):
                 self._graph_ingest_findings(findings)
 
@@ -2886,16 +2941,23 @@ class DuckDBShadowStore:
             await asyncio.gather(*self._bg_tasks, return_exceptions=True)
             self._bg_tasks.clear()
 
-        # Sprint 8QA/8TF: close IOC graph
-        # GUARD: flush_buffers is IOCGraph-only. DuckPGQGraph has no flush_buffers,
-        # and calling it would raise AttributeError. close() is universal but
-        # we guard flush_buffers to avoid noise in logs for donor backends.
-        if self._ioc_graph is not None:
+        # Sprint 8WA: close truth-write graph (IOCGraph with buffer_ioc/flush_buffers)
+        # GUARD: flush_buffers is IOCGraph-only. DuckPGQGraph has no flush_buffers.
+        if self._truth_write_graph is not None:
             try:
-                if callable(getattr(self._ioc_graph, "flush_buffers", None)):
-                    await self._ioc_graph.flush_buffers()
+                if callable(getattr(self._truth_write_graph, "flush_buffers", None)):
+                    await self._truth_write_graph.flush_buffers()
             except Exception:
                 pass
+            try:
+                if callable(getattr(self._truth_write_graph, "close", None)):
+                    await self._truth_write_graph.close()
+            except Exception:
+                pass
+
+        # Sprint 8QA/8TF: close analytics/donor IOC graph (DuckPGQGraph)
+        # DuckPGQGraph has checkpoint() and close() but no flush_buffers.
+        if self._ioc_graph is not None:
             try:
                 if callable(getattr(self._ioc_graph, "close", None)):
                     await self._ioc_graph.close()

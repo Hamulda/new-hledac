@@ -1,6 +1,6 @@
 # Export Plane Map
 # Sprint 8VJ §B
-# Stav: 2026-04-02 — Sprint 8VY §A: producer convergence audit
+# Stav: 2026-04-02 — Sprint 8VY §C: path authority finish-up
 
 ---
 
@@ -125,14 +125,14 @@ sprint_exporter.export_sprint(store, handoff)
 
 ---
 
-## Path Authority
+## Path Authority (Sprint 8VY §C)
 
-| Use | Authority | Status |
-|-----|-----------|--------|
-| Diagnostic export output | `paths.RAMDISK_ROOT / "runs"` | ✅ SSOT v markdown_reporter |
-| Sprint report (markdown) | `~/.hledac/reports/{sprint_id}.md` | ✅ Shell — path computation + write v __main__.py |
-| Sprint report JSON | `~/.hledac/reports/{sprint_id}_report.json` | ✅ sprint_exporter.py |
-| Sprint next-seeds JSON | `~/.hledac/reports/{sprint_id}_next_seeds.json` | ✅ sprint_exporter.py |
+| Use | Authority | Canonical Owner | Status |
+|-----|-----------|----------------|--------|
+| Diagnostic export output | `paths.RAMDISK_ROOT / "runs"` | `paths.py` | ✅ SSOT v markdown_reporter |
+| Sprint report (markdown) | `~/.hledac/reports/{sprint_id}.md` | **`paths.get_sprint_report_path()`** | ✅ paths.py owns computation; shell = write only |
+| Sprint report JSON | `~/.hledac/reports/{sprint_id}_report.json` | `sprint_exporter.py` | ✅ sprint_exporter.py |
+| Sprint next-seeds JSON | `~/.hledac/reports/{sprint_id}_next_seeds.json` | `sprint_exporter.py` | ✅ sprint_exporter.py |
 
 ---
 
