@@ -1266,12 +1266,33 @@ class SNNEncryptedContainer:
 
 
 # =============================================================================
-# CORRELATION SCHEMA — Minimal cross-component identity for tracing
+# CANONICAL SCAFFOLD — Activation-Relevant Handoff Surface
 # =============================================================================
+# This section (lines 1269–1630) is the SOLE canonical surface for
+# activation-relevant handoffs between components.
+#
+# DEFINITION: An activation-relevant handoff is any typed object that:
+#   1. Crosses a component boundary (e.g. analyzer→router, windup→export)
+#   2. Carries execution state or correlation context
+#   3. Would break F9/F11 activation if its shape drifted
+#
+# RULES:
+#   [1] NEW activation-relevant handoffs MUST be added here, not elsewhere
+#   [2] Existing local scaffolds (ghost_executor, execution_coordinator) are
+#       marked with non-canonical notes — they are DONOR/COMPAT, not canonical
+#   [3] Domain-specific types (FetchResult) live in their domain modules
+#   [4] Legacy local scaffolds without explicit NOTE are technical debt
+#
+# See: CONTRACT_MATRIX.md for full taxonomy
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# CORRELATION SCHEMA — Minimal cross-component identity for tracing
+# -----------------------------------------------------------------------------
 # Phase 1: Schema/contract only — no mandatory full backfill across codebase.
 # Canonical fields for correlating events across ledgers/gates/policies.
 # Future phases may extend with additional fields or promote to full dataclass.
-# =============================================================================
+# -----------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class RunCorrelation:

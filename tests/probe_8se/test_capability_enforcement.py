@@ -1137,5 +1137,126 @@ class TestF9ExecutionPlaneContainment:
         # This is a documented limitation for real-time scenarios
 
 
+class TestGhostBridgeSeam:
+    """Sprint 8VF: GhostBridge thin typed seam tests."""
+
+    def test_ghost_bridge_exists(self):
+        """GhostBridge class exists in ghost_executor module."""
+        from hledac.universal.execution.ghost_executor import GhostBridge
+        assert GhostBridge is not None
+
+    def test_ghost_bridge_to_execution_request(self):
+        """GhostBridge.to_execution_request converts Ghost params to ExecutionRequest."""
+        from hledac.universal.execution.ghost_executor import GhostBridge
+        req = GhostBridge.to_execution_request(
+            action="google",
+            params={"query": "test query"},
+            priority=5,
+        )
+        assert req.action_type == "google"
+        assert req.parameters == {"query": "test query"}
+        assert req.priority == 5
+
+    def test_ghost_bridge_to_execution_result(self):
+        """GhostBridge.to_execution_result converts Ghost ActionResult to ExecutionResult."""
+        from hledac.universal.execution.ghost_executor import GhostBridge, ActionResult
+        ghost_result = ActionResult(
+            success=True,
+            action="google",
+            data={"results": ["a", "b"]},
+            execution_time=0.1,
+        )
+        result = GhostBridge.to_execution_result(ghost_result)
+        assert result.action_type == "google"
+        assert result.success is True
+        assert result.data == {"results": ["a", "b"]}
+        assert result.execution_time == 0.1
+
+    def test_ghost_bridge_action_has_canonical_tool(self):
+        """GhostBridge.action_has_canonical_tool returns True for mapped actions."""
+        from hledac.universal.execution.ghost_executor import GhostBridge
+        # SEARCH, GOOGLE, RESEARCH_PAPER, DEEP_READ map to canonical tools
+        assert GhostBridge.action_has_canonical_tool("google") is True
+        assert GhostBridge.action_has_canonical_tool("search") is True
+        assert GhostBridge.action_has_canonical_tool("research_paper") is True
+        # Akce bez mappingu
+        assert GhostBridge.action_has_canonical_tool("scan") is False
+        assert GhostBridge.action_has_canonical_tool("stealth_harvest") is False
+
+    def test_ghost_bridge_get_canonical_tool_name(self):
+        """GhostBridge.get_canonical_tool_name returns mapped tool name or empty."""
+        from hledac.universal.execution.ghost_executor import GhostBridge
+        assert GhostBridge.get_canonical_tool_name("google") == "web_search"
+        assert GhostBridge.get_canonical_tool_name("research_paper") == "academic_search"
+        assert GhostBridge.get_canonical_tool_name("scan") == ""
+        assert GhostBridge.get_canonical_tool_name("stealth_harvest") == ""
+
+    def test_ghost_bridge_is_read_side_adapter(self):
+        """GhostBridge is read-side only — does not call execute_with_limits."""
+        import inspect
+        from hledac.universal.execution.ghost_executor import GhostBridge
+        # Kontrolujeme pouze implementaci (kód), ne docstringy
+        # Docstringy SPRÁVNĚ zmiňují execute_with_limits jako co TO NENÍ
+        method_names = ["to_execution_request", "to_execution_result",
+                        "action_has_canonical_tool", "get_canonical_tool_name",
+                        "get_action_canonical_tool_mapping"]
+        for method_name in method_names:
+            method = getattr(GhostBridge, method_name)
+            source = inspect.getsource(method)
+            # Odstraň docstring pro čistou kontrolu kódu
+            import re
+            code_only = re.sub(r'""".*?"""', '', source, flags=re.DOTALL)
+            # Metody nevolají execute_with_limits
+            assert "execute_with_limits" not in code_only, f"{method_name} calls execute_with_limits"
+            # ToolRegistry se nevolá
+            assert "ToolRegistry" not in code_only, f"{method_name} references ToolRegistry"
+
+    def test_action_to_canonical_tool_mapping_complete(self):
+        """_ACTION_TO_CANONICAL_TOOL covers all 18 Ghost ActionTypes."""
+        from hledac.universal.execution.ghost_executor import (
+            _ACTION_TO_CANONICAL_TOOL,
+            ActionType,
+        )
+        ghost_actions = {a.value for a in ActionType}
+        mapped_actions = set(_ACTION_TO_CANONICAL_TOOL.keys())
+        # All Ghost actions are in the mapping
+        assert ghost_actions == mapped_actions, (
+            f"Missing actions: {ghost_actions - mapped_actions}, "
+            f"Extra: {mapped_actions - ghost_actions}"
+        )
+
+    def test_ghost_bridge_preserves_donor_role(self):
+        """GhostBridge does not change GhostExecutor donor/compat role."""
+        from hledac.universal.execution.ghost_executor import GhostExecutor
+        docstring = GhostExecutor.__doc__ or ""
+        # Donor role documented
+        assert "DONOR" in docstring.upper() or "donor" in docstring.lower()
+        # GhostExecutor is explicitly NOT canonical authority (compact the multi-line)
+        normalized = " ".join(docstring.split())
+        assert "NOT the canonical" in normalized
+
+    def test_correlation_passthrough_in_bridge(self):
+        """GhostBridge preserves RunCorrelation through conversion."""
+        from hledac.universal.execution.ghost_executor import GhostBridge
+        from hledac.universal.types import RunCorrelation
+
+        corr = RunCorrelation(run_id="run-123", branch_id="branch-1")
+        req = GhostBridge.to_execution_request(
+            action="google",
+            params={"query": "test"},
+            correlation=corr,
+        )
+        assert req.correlation is not None
+        assert req.correlation.run_id == "run-123"
+
+        from hledac.universal.execution.ghost_executor import ActionResult
+        ghost_result = ActionResult(
+            success=True, action="google", data={}, execution_time=0.05
+        )
+        result = GhostBridge.to_execution_result(ghost_result, correlation=corr)
+        assert result.correlation is not None
+        assert result.correlation.run_id == "run-123"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
