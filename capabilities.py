@@ -343,27 +343,35 @@ class ModelLifecycleManager:
     """
     Enforces hard phase invariants for model lifecycle.
 
-    Authority note (Sprint 8ME + 8TF):
-    This class is a FACADE — it does NOT load/unload models directly.
+    Authority note (Sprint 8ME + 8TF + 8TF-R):
+    This class is a FACADE / PHASE ENFORCER — it does NOT own model load/unload.
     It orchestrates phase transitions through CapabilityRegistry.load/unload.
-    The canonical runtime-wide acquire/load owner is brain.model_manager.ModelManager.
-    The canonical unload owner is ModelManager._release_current_async() +
-    brain.model_lifecycle.unload_model() (7K SSOT delegát).
 
-    This facade uses COARSE-GRAINED phase strings (BRAIN/TOOLS/SYNTHESIS/CLEANUP),
-    which are SEMANTICALLY DIFFERENT from ModelManager.PHASE_MODEL_MAP's workflow-level
-    phase strings (PLAN/DECIDE/SYNTHESIZE/EMBED/DEDUP/ROUTING/NER/ENTITY).
-    These two phase systems are NOT unified — they serve different purposes and MUST NOT
-    be conflated.
+    OWNERSHIP DECLARATION (Sprint 8TF-R):
+      - Runtime-wide acquire/load owner:  brain.model_manager.ModelManager
+      - Runtime-wide unload owner:        ModelManager._release_current_async()
+                                           + brain.model_lifecycle.unload_model() (7K SSOT)
+      - This facade:                       COARSE-GRAINED phase enforcement ONLY
 
-    IMPORTANT — Three Phase Layers (Sprint 8TF):
-      Layer 1 (Workflow-level):   ModelManager.PHASE_MODEL_MAP — PLAN/DECIDE/SYNTHESIZE/EMBED/...
-      Layer 2 (Coarse-grained):  ModelLifecycleManager — BRAIN/TOOLS/SYNTHESIS/CLEANUP
-      Layer 3 (Windup-local):    windup_engine.SynthesisRunner — Qwen/SmolLM isolation
+    THIS FACADE IS NOT A LOAD OWNER:
+      - Does NOT call ModelManager.load_model() directly
+      - Does NOT hold model references
+      - Does NOT create model engines
+      - Does NOT manage MLX buffer initialization
+      Violating any of the above creates a THIRD MODEL TRUTH — forbidden.
 
-    Drift risk: Implicit mapping of Layer 1 ↔ Layer 2 phase strings would create
-    false equivalence (e.g., "SYNTHESIZE" ≠ "SYNTHESIS"). Use brain.model_phase_facts
-    to read phase facts without implicit cross-layer confusion.
+    PHASE STRING LAYERS (Sprint 8TF-R) — MUST NOT BE CONFLATED:
+      Layer 1 (Workflow-level):   ModelManager.PHASE_MODEL_MAP
+                                  Strings: PLAN/DECIDE/SYNTHESIZE/EMBED/DEDUP/ROUTING/NER/ENTITY
+      Layer 2 (Coarse-grained):  ModelLifecycleManager.enforce_phase_models()
+                                  Strings: BRAIN/TOOLS/SYNTHESIS/CLEANUP
+      Layer 3 (Windup-local):     windup_engine.SynthesisRunner
+                                  Strings: Qwen/SmolLM isolation (no string mapping)
+
+    CRITICAL DRIFT GUARD (Sprint 8TF-R):
+      "SYNTHESIZE" (Layer 1) ≠ "SYNTHESIS" (Layer 2) — they are different strings
+      with different semantics. Implicit mapping creates false equivalence.
+      Use brain.model_phase_facts.is_same_layer() to validate before comparison.
 
     Future: If seam extraction lands, this facade may delegate to
     ModelManager.with_phase() directly, eliminating the CapabilityRegistry round-trip.

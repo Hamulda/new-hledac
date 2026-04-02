@@ -605,6 +605,15 @@ async def _fetch_article_text(entry_url: str) -> tuple[str, bool]:
     Returns (article_text, success).
     NEVER raises — all exceptions are caught, success=False on any failure.
     CancelledError is NOT caught (propagated).
+
+    AUTHORITY NOTE (Sprint 8UX):
+        This function is the article-fallback seam inside the feed pipeline.
+        It does NOT go through FetchCoordinator (source-ingress owner).
+        It uses session_runtime.py shared surface directly for HTTP.
+        This is intentional: article fallback is a best-effort enrichment step,
+        not part of the primary fetch pipeline.
+        If the shared surface is later redirected to use FetchCoordinator's
+        transport layer, this function will automatically benefit.
     """
     try:
         from urllib.parse import urlparse

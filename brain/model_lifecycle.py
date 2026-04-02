@@ -1,31 +1,39 @@
 """
-Model Lifecycle Management - Sprint 7C+8C+8ME+8TF
-================================================
+Model Lifecycle Management - Sprint 7C+8C+8ME+8TF+8TF-R
+========================================================
 
-Authority note (Sprint 8ME + 8TF):
+Authority note (Sprint 8ME + 8TF + 8TF-R):
 This module is MULTI-ROLE — do not treat it as a single owner.
 
-Roles:
+ROLES (Sprint 8TF-R):
   1. Emergency seam: watchdog flag + safe callback pattern
   2. MLX lazy init helper: delegates to mlx_cache.init_mlx_buffers()
   3. Unload helper (7K SSOT): delegates to engine.unload(), fail-open
   4. Lifecycle shadow-state: O(1) status tracking
   5. Structured-generation sidecar: class ModelLifecycle (Qwen/SmolLM, windup-local)
 
-IMPORTANT — Three Phase Layers (Sprint 8TF):
-  Layer 1 (Workflow-level):   ModelManager.PHASE_MODEL_MAP — PLAN/DECIDE/SYNTHESIZE/EMBED/...
+THIS MODULE IS NOT THE RUNTIME-WIDE LOAD OWNER:
+  - load_model() / unload_model() at module level are UNLOAD HELPERS
+  - They delegate to engine.unload() (7K SSOT), not a separate authority
+  - The canonical runtime-wide acquire/load owner is ModelManager
+  - This module does NOT hold canonical model state for the runtime-wide plane
+
+PHASE STRING LAYERS (Sprint 8TF-R) — MUST NOT BE CONFLATED:
+  Layer 1 (Workflow-level):   ModelManager.PHASE_MODEL_MAP
+                              Strings: PLAN/DECIDE/SYNTHESIZE/EMBED/DEDUP/ROUTING/NER/ENTITY
   Layer 2 (Coarse-grained):  ModelLifecycleManager — BRAIN/TOOLS/SYNTHESIS/CLEANUP
-  Layer 3 (Windup-local):    windup_engine.SynthesisRunner — Qwen/SmolLM isolation
+  Layer 3 (Windup-local):     windup_engine.SynthesisRunner — Qwen/SmolLM isolation
 
 The structured-generation sidecar (class ModelLifecycle) is windup-local.
 It is NOT part of the runtime-wide model plane.
 
-Canonical runtime-wide owners:
+Canonical runtime-wide owners (Sprint 8TF-R):
   - acquire/load: brain.model_manager.ModelManager
-  - unload/cleanup: ModelManager + engine.unload() (7K SSOT)
+  - unload/cleanup: ModelManager._release_current_async() + engine.unload() (7K SSOT)
 
 Drift risk: This module must NOT conflate the three phase layers above.
-Consumers needing phase facts should use brain.model_phase_facts.
+Consumers needing phase facts should use brain.model_phase_facts.is_same_layer()
+to validate before comparing phase strings across layers.
 """
 
 # Transitional Czech prose follows after blank line below.

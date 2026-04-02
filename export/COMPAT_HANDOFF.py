@@ -1,40 +1,40 @@
 # hledac/universal/export/COMPAT_HANDOFF.py
 # Sprint 8VJ §A: Export plane compat handoff — runtime doc only
+# Sprint 8VX §A: Updated — export_sprint IS wired (removed outdated "not wired" claim)
 # ⚠️  DEPRECATED LAYER — DO NOT EXTEND
 """
 Dokumentační seam pro compat handoff mezi runtime state (store/scheduler)
 a export plane.
 
-Hlavní body:
-  1. sprint_exporter._generate_next_sprint_seeds() volá scheduler._ioc_graph.get_top_nodes_by_degree(n=5)
-     → scheduler._ioc_graph je IOCGraph (Kuzu), ale get_top_nodes_by_degree je DuckPGQGraph metoda
-     → store._ioc_graph (duckdb_store) drží správně DuckPGQGraph
-     → Future: duckdb_store.get_top_graph_nodes(n=5) přes store API
+Hlavní body (Sprint 8VX):
+  1. export_sprint() JE wireovaný v __main__.py:2343 — removed "not wired" claim
+  2. ExportHandoff.from_windup() je producer-side construction point
+  3. scorecard["top_graph_nodes"] → top_nodes zůstává compat seam (viz removal cond)
+  4. __main__._export_markdown_report() deleguje na sprint_markdown_reporter.render_sprint_markdown()
+     — canonical renderer exists, path debt documented in __main__.py
 
-  2. export_sprint() defined ale not wired v __main__.py
-     → lifecycle.request_export() nema registered callback
-     → Wire do _print_scorecard_report()
-
-  3. __main__._export_markdown_report() je inline duplikát markdown_reporter.render_diagnostic_markdown_to_path()
-     → Refaktoruj na delegaci
-
-  4. _compat_scheduler bridge v __main__.py:2549
-     → store-first arch je cíl, removal po SprintScheduler cutover
+Remaining compat seams:
+  - COMPAT_HANDOFF.ensure_export_handoff(): thin adapter, removal when
+    export_sprint() accepts only ExportHandoff (not dict/None)
+  - store._ioc_graph.get_top_nodes_by_degree() fallback in export_sprint():
+    REMOVAL CONDITION: duckdb_store.get_top_seed_nodes() covers all export use cases
+  - __main__._compat_scheduler bridge: REMOVAL CONDITION: SprintScheduler cutover complete
 """
 
-#Compat: duckdb_store → SprintScheduler IOC graph bridge
-# Lokace: __main__.py:2549
-# Kód: _compat_scheduler = getattr(store_instance, "_ioc_graph", None) if store_instance else None
+# Accepted compat: duckdb_store → SprintScheduler IOC graph bridge
+# Lokace: __main__.py (store_instance._ioc_graph)
 # Poznámka: store._ioc_graph drží DuckPGQGraph — toto JE správná dnešní runtime cesta
+# REMOVAL CONDITION: SprintScheduler cutover complete
 
 # =============================================================================
 # Sprint 8VJ §C: Typed ExportHandoff adapter
+# Sprint 8VX §A: Header updated — wired reality reflected
 # =============================================================================
 # Thin adapter: ExportHandoff | dict → ExportHandoff
 # Zajišťuje že export_sprint() má vždy typed input bez změny path semantics.
 # scorecard["top_graph_nodes"] zůstává current compat seam.
-# Future owner: __main__.py (producer side) — po cutover bude handoff vznikat tam
-# Removal condition: export_sprint() přijímá pouze ExportHandoff (ne dict)
+# Producer side: __main__.py:2343 — constructs ExportHandoff.from_windup()
+# REMOVAL CONDITION: export_sprint() accepts only ExportHandoff (not dict/None)
 # =============================================================================
 
 from typing import TYPE_CHECKING, Any, Dict, Union

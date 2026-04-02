@@ -590,6 +590,65 @@ class DuckDBShadowStore:
             and callable(getattr(self._ioc_graph, "flush_buffers", None))
         )
 
+    # ------------------------------------------------------------------
+    # Sprint 8TF: Export/Store Seed Seam
+    # ------------------------------------------------------------------
+
+    def get_top_seed_nodes(self, n: int = 5) -> list[dict]:
+        """
+        Sprint 8TF §1: Export-facing read-only seam for top seed nodes.
+
+        PURPOSE
+        -------
+        Provides a store-facing surface for the export handoff's seed-node use case.
+        export_sprint() currently falls back to store._ioc_graph.get_top_nodes_by_degree(n=5)
+        directly; this method wraps that call so export consumers don't need to spelunk
+        _ioc_graph internals.
+
+        STORE IS NOT GRAPH TRUTH OWNER
+        --------------------------------
+        The injected graph may be IOCGraph (Kuzu, truth) or DuckPGQGraph (donor/alternate).
+        This seam does NOT make DuckDBShadowStore a graph authority.
+        It is a thin, fail-open adapter for one specific export-facing read-only operation.
+
+        FUTURE OWNER / REMOVAL CONDITION
+        ---------------------------------
+        - Future graph truth owner: IOCGraph (Kuzu) or its successor
+        - Removal condition: export_sprint() replaces its store._ioc_graph fallback
+          entirely with this method, AND no other consumer accesses _ioc_graph directly
+          for seed node queries
+
+        CAPABILITY REQUIREMENTS
+        -----------------------
+        Requires the attached graph to implement get_top_nodes_by_degree(n).
+        IOCGraph (Kuzu): has this method.
+        DuckPGQGraph (DuckDB): has this method.
+        If the method is absent or call fails, returns [] (fail-open).
+
+        Args:
+            n: Number of top nodes to return (default 5).
+
+        Returns:
+            list[dict]: Each dict has at least "value" and "ioc_type" keys.
+            Returns [] if no graph attached or call fails.
+        """
+        if self._ioc_graph is None:
+            return []
+        try:
+            method = getattr(self._ioc_graph, "get_top_nodes_by_degree", None)
+            if not callable(method):
+                return []
+            result = method(n=n)
+            # Validate return shape — expect list of dicts with value/ioc_type
+            if not isinstance(result, list):
+                return []
+            for item in result:
+                if not isinstance(item, dict) or "value" not in item:
+                    return []
+            return result
+        except Exception:
+            return []
+
     def inject_semantic_store(self, store: Any) -> None:
         """
         Sprint 8SB: Inject SemanticStore instance for semantic buffering of findings.

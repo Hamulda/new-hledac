@@ -80,9 +80,27 @@ def get_all_breaker_states() -> dict[str, str]:
 
 # =============================================================================
 # Sprint 8VE C.2: Transport fallback chain
-# AUTHORITY NOTE (audit/8SF):
-#   This module is a TEST-SEAM only. resilient_fetch() and get_transport_for_domain()
-#   are exercised by probe_8ve tests but are NOT called from production code.
+# Sprint 8UX: Authority clarification
+# =============================================================================
+#
+# PRODUCTION AUTHORITY (ACTIVE):
+#   - CircuitBreaker class IS used by FetchCoordinator domain CB logic.
+#   - get_breaker(domain) is the canonical domain circuit breaker accessor.
+#   - get_all_breaker_states() is used for runtime diagnostics.
+#
+# TEST-SEAM ONLY (NOT called from production):
+#   - get_transport_for_domain() — fallback chain logic, exercised by probe_8ve only.
+#   - resilient_fetch() — fallback chain fetch, exercised by probe_8ve only.
+#
+# Split rationale:
+#   CircuitBreaker class itself is a SHARED STATE OBJECT (owned by _BREAKERS global).
+#   It lives here but is consumed by both FetchCoordinator (production) and
+#   resilient_fetch() (test-seam). The class is production-safe; the helper
+#   functions using it are test-seam.
+#
+#   Migration: AFTER TransportResolver.resolve() is wired into FetchCoordinator,
+#   resilient_fetch() should be removed and get_transport_for_domain() replaced
+#   by the resolver-based path.
 #
 #   Production path:
 #     FetchCoordinator._fetch_url() handles .onion/.i2p directly via

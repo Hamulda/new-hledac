@@ -1,6 +1,11 @@
+# Sprint 8VX §A: Export plane finish-up
+# - ExportHandoff confirmed as primary handoff surface (wired in __main__.py:2343)
+# - compat fallback documented with explicit removal conditions
+# - No new framework, no new store API
 """
 Sprint 8VI §A: EXPORT fáze — export_sprint() + _generate_next_sprint_seeds()
 Sprint 8VJ §C: ExportHandoff | dict → typed handoff spotřeba
+Sprint 8VX §A: Finish-up — removal conditions tightened, comments aligned with reality
 """
 
 from __future__ import annotations
@@ -24,19 +29,22 @@ async def export_sprint(
     Voláno z _print_scorecard_report() v __main__.py EXPORT fázi.
     Nikdy nevyhodí výjimku.
 
-    Accepts typed ExportHandoff OR raw dict (backward compat).
+    Accepts typed ExportHandoff OR raw dict (backward compat via ensure_export_handoff).
 
     Součásti:
       1. JSON report do ~/.hledac/reports/{sprint_id}_report.json
       2. Seed tasky pro příští sprint z top IOC graph nodes
 
-    COMPAT BRIDGE (Sprint 8VI):
-      - Scheduler param REMOVED — data source = ExportHandoff.top_nodes
-      - Fallback: pokud top_nodes prázdné, zkusí store._ioc_graph.get_top_nodes_by_degree(n=5)
-        (pokrývá případ kdy _windup_synthesis() běžela ale windup_engine.run_windup() neproběhl)
-      - Future owner: duckdb_store.get_top_seed_nodes() — čisté store API bez graph internals
-      - Removal condition: duckdb_store.get_top_nodes(n=5) pokrývá všechny export use cases
-        NEBO windup_engine.run_windup() plní top_nodes ve všech pathách
+    PRIMARY HANDOFF SURFACE (Sprint 8VX):
+      - ExportHandoff.top_nodes — kanonický zdroj pro seed generation
+      - ExportHandoff.scorecard — kanonický zdroj pro JSON report
+
+    ACCEPTED COMPAT SEAM — graph fallback:
+      - Pokud top_nodes prázdné (windup běžel ale neplnil top_graph_nodes),
+        zkusí store._ioc_graph.get_top_nodes_by_degree(n=5)
+      - REMOVAL CONDITION: duckdb_store.get_top_seed_nodes() pokrývá všechny
+        export use cases. Dokud neexistuje, fallback zůstává.
+      - Future owner: duckdb_store.get_top_seed_nodes()
     """
     from paths import SPRINT_STORE_ROOT
     from export.COMPAT_HANDOFF import ensure_export_handoff

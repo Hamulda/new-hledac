@@ -19,7 +19,16 @@ def test_none_file_absent_after_run():
 @pytest.mark.timeout(60)
 async def test_e2e_pipeline_completes():
     """Spustí WARMUP → mock ACTIVE → WINDUP → EXPORT."""
-    from runtime.sprint_lifecycle import run_warmup
+    # Sprint 8VY: run_warmup moved from runtime/sprint_lifecycle → __main__.py (canonical WARMUP truth)
+    # Use importlib to load __main__ directly (pytest's --main__ is pytest's own module)
+    import os, importlib.util
+    _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+    _MAIN_PY = os.path.join(_ROOT, "hledac", "universal", "__main__.py")
+    _spec = importlib.util.spec_from_file_location("hledac_main", _MAIN_PY)
+    assert _spec is not None, f"Failed to load spec for {_MAIN_PY}"
+    _main_mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_main_mod)  # type: ignore
+    run_warmup = _main_mod.run_warmup
     from runtime.windup_engine import run_windup
     from export.sprint_exporter import export_sprint
     from runtime.sprint_scheduler import SprintScheduler, SprintSchedulerConfig

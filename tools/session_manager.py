@@ -25,7 +25,21 @@ logger = logging.getLogger(__name__)
 
 
 class SessionManager:
-    """Manages HTTP sessions with cookies/credentials persistence in LMDB."""
+    """
+    Manages HTTP sessions with cookies/credentials persistence in LMDB.
+
+    AUTHORITY NOTE (Sprint 8UX):
+        This module is the PERSISTED SESSION authority.
+        It stores cookies and headers in LMDB, keyed by domain.
+        It is SEPARATE from session_runtime.py (shared async HTTP surface).
+
+        Split is intentional:
+          - session_runtime.py: raw HTTP session pool, no credentials
+          - SessionManager: credentialed session state, domain-scoped persistence
+
+        FetchCoordinator._fetch_url() calls SessionManager.get_session()
+        to inject cookies/headers into transport-layer fetch operations.
+    """
 
     def __init__(self, lmdb_env: lmdb.Environment):
         self._env = lmdb_env

@@ -52,7 +52,23 @@ TOR_CONNECT_TIMEOUT_S: float = 45.0
 TOR_READ_TIMEOUT_S: float = 75.0
 
 # =============================================================================
+# =============================================================================
 # Shared Lazy aiohttp Session Surface
+# =============================================================================
+#
+# AUTHORITY SPLIT (Sprint 8UX):
+#   This module provides the SHARED async HTTP session surface.
+#   It is NOT the source-ingress owner — that is FetchCoordinator.
+#   It is NOT the persisted session authority — that is SessionManager.
+#
+#   Current consumers:
+#     - _fetch_article_text() in live_feed_pipeline.py (article fallback seam)
+#     - PaywallBypass, DarknetConnector (NOT redirected yet — see AUDIT_SOURCE_TRANSPORT_SESSION.md)
+#
+#   AsyncSessionFactory in __main__.py is a LEGACY/RUNTIME-SHELL artifact.
+#   It is NOT the same as async_get_aiohttp_session() — separate singleton,
+#   different connector limits, different lifecycle owner.
+#   They must NOT be unified without a full migration plan.
 # =============================================================================
 
 _session_instance: Optional[aiohttp.ClientSession] = None

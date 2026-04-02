@@ -2309,7 +2309,10 @@ async def _print_scorecard_report(
     print(f"Report saved: {md_path}")
 
     # Sprint 8TA B.4: ghost_global upsert (top IOC entities from this sprint)
-    # Extract from duckdb if available
+    # Graph spelunking for entity export — SEPARATE from export_sprint JSON/seeds path.
+    # COMPAT SEAM: reads store._ioc_graph.get_nodes()[:100] directly.
+    # REMOVAL CONDITION: ghost_global upsert has a proper typed API (not graph internals).
+    #                        Until then, this remains an accepted compat seam.
     if store is not None and hasattr(store, "_ioc_graph"):
         try:
             graph = store._ioc_graph
@@ -2331,10 +2334,13 @@ async def _print_scorecard_report(
 
     # Sprint 8VI §A: Wire export_sprint() do EXPORT fáze
     # Sprint 8VJ §C: Producer-side ExportHandoff construction
-    # COMPAT BRIDGE: top_graph_nodes v scorecard může chybět (windup_engine.run_windup()
-    # neproběhl v aktuální pathě). Fallback: store._ioc_graph.get_top_nodes_by_degree(n=5)
-    # Future owner: duckdb_store.get_top_seed_nodes() — čisté store API
-    # Removal condition: duckdb_store.get_top_nodes(n=5) pokrývá všechny export use cases
+    # Sprint 8VX §A: Comments aligned — ExportHandoff is PRIMARY handoff surface.
+    #
+    # Graph fallback (store._ioc_graph.get_top_nodes_by_degree) is ACCEPTED COMPAT SEAM.
+    # REMOVAL CONDITION: duckdb_store.get_top_seed_nodes() covers all export use cases.
+    #                     Until then, fallback remains — it covers the path where
+    #                     windup ran but did not populate top_graph_nodes in scorecard.
+    # Future owner: duckdb_store.get_top_seed_nodes()
     try:
         from export.sprint_exporter import export_sprint as _export_sprint
         from types import ExportHandoff

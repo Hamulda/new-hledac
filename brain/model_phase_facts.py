@@ -128,3 +128,85 @@ def is_same_layer(phase_a: str, phase_b: str) -> bool:
     (e.g., "SYNTHESIS") would be a category error.
     """
     return get_phase_layer(phase_a) == get_phase_layer(phase_b) != 0
+
+
+# =============================================================================
+# Sprint 8TF-R: Phase Drift Guard — Enforce/Assert helpers
+# =============================================================================
+
+def assert_no_cross_layer_mapping(phase: str, layer_hint: str = "") -> None:
+    """
+    Assert that a phase string is NOT being implicitly mapped across layers.
+
+    Call this at the START of any function that takes a phase string and
+    would naively compare it to phases from a DIFFERENT layer.
+
+    This is a NO-OP guard — it does NOT raise. It logs a WARNING if a
+    cross-layer risk is detected.
+
+    Args:
+        phase: The phase string to validate
+        layer_hint: Optional string describing which layer the caller expects
+                   (e.g., "caller uses Layer 1 workflow phases")
+
+    Example:
+        def my_phase_handler(phase_name: str):
+            assert_no_cross_layer_mapping(phase_name, "Layer 1")
+            # Now safe to compare with ModelManager.PHASE_MODEL_MAP keys
+    """
+    layer = get_phase_layer(phase)
+    if layer == 0:
+        # Unknown phase — fail open (future phases may exist)
+        return
+
+    # If a Layer 2 coarse-grained phase is being passed to something that
+    # expects Layer 1, log a warning
+    if layer == 2 and layer_hint.startswith("Layer 1"):
+        import logging
+        logging.getLogger(__name__).warning(
+            f"[PHASE DRIFT GUARD] Cross-layer risk: '{phase}' is Layer 2 "
+            f"(coarse-grained) but caller expects Layer 1 (workflow-level). "
+            f"This may indicate implicit phase string mapping. "
+            f"Use model_phase_facts.is_same_layer() to validate."
+        )
+
+
+def get_phase_layer_strict(phase: str) -> int:
+    """
+    Return which phase layer a string belongs to — STRICT mode.
+
+    Unlike get_phase_layer(), this returns 0 for ANY phase string that
+    appears in BOTH Layer 1 and Layer 2 (e.g., if a future phase name
+    is reused across layers). Currently no overlap exists since
+    SYNTHESIZE ≠ SYNTHESIS, but this function future-proofs the guard.
+
+    Returns:
+        1 = workflow-level (ModelManager.PHASE_MODEL_MAP)
+        2 = coarse-grained (ModelLifecycleManager)
+        0 = unknown / potential cross-layer collision
+
+    Note:
+        Returns 0 (unknown) for unrecognized phases — does NOT raise.
+    """
+    normalized = phase.upper()
+
+    # Check for ambiguous phase names (same string in both layers)
+    # Currently none exist: SYNTHESIZE ≠ SYNTHESIS
+    # This check future-proofs against accidental reuse
+    in_layer1 = normalized in WORKFLOW_PHASES
+    in_layer2 = normalized in COARSE_GRAINED_PHASES
+
+    if in_layer1 and in_layer2:
+        # Collision: phase exists in both layers — cannot determine uniquely
+        import logging
+        logging.getLogger(__name__).warning(
+            f"[PHASE DRIFT GUARD] Phase '{phase}' exists in both Layer 1 and "
+            f"Layer 2. This is a cross-layer collision. Treating as unknown."
+        )
+        return 0
+
+    if in_layer1:
+        return 1
+    if in_layer2:
+        return 2
+    return 0

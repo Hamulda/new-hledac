@@ -634,6 +634,24 @@
   },
   "hotPaths": [
     {
+      "path": "LIFECYCLE_CONVERGENCE.md",
+      "accessCount": 12,
+      "lastAccessed": 1775129311811,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8td/test_retrieval_policy_annotations.py",
+      "accessCount": 6,
+      "lastAccessed": 1775128917118,
+      "type": "file"
+    },
+    {
+      "path": "tests/test_e2e_dry_run.py",
+      "accessCount": 6,
+      "lastAccessed": 1775129365930,
+      "type": "file"
+    },
+    {
       "path": "runtime/shadow_pre_decision.py",
       "accessCount": 4,
       "lastAccessed": 1775096493225,
@@ -646,9 +664,39 @@
       "type": "file"
     },
     {
+      "path": "__main__.py",
+      "accessCount": 3,
+      "lastAccessed": 1775131971966,
+      "type": "file"
+    },
+    {
+      "path": "export/sprint_exporter.py",
+      "accessCount": 2,
+      "lastAccessed": 1775131904623,
+      "type": "file"
+    },
+    {
       "path": "SHADOW_SCHEDULER_PARITY.md",
       "accessCount": 1,
       "lastAccessed": 1775096592416,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 1,
+      "lastAccessed": 1775128822166,
+      "type": "directory"
+    },
+    {
+      "path": "tests/probe_8vx/test_lifecycle_convergence.py",
+      "accessCount": 1,
+      "lastAccessed": 1775129160931,
+      "type": "file"
+    },
+    {
+      "path": "export/COMPAT_HANDOFF.py",
+      "accessCount": 1,
+      "lastAccessed": 1775131934137,
       "type": "file"
     }
   ],
