@@ -84,6 +84,7 @@ DuckPGQGraph tuto metodu **nemá**. IOCGraph ji má. DuckPGQGraph je předáván
 | **buffered ACTIVE writes** | ✅ `buffer_ioc()`, `buffer_observation()`, `_BUFFER_FLUSH_SIZE=500` | ❌ žádný buffer | ✅ volá `flush_buffers()` | — | IOCGraph buffer přes `duckdb_store.inject_graph()` → DuckPGQGraph nemá | **DEBT** — DuckPGQGraph nemá flush_buffers |
 | **pivot/path queries** | ✅ `pivot()` — depth 1–2 | ✅ `find_connected()` — max_hops bound | — | — | `_pivot_ioc_graph` (IOCGraph) přes `inject_ioc_graph()` | IOCGraph pro pivot, DuckPGQGraph pro connected |
 | **top nodes** | ❌ chybí úplně | ✅ `get_top_nodes_by_degree(n)` | ✅ volá `get_top_nodes_by_degree(n=10)` | ✅ čte z scorecard | DuckPGQGraph → write do scorecard | DuckPGQGraph je jediný zdroj |
+| **ghost_global entities** | ❌ chybí | ✅ `get_top_nodes_by_degree(n=100)` | ✅ volá `get_top_nodes_by_degree(n=100)` | — | duckdb_store.get_top_entities_for_ghost_global() → DuckPGQGraph | Sprint 8TF: store seam removed direct graph spelunking |
 | **graph stats** | ✅ `graph_stats()` → `{nodes, edges}` | ✅ `stats()` → `{nodes, edges, pgq_active}` | ✅ volá `stats()` | — | DuckPGQGraph | DuckPGQGraph je jediný zdroj |
 | **edge export** | ❌ chybí | ✅ `export_edge_list()` | ✅ volá `export_edge_list()` | — | DuckPGQGraph → feed do GNN | DuckPGQGraph je jediný zdroj |
 | **STIX export** | ✅ `export_stix_bundle()` | ❌ **chybí** | — | — | synthesis_runner používá `self._ioc_graph.export_stix_bundle` — dostává DuckPGQGraph → vrací None | **CRITICAL DEBT** |

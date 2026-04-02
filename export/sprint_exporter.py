@@ -81,15 +81,15 @@ async def export_sprint(
     top_nodes = eh.top_nodes if eh.top_nodes else []
 
     # COMPAT BRIDGE: If top_nodes still empty (e.g. _windup_synthesis()
-    # ran but windup_engine.run_windup() did NOT populate scorecard), try store graph.
-    # Future owner: duckdb_store.get_top_seed_nodes() — store API, no graph internals
-    # Removal condition: duckdb_store.get_top_nodes(n=5) covers all export use cases
+    # ran but windup_engine.run_windup() did NOT populate scorecard), try store.
+    # Sprint 8VX §B: switched from store._ioc_graph.get_top_nodes_by_degree()
+    # to store.get_top_seed_nodes() — store-facing seam, no graph internals.
+    # Future owner: duckdb_store.get_top_seed_nodes()
+    # Removal condition: ExportHandoff.top_nodes is populated in ALL windup paths
     if not top_nodes and store is not None:
         try:
-            if hasattr(store, "_ioc_graph"):
-                graph = store._ioc_graph
-                if graph is not None and hasattr(graph, "get_top_nodes_by_degree"):
-                    top_nodes = graph.get_top_nodes_by_degree(n=5)
+            if hasattr(store, "get_top_seed_nodes"):
+                top_nodes = store.get_top_seed_nodes(n=5)
         except Exception:
             pass
 

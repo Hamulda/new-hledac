@@ -265,7 +265,7 @@ class TestGhostExecutorDonorCompat:
         docstring = GhostExecutor.__doc__ or ""
         assert "DONOR" in docstring or "donor" in docstring.lower()
         assert "COMPATIBILITY" in docstring or "compat" in docstring.lower()
-        assert "Canonical execution path" in docstring
+        assert "Canonical authority" in docstring
 
     def test_ghost_executor_not_in_tool_registry_canonical(self):
         """GhostExecutor is NOT the canonical execution surface."""
@@ -279,6 +279,105 @@ class TestGhostExecutorDonorCompat:
         ghost_actions = {"scan", "google", "deep_read", "stealth_harvest", "osint_discovery"}
         assert not any(t in ghost_actions for t in tool_names), \
             "GhostExecutor actions found in ToolRegistry - may indicate over-registration"
+
+    def test_ghost_executor_removal_condition_documented(self):
+        """Sprint 8VF: GhostExecutor docstring contains REMOVAL CONDITION."""
+        from hledac.universal.execution.ghost_executor import GhostExecutor
+
+        docstring = GhostExecutor.__doc__ or ""
+        assert "REMOVAL CONDITION" in docstring, \
+            "GhostExecutor should document when it becomes deprecation candidate"
+
+    def test_ghost_executor_boundary_seams_documented(self):
+        """Sprint 8VF: GhostExecutor docstring contains BOUNDARY SEAMS."""
+        from hledac.universal.execution.ghost_executor import GhostExecutor
+
+        docstring = GhostExecutor.__doc__ or ""
+        assert "BOUNDARY SEAMS" in docstring, \
+            "GhostExecutor should document its boundary seams vs ToolRegistry"
+        # Verify key seams are documented
+        assert "ActionType" in docstring, "Should mention ActionType enum"
+        assert "_actions" in docstring, "Should mention _actions dict"
+
+    def test_ghost_executor_future_owner_documented(self):
+        """Sprint 8VF: GhostExecutor documents ToolRegistry as future owner."""
+        from hledac.universal.execution.ghost_executor import GhostExecutor
+
+        docstring = GhostExecutor.__doc__ or ""
+        assert "ToolRegistry" in docstring, \
+            "GhostExecutor should mention ToolRegistry as migration target"
+
+
+class TestToolRegistryCanonicalRole:
+    """Sprint 8VF: Verify ToolRegistry canonical execution-control surface role."""
+
+    def test_tool_registry_has_explicit_docstring(self):
+        """ToolRegistry class docstring is explicit about canonical role."""
+        from hledac.universal.tool_registry import ToolRegistry
+
+        docstring = ToolRegistry.__doc__ or ""
+        assert "CANONICAL" in docstring, \
+            "ToolRegistry should explicitly state canonical role"
+        assert "execution" in docstring.lower(), \
+            "Should mention execution in docstring"
+
+    def test_tool_registry_docstring_has_do_dont(self):
+        """Sprint 8VF: ToolRegistry docstring contains DO/DON'T boundaries."""
+        from hledac.universal.tool_registry import ToolRegistry
+
+        docstring = ToolRegistry.__doc__ or ""
+        assert "DO NOT" in docstring, \
+            "ToolRegistry should have explicit DO NOT section"
+
+    def test_tool_registry_related_components_documented(self):
+        """Sprint 8VF: ToolRegistry docstring mentions related components."""
+        from hledac.universal.tool_registry import ToolRegistry
+
+        docstring = ToolRegistry.__doc__ or ""
+        assert "GhostExecutor" in docstring, \
+            "ToolRegistry should mention GhostExecutor as donor/compat"
+        assert "ToolExecLog" in docstring, \
+            "ToolRegistry should mention ToolExecLog as audit"
+        assert "CapabilityRouter" in docstring, \
+            "ToolRegistry should mention CapabilityRouter as signal mapping"
+
+
+class TestToolExecLogAuditBoundary:
+    """Sprint 8VF: Verify ToolExecLog AUDIT boundary clarity."""
+
+    def test_tool_exec_log_has_audit_role(self):
+        """ToolExecLog docstring explicitly states AUDIT role."""
+        from hledac.universal.tool_exec_log import ToolExecLog
+
+        docstring = ToolExecLog.__doc__ or ""
+        assert "AUDIT" in docstring or "audit" in docstring.lower(), \
+            "ToolExecLog should explicitly state AUDIT role"
+
+    def test_tool_exec_log_is_not_execution_authority(self):
+        """Sprint 8VF: ToolExecLog docstring states NOT execution authority."""
+        from hledac.universal.tool_exec_log import ToolExecLog
+
+        docstring = ToolExecLog.__doc__ or ""
+        assert "NOT" in docstring and "execution" in docstring.lower(), \
+            "ToolExecLog should explicitly state it is NOT execution authority"
+
+    def test_tool_exec_log_has_correlation_boundary(self):
+        """Sprint 8VF: ToolExecLog has CORRELATION BOUNDARY documented."""
+        from hledac.universal.tool_exec_log import ToolExecLog
+
+        docstring = ToolExecLog.__doc__ or ""
+        assert "CORRELATION" in docstring or "correlation" in docstring.lower(), \
+            "ToolExecLog should document correlation boundary"
+        # Verify correlation fields are mentioned
+        assert "run_id" in docstring, "Should mention run_id in correlation context"
+
+    def test_tool_exec_log_has_do_not_list(self):
+        """Sprint 8VF: ToolExecLog docstring contains DO NOT restrictions."""
+        from hledac.universal.tool_exec_log import ToolExecLog
+
+        docstring = ToolExecLog.__doc__ or ""
+        assert "DO NOT" in docstring, \
+            "ToolExecLog should have explicit DO NOT section"
 
 
 class TestEnforcementHappensInRegistryNotAnalyzer:

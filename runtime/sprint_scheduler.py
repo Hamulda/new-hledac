@@ -1619,7 +1619,7 @@ class SprintScheduler:
 
     def _build_shadow_readiness_preview(self) -> dict[str, Any]:
         """
-        Sprint 8VM: Build a machine-readable shadow readiness preview dict.
+        Sprint 8VM + 8VQ: Build a machine-readable shadow readiness preview dict.
 
         Called from _build_diagnostic_report() when shadow mode is active.
         This is a READ-ONLY summary extracted from PreDecisionSummary
@@ -1660,7 +1660,56 @@ class SprintScheduler:
             "compat_seams": pd.compat_seams,
         }
 
-        # Tool readiness preview (if available)
+        # Sprint 8VQ: Decision gate readiness
+        if pd.decision_gate is not None:
+            result["decision_gate"] = {
+                "gate_status": pd.decision_gate.gate_status,
+                "blocker_count": pd.decision_gate.blocker_count,
+                "unknown_count": pd.decision_gate.unknown_count,
+                "compat_seam_count": pd.decision_gate.compat_seam_count,
+                "is_proceed_allowed": pd.decision_gate.is_proceed_allowed,
+                "defer_to_provider": pd.decision_gate.defer_to_provider,
+                "blocker_categories": pd.decision_gate.blocker_categories,
+                "unknown_categories": pd.decision_gate.unknown_categories,
+            }
+
+        # Sprint 8VQ: Tool readiness preview (read-only, no dispatch)
+        if pd.tool_readiness is not None:
+            result["tool_readiness"] = {
+                "readiness": pd.tool_readiness.readiness,
+                "tool_count": pd.tool_readiness.tool_count,
+                "has_network_tools": pd.tool_readiness.has_network_tools,
+                "has_high_memory_tools": pd.tool_readiness.has_high_memory_tools,
+                "control_mode": pd.tool_readiness.control_mode,
+                "pruned_tool_count": pd.tool_readiness.pruned_tool_count,
+                "resource_constraint": pd.tool_readiness.resource_constraint,
+                "can_execute": pd.tool_readiness.can_execute,
+                "defer_reason": pd.tool_readiness.defer_reason,
+            }
+
+        # Sprint 8VQ: Windup readiness preview
+        if pd.windup_readiness is not None:
+            result["windup_readiness"] = {
+                "readiness": pd.windup_readiness.readiness,
+                "is_windup_phase": pd.windup_readiness.is_windup_phase,
+                "synthesis_mode": pd.windup_readiness.synthesis_mode,
+                "synthesis_engine": pd.windup_readiness.synthesis_engine,
+                "has_export_data": pd.windup_readiness.has_export_data,
+                "export_data_quality": pd.windup_readiness.export_data_quality,
+                "defer_reason": pd.windup_readiness.defer_reason,
+            }
+
+        # Sprint 8VQ: Provider activation note (deferred/unknown only)
+        if pd.provider_note is not None:
+            result["provider_activation_note"] = {
+                "status": pd.provider_note.status,
+                "deferral_reason": pd.provider_note.deferral_reason,
+                "has_recommendation": pd.provider_note.has_recommendation,
+                "recommendation": pd.provider_note.recommendation,
+                "next_phase_hint": pd.provider_note.next_phase_hint,
+            }
+
+        # Legacy: tool_readiness_preview from consumer seam (if still attached)
         if hasattr(pd, "_tool_readiness_preview"):
             result["tool_readiness_preview"] = pd._tool_readiness_preview
 

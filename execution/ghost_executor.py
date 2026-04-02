@@ -61,21 +61,33 @@ class ActionResult:
 
 class GhostExecutor:
     """
-    Executor pro výzkumné akce.
+    Donor/compatibility backend for research actions.
 
-    INTEGRATION NOTE (Sprint 8SD):
+    ROLE (Sprint 8VF):
     ════════════════════════════════════════════════════════
-    This class is a DONOR/COMPATIBILITY backend.
+    This class is a DONOR/COMPATIBILITY backend — NOT the
+    canonical execution-control surface.
 
-    Canonical execution path: ToolRegistry (tool_registry.py)
-    This class exists for backward compatibility and gradual
-    migration. It is NOT the canonical authority for tool
-    execution decisions.
+    Canonical authority: ToolRegistry.execute_with_limits()
+    Donor reason:          Gradual migration from ActionType-based
+                           actions to Tool-based handlers
 
-    When integrating with CapabilityRouter:
-    - Use ToolRegistry as the primary execution surface
-    - GhostExecutor remains as a legacy implementation
+    REMOVAL CONDITION:
+    When all GhostExecutor actions (SCAN, GOOGLE, DEEP_READ,
+    STEALTH_HARVEST, OSINT_DISCOVERY, etc.) are migrated to
+    ToolRegistry as proper Tool handlers, this class becomes
+    a candidate for deprecation.
+
+    BOUNDARY SEAMS:
+    - Uses ActionType enum (NOT Tool model)
+    - Has own _actions dict (NOT _tools registry)
+    - execute() does NOT call ToolRegistry.execute_with_limits()
+    - Action handlers live here, not in ToolRegistry
+
+    INTEGRATION NOTE:
     - Do NOT reference GhostExecutor as "the executor" in docs
+    - Use ToolRegistry as the primary execution surface
+    - GhostExecutor.execute() is a SEPARATE execution path
     ════════════════════════════════════════════════════════
 
     Integruje:

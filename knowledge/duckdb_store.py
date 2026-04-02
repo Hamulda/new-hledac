@@ -649,6 +649,78 @@ class DuckDBShadowStore:
         except Exception:
             return []
 
+    # ------------------------------------------------------------------
+    # Sprint 8TF §2: ghost_global seam — top-100 IOC entities for cross-sprint accumulation
+    # ------------------------------------------------------------------
+
+    def get_top_entities_for_ghost_global(
+        self,
+        n: int = 100,
+    ) -> list[tuple[str, str, float]]:
+        """
+        Sprint 8TF §2: Bounded read-only seam for ghost_global cross-sprint entity accumulation.
+
+        PURPOSE
+        -------
+        Provides a store-facing surface for the ghost_global upsert use case.
+        __main__.py previously spelunked graph attachment internals directly:
+            graph.get_nodes()[:100]  ← method does not exist on any graph backend
+        This method wraps the correct capability query so __main__.py never accesses
+        _ioc_graph internals for this use case.
+
+        STORE IS NOT GRAPH TRUTH OWNER
+        --------------------------------
+        The injected graph is the authoritative store (IOCGraph=Kuzu or DuckPGQGraph=DuckDB).
+        This seam is a thin, fail-open adapter for one specific consumer: ghost_global upsert.
+        It does NOT make DuckDBShadowStore a graph authority.
+
+        PAYLOAD SHAPE
+        -------------
+        Returns list[tuple[str, str, float]] — exactly the shape required by
+        upsert_global_entities(entities: list[tuple[str, str, float]]).
+        Each tuple: (entity_value, entity_type, confidence_cumulative)
+
+        FUTURE OWNER / REMOVAL CONDITION
+        ---------------------------------
+        - Future graph truth owner: IOCGraph (Kuzu) — should expose this directly
+        - Removal condition: IOCGraph.get_top_entities_for_ghost_global(n=100)
+          covers this use case with no remaining __main__.py consumer
+
+        CAPABILITY REQUIREMENTS
+        ------------------------
+        Requires the attached graph to implement get_top_nodes_by_degree(n).
+        DuckPGQGraph (DuckDB): has this method, returns dicts with value/ioc_type/confidence.
+        IOCGraph (Kuzu): does NOT have this method — returns [] (fail-open).
+        Fail-open: returns [] if graph is None or method is absent.
+
+        Args:
+            n: Number of top entities to return (default 100).
+
+        Returns:
+            list[tuple[str, str, float]]: Bounded entity payload for ghost_global upsert.
+            Returns [] if no graph attached or call fails.
+        """
+        if self._ioc_graph is None:
+            return []
+        try:
+            method = getattr(self._ioc_graph, "get_top_nodes_by_degree", None)
+            if not callable(method):
+                return []
+            result = method(n=n)
+            if not isinstance(result, list):
+                return []
+            entities: list[tuple[str, str, float]] = []
+            for item in result:
+                if isinstance(item, dict):
+                    val = item.get("value", "")
+                    ioc_type = item.get("ioc_type", "unknown")
+                    conf = float(item.get("confidence", 0.5))
+                    if val:
+                        entities.append((val, ioc_type, conf))
+            return entities
+        except Exception:
+            return []
+
     def inject_semantic_store(self, store: Any) -> None:
         """
         Sprint 8SB: Inject SemanticStore instance for semantic buffering of findings.

@@ -277,7 +277,36 @@ class Tool(BaseModel):
 
 
 class ToolRegistry:
-    """Central registry for tools with validation and discovery."""
+    """
+    Central registry for tools with validation and discovery.
+
+    CANONICAL EXECUTION-CONTROL SURFACE (Sprint 8VF):
+    ════════════════════════════════════════════════════════
+    This class is the CANONICAL authority for tool execution
+    decisions. All tool execution MUST go through this surface.
+
+    Boundary seams:
+    - execute_with_limits() is the canonical entry point
+    - check_capabilities() enforces capability gates
+    - Rate limits enforced via semaphores and call counters
+
+    Execution flow:
+    1. execute_with_limits(tool_name, args, available_capabilities)
+    2. check_capabilities() validates required capabilities
+    3. validate_call() checks rate limits
+    4. _execute_handler() runs tool handler (async or sync)
+
+    RELATED COMPONENTS:
+    - GhostExecutor:  DONOR/COMPAT backend (NOT canonical)
+    - ToolExecLog:    AUDIT/LOGGING (correlation, NOT execution)
+    - CapabilityRouter: SIGNAL mapping (recommendation, NOT enforcement)
+
+    DO NOT:
+    - Add execution logic here — use GhostExecutor for legacy actions
+    - Add audit/logging here — use ToolExecLog for that
+    - Create parallel execution authorities
+    ════════════════════════════════════════════════════════
+    """
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}

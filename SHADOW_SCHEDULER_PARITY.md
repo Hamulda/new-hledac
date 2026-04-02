@@ -407,3 +407,123 @@ Voláno z `_build_diagnostic_report()` těsně před export — to je nejbezpeč
 | `runtime/sprint_scheduler.py` | Import shadow vrstvy (lazy, za TYPE_CHECKING guard) |
 | `tests/probe_8vm/test_shadow_consumer_seam.py` | 11 testů ověřujících read-only seam, caching, boundary |
 | `SHADOW_SCHEDULER_PARITY.md` | Přidána F3.8 sekce |
+
+---
+
+## F3.9: Richer Readiness Preview (Sprint 8VQ)
+
+### Bird's-Eye View: Proč je zúžený readiness preview správný mezikrok
+
+Scheduler-shadow v F3.8 uměl číst ParityArtifact a skládat PreDecisionSummary,
+ale postrádal explicitní rozlišení **co přesně brání** decision gate.
+
+**Rozlišení blocker vs compat seam vs unknown** je kritické pro další kroky:
+- Blockers → musí být opraveny před dispatch
+- Compat seams → fyziologický stav, ne blocker
+- Unknowns → defer, ne block
+
+**Provider activation deferred/unknown note** zabraňuje vzniku pseudo-authority:
+- NEsimuluje load order
+- NEsimuluje provider state machine
+- Pouze říká "deferred" s důvodem
+
+Toto NENÍ provider plane simulace — pouze diagnostický note.
+
+### Co je nové v F3.9
+
+#### 1. DecisionGateReadiness
+Explicitní rozlišení pro scheduler decision gate:
+
+| Status | Meaning | is_proceed_allowed |
+|--------|---------|---------------------|
+| `ready` | Žádné blockers, může proceed | True |
+| `blocked` | Hard blockers present | False |
+| `insufficient` | Příliš mnoho unknowns | False |
+| `unknown` | Cannot determine readiness | False |
+
+#### 2. ToolReadinessPreview
+DIAGNOSTIC ONLY, no dispatch, no execute_with_limits.
+
+| Readiness | Meaning |
+|-----------|---------|
+| `ready` | Tools available, can execute |
+| `degraded` | Some tools unavailable due to resource pressure |
+| `pruned` | Tools heavily pruned (panic mode) |
+| `unknown` | Cannot determine tool readiness |
+
+Čte POUZE z existujících fact bundles (control_phase_mode, graph readiness).
+NESMÍ volat acquire() ani load_model().
+
+#### 3. WindupReadinessPreview
+From existing fact bundles only — NEaktivuje windup engine.
+
+| Readiness | Meaning |
+|-----------|---------|
+| `ready` | Windup facts sufficient |
+| `partial` | Some windup facts missing |
+| `insufficient` | Windup facts insufficient |
+| `not_active` | Not in WINDUP phase |
+
+#### 4. ProviderActivationNote
+**Deferred/unknown only, NO simulation.**
+
+| Status | Meaning |
+|--------|---------|
+| `deferred` | Activation deferred to future phase |
+| `unknown` | Cannot determine provider readiness |
+| `not_ready` | Provider not ready |
+| `blocked` | Blocked by hard constraint |
+
+NESMÍ:
+- Simulovat load order providerů
+- Simulovat provider state machine
+- Vzniknout pseudo-authorita provider plane
+
+### Scheduler Shadow Readiness Matrix
+
+| Readiness Domain | Source | Read-only | No Dispatch | Deferred Note |
+|-----------------|--------|-----------|-------------|---------------|
+| Lifecycle | SprintLifecycleManager | ✅ | ✅ | N/A |
+| Graph | DuckPGQGraph | ✅ | ✅ | N/A |
+| Export | ExportHandoff/scorecard | ✅ | ✅ | N/A |
+| Model/Control | AnalyzerResult/raw_profile | ✅ | ✅ | N/A |
+| Decision Gate | blockers/unknowns/compat | ✅ | ✅ | Provider only |
+| Tool Readiness | control_phase + graph hints | ✅ | ✅ | N/A |
+| Windup Readiness | lifecycle + export facts | ✅ | ✅ | N/A |
+| Provider Activation | precursors + lifecycle | ✅ | ✅ | ✅ Deferred only |
+
+### Co scheduler-shadow TEĎ UMÍ previewovat (F3.9)
+
+1. **Decision gate readiness** — explicit blocker/compat_seam/unknown rozlišení
+2. **Tool readiness preview** — read-only, no dispatch, resource hints from control mode
+3. **Windup readiness preview** — from fact bundles only, no windup activation
+4. **Provider activation note** — deferred/unknown only, no simulation
+
+### Co scheduler-shadow STÁLE NESMÍ (hard boundaries)
+
+| Zakázáno | Proč |
+|----------|------|
+| Tool execution (execute_with_limits) | Side effect |
+| Provider activation (acquire/load_model) | Mění runtime state |
+| Provider state machine simulation | Vznik pseudo-authority |
+| Provider load order simulation | Vznik pseudo-authority |
+| Windup engine activation | Mění runtime state |
+| Ledger writes | Není truth store |
+| Dispatch/enqueue work | Čistě diagnostické |
+
+### Guardraily Implementované v F3.9
+
+1. **Provider activation je deferred note** — nesimuluje se load order ani state machine
+2. **Tool readiness jen z fact bundles** — žádné ToolRegistry.execute_with_limits()
+3. **Windup readiness read-only** — žádné windup_engine.run_windup() volání
+4. **Decision gate rozlišuje blockers vs unknowns vs compat_seams**
+5. **No bg tasks in compose functions** — pure functions only
+6. **Local scaffold zůstává local scaffold** — žádné shared contracts
+
+### Soubory Změněné v F3.9
+
+| Soubor | Změna |
+|--------|--------|
+| `runtime/shadow_pre_decision.py` | Přidány DiffTaxonomy enum values, DecisionGateReadiness, ToolReadinessPreview, WindupReadinessPreview, ProviderActivationNote dataclasses, _compose_* funkce |
+| `runtime/sprint_scheduler.py` | Rozšířen `_build_shadow_readiness_preview()` o 4 nové readiness sekce |
+| `SHADOW_SCHEDULER_PARITY.md` | Přidána F3.9 sekce |

@@ -99,6 +99,30 @@ class DiffTaxonomy(Enum):
     # Toto je FYZIOLOGICKÝ stav, ne problém. Označuje že jsme v compat path.
     COMPAT_SEAM_ACTIVE = auto()   # Compat seam je aktivní (windup_local_phase, scorecard, raw_profile)
 
+    # Decision gate readiness — richer preview (Sprint 8VQ)
+    DECISION_GATE_READY = auto()    # Všechny facts dostatečné, žádné blockers
+    DECISION_GATE_BLOCKED = auto()  # Hard blockers present — cannot proceed
+    DECISION_GATE_INSUFFICIENT = auto()  # Facts insufficient for decision
+    DECISION_GATE_UNKNOWN = auto()   # Cannot determine readiness
+
+    # Tool readiness — DIAGNOSTIC ONLY, no dispatch
+    TOOL_READINESS_READY = auto()    # Tools available, can execute
+    TOOL_READINESS_DEGRADED = auto()  # Some tools unavailable due to resource pressure
+    TOOL_READINESS_PRUNED = auto()  # Tools heavily pruned (panic mode)
+    TOOL_READINESS_UNKNOWN = auto() # Cannot determine tool readiness
+
+    # Windup readiness — from existing fact bundles only
+    WINDUP_READY = auto()           # Windup facts sufficient
+    WINDUP_PARTIAL = auto()         # Some windup facts missing
+    WINDUP_INSUFFICIENT = auto()    # Windup facts insufficient
+    WINDUP_NOT_ACTIVE = auto()      # Not in WINDUP phase
+
+    # Provider activation — deferred/unknown note only, NO simulation
+    PROVIDER_DEFERRED = auto()       # Provider activation deferred to future phase
+    PROVIDER_UNKNOWN = auto()        # Cannot determine provider readiness
+    PROVIDER_NOT_READY = auto()      # Provider not ready
+    PROVIDER_BLOCKED = auto()       # Provider blocked by hard constraint
+
 
 # =============================================================================
 # Pre-Decision Summary — diagnostic artifact, NOT a truth store
@@ -214,6 +238,106 @@ class PrecursorSummary:
 
 
 @dataclass
+class DecisionGateReadiness:
+    """
+    Decision gate readiness — explicit rozlišení pro scheduler decision gate.
+
+    DIAGNOSTIC ONLY — tento artifact NESMÍ být použit pro skutečná
+    scheduler rozhodnutí. Pouze pro diagnostický výstup.
+
+    Rozlišuje:
+    - DECISION_GATE_READY: všechny facts dostatečné, žádné blockers
+    - DECISION_GATE_BLOCKED: hard blockers present — cannot proceed
+    - DECISION_GATE_INSUFFICIENT: facts insufficient for decision
+    - DECISION_GATE_UNKNOWN: cannot determine readiness
+    """
+    gate_status: str  # "ready" | "blocked" | "insufficient" | "unknown"
+    blocker_count: int
+    unknown_count: int
+    compat_seam_count: int
+    # Detail per category
+    blocker_categories: List[str]  # Which categories are blocking
+    unknown_categories: List[str]  # Which categories are unknown
+    is_proceed_allowed: bool  # True iff gate_status == "ready"
+    defer_to_provider: bool  # Provider activation deferred
+
+
+@dataclass
+class ToolReadinessPreview:
+    """
+    Tool readiness preview — DIAGNOSTIC ONLY, no dispatch, no execute_with_limits.
+
+    Čte POUZE z existujícího ToolRegistry surface (list_tools, get_tool_cards).
+    NESMÍ volat acquire(), load_model(), nebo jakékoli provider activation.
+
+    Tento preview rozlišuje:
+    - TOOL_READINESS_READY: tools available, can execute
+    - TOOL_READINESS_DEGRADED: some tools unavailable due to resource pressure
+    - TOOL_READINESS_PRUNED: tools heavily pruned (panic mode)
+    - TOOL_READINESS_UNKNOWN: cannot determine tool readiness
+    """
+    readiness: str  # "ready" | "degraded" | "pruned" | "unknown"
+    tool_count: int
+    tool_names: List[str]
+    has_network_tools: bool
+    has_high_memory_tools: bool
+    # Control phase impact
+    control_mode: str  # "normal" | "prune" | "panic"
+    pruned_tool_count: int  # Estimated pruned tools (based on control mode)
+    # Resource-based assessment (read-only, no actual measurement)
+    resource_constraint: str  # "none" | "memory" | "thermal" | "unknown"
+    can_execute: bool  # True iff readiness in ("ready", "degraded")
+    defer_reason: Optional[str]  # Why deferred or unknown
+
+
+@dataclass
+class WindupReadinessPreview:
+    """
+    Windup readiness preview — from existing fact bundles, DIAGNOSTIC ONLY.
+
+    Čte z LifecycleSnapshotBundle a ExportReadinessSummary.
+    NESMÍ měnit ownership, NESMÍ aktivovat windup engine.
+
+    Rozlišuje:
+    - WINDUP_READY: windup facts sufficient
+    - WINDUP_PARTIAL: some windup facts missing
+    - WINDUP_INSUFFICIENT: windup facts insufficient
+    - WINDUP_NOT_ACTIVE: not in WINDUP phase
+    """
+    readiness: str  # "ready" | "partial" | "insufficient" | "not_active"
+    is_windup_phase: bool
+    synthesis_mode: Optional[str]  # "synthesis" | "structured" | "minimal" | None
+    synthesis_engine: str
+    has_export_data: bool  # ranked_parquet or gnn_predictions available
+    export_data_quality: str  # "none" | "sparse" | "ready"
+    defer_reason: Optional[str]  # Why deferred or not ready
+
+
+@dataclass
+class ProviderActivationNote:
+    """
+    Provider activation note — deferred/unknown only, NO simulation.
+
+    DIAGNOSTIC ONLY. Tento note NESMÍ:
+    - Simulovat load order providerů
+    - Simulovat provider state machine
+    - Vzniknout pseudo-authorita provider plane
+
+    Rozlišuje:
+    - PROVIDER_DEFERRED: activation deferred to future phase
+    - PROVIDER_UNKNOWN: cannot determine provider readiness
+    - PROVIDER_NOT_READY: provider not ready
+    - PROVIDER_BLOCKED: blocked by hard constraint
+    """
+    status: str  # "deferred" | "unknown" | "not_ready" | "blocked"
+    deferral_reason: str  # Why deferred
+    has_recommendation: bool  # provider_recommend available
+    recommendation: Optional[str]  # Raw recommendation string
+    next_phase_hint: Optional[str]  # Hint about when activation might proceed
+    # NO: load_order, provider_state, activation_sequence
+
+
+@dataclass
 class PreDecisionSummary:
     """
     Pre-decision summary artifact — composed from ParityArtifact.
@@ -256,6 +380,12 @@ class PreDecisionSummary:
     mismatch_reasons: Dict[str, str]  # category → reason string
     # Compat seams — FYSIOLOGICAL, not blockers. Lists which bundles use legacy paths.
     compat_seams: List[str] = field(default_factory=list)
+
+    # Sprint 8VQ: Richer readiness previews
+    decision_gate: Optional[DecisionGateReadiness] = None
+    tool_readiness: Optional[ToolReadinessPreview] = None
+    windup_readiness: Optional[WindupReadinessPreview] = None
+    provider_note: Optional[ProviderActivationNote] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -326,6 +456,45 @@ class PreDecisionSummary:
             "unknowns": self.unknowns,
             "mismatch_reasons": self.mismatch_reasons,
             "compat_seams": self.compat_seams,
+            # Sprint 8VQ: Richer readiness previews
+            "decision_gate": {
+                "gate_status": self.decision_gate.gate_status,
+                "blocker_count": self.decision_gate.blocker_count,
+                "unknown_count": self.decision_gate.unknown_count,
+                "compat_seam_count": self.decision_gate.compat_seam_count,
+                "blocker_categories": self.decision_gate.blocker_categories,
+                "unknown_categories": self.decision_gate.unknown_categories,
+                "is_proceed_allowed": self.decision_gate.is_proceed_allowed,
+                "defer_to_provider": self.decision_gate.defer_to_provider,
+            } if self.decision_gate else None,
+            "tool_readiness": {
+                "readiness": self.tool_readiness.readiness,
+                "tool_count": self.tool_readiness.tool_count,
+                "tool_names": self.tool_readiness.tool_names,
+                "has_network_tools": self.tool_readiness.has_network_tools,
+                "has_high_memory_tools": self.tool_readiness.has_high_memory_tools,
+                "control_mode": self.tool_readiness.control_mode,
+                "pruned_tool_count": self.tool_readiness.pruned_tool_count,
+                "resource_constraint": self.tool_readiness.resource_constraint,
+                "can_execute": self.tool_readiness.can_execute,
+                "defer_reason": self.tool_readiness.defer_reason,
+            } if self.tool_readiness else None,
+            "windup_readiness": {
+                "readiness": self.windup_readiness.readiness,
+                "is_windup_phase": self.windup_readiness.is_windup_phase,
+                "synthesis_mode": self.windup_readiness.synthesis_mode,
+                "synthesis_engine": self.windup_readiness.synthesis_engine,
+                "has_export_data": self.windup_readiness.has_export_data,
+                "export_data_quality": self.windup_readiness.export_data_quality,
+                "defer_reason": self.windup_readiness.defer_reason,
+            } if self.windup_readiness else None,
+            "provider_note": {
+                "status": self.provider_note.status,
+                "deferral_reason": self.provider_note.deferral_reason,
+                "has_recommendation": self.provider_note.has_recommendation,
+                "recommendation": self.provider_note.recommendation,
+                "next_phase_hint": self.provider_note.next_phase_hint,
+            } if self.provider_note else None,
         }
 
 
@@ -370,6 +539,27 @@ def compose_pre_decision(
         parity_artifact, lc, gr, er, mc, pr
     )
 
+    # --- Sprint 8VQ: Decision Gate Readiness ---
+    gate_readiness = _compose_decision_gate_readiness(
+        blockers, unknowns, parity_artifact.compat_seams
+    )
+
+    # --- Sprint 8VQ: Tool Readiness Preview (read-only, no dispatch) ---
+    tool_readiness = _compose_tool_readiness_preview(
+        lc.control_phase_mode,
+        gr,
+    )
+
+    # --- Sprint 8VQ: Windup Readiness Preview ---
+    windup_readiness = _compose_windup_readiness_preview(
+        lc, er
+    )
+
+    # --- Sprint 8VQ: Provider Activation Note (deferred/unknown only) ---
+    provider_note = _compose_provider_activation_note(
+        pr, lc
+    )
+
     return PreDecisionSummary(
         parity_timestamp_monotonic=parity_artifact.timestamp_monotonic,
         parity_timestamp_wall=parity_artifact.timestamp_wall,
@@ -384,6 +574,11 @@ def compose_pre_decision(
         unknowns=unknowns,
         mismatch_reasons=mismatch_reasons,
         compat_seams=parity_artifact.compat_seams,
+        # Sprint 8VQ: Richer readiness previews
+        decision_gate=gate_readiness,
+        tool_readiness=tool_readiness,
+        windup_readiness=windup_readiness,
+        provider_note=provider_note,
     )
 
 
@@ -727,6 +922,247 @@ def _compose_diagnostic_metadata(
         unknowns.append(f"model/control quality: privacy={mc.privacy}, depth={mc.depth}")
 
     return blockers, unknowns, mismatch_reasons
+
+
+def _compose_decision_gate_readiness(
+    blockers: List[str],
+    unknowns: List[str],
+    compat_seams: List[str],
+) -> DecisionGateReadiness:
+    """
+    Sestaví DecisionGateReadiness z blockers/unknowns/compat_seams.
+
+    DIAGNOSTIC ONLY — tento artifact NESMÍ být použit pro skutečná
+    scheduler rozhodnutí.
+
+    Rozlišuje:
+    - gate_status = "ready": žádné blockers, může proceed
+    - gate_status = "blocked": hard blockers present
+    - gate_status = "insufficient": insufficient facts for decision
+    - gate_status = "unknown": cannot determine readiness
+    """
+    blocker_count = len(blockers)
+    unknown_count = len(unknowns)
+    compat_seam_count = len(compat_seams)
+
+    # Determine gate status
+    if blocker_count > 0:
+        gate_status = "blocked"
+        is_proceed_allowed = False
+    elif unknown_count > 2:
+        # Too many unknowns — insufficient for decision
+        gate_status = "insufficient"
+        is_proceed_allowed = False
+    elif unknown_count > 0:
+        # Some unknowns but can still proceed with caution
+        gate_status = "ready"  # Proceed allowed despite unknowns
+        is_proceed_allowed = True
+    else:
+        gate_status = "ready"
+        is_proceed_allowed = True
+
+    # Provider deferral: if we have unknowns about providers, defer activation
+    defer_to_provider = any("provider" in u.lower() for u in unknowns)
+
+    # Categorize blockers
+    blocker_categories = []
+    for b in blockers:
+        if "phase" in b.lower() or "lifecycle" in b.lower():
+            blocker_categories.append("lifecycle")
+        elif "graph" in b.lower():
+            blocker_categories.append("graph")
+        elif "model" in b.lower() or "tool" in b.lower():
+            blocker_categories.append("model_control")
+        elif "export" in b.lower():
+            blocker_categories.append("export")
+        else:
+            blocker_categories.append("unknown")
+
+    # Categorize unknowns
+    unknown_categories = []
+    for u in unknowns:
+        if "provider" in u.lower():
+            unknown_categories.append("provider")
+        elif "branch" in u.lower():
+            unknown_categories.append("branch")
+        elif "graph" in u.lower():
+            unknown_categories.append("graph")
+        elif "export" in u.lower():
+            unknown_categories.append("export")
+        else:
+            unknown_categories.append("general")
+
+    return DecisionGateReadiness(
+        gate_status=gate_status,
+        blocker_count=blocker_count,
+        unknown_count=unknown_count,
+        compat_seam_count=compat_seam_count,
+        blocker_categories=blocker_categories,
+        unknown_categories=unknown_categories,
+        is_proceed_allowed=is_proceed_allowed,
+        defer_to_provider=defer_to_provider,
+    )
+
+
+def _compose_tool_readiness_preview(
+    control_mode: str,
+    graph: GraphCapabilitySummary,
+) -> ToolReadinessPreview:
+    """
+    Sestaví ToolReadinessPreview z control_phase_mode a graph readiness.
+
+    DIAGNOSTIC ONLY — čte pouze z existujících fact bundles.
+    NESMÍ volat execute_with_limits() ani provider activation.
+
+    Read-only resource assessment based on thermal/graph hints:
+    - "none": nominal conditions
+    - "memory": graph is rich (high memory consumer)
+    - "thermal": thermal state indicates pressure
+    """
+    if control_mode == "panic":
+        readiness = "pruned"
+        pruned_tool_count = 3  # Estimated pruned tools in panic
+        can_execute = False
+        defer_reason = "panic mode: tools heavily pruned"
+        resource_constraint = "memory" if graph.is_rich else "thermal"
+    elif control_mode == "prune":
+        readiness = "degraded"
+        pruned_tool_count = 1
+        can_execute = True
+        defer_reason = None
+        resource_constraint = "memory" if graph.is_rich else "none"
+    else:
+        readiness = "ready"
+        pruned_tool_count = 0
+        can_execute = True
+        defer_reason = None
+        resource_constraint = "memory" if graph.is_rich else "none"
+
+    return ToolReadinessPreview(
+        readiness=readiness,
+        tool_count=0,  # Filled by consumer seam from ToolRegistry
+        tool_names=[],  # Filled by consumer seam from ToolRegistry
+        has_network_tools=False,  # Filled by consumer seam
+        has_high_memory_tools=graph.is_rich,
+        control_mode=control_mode,
+        pruned_tool_count=pruned_tool_count,
+        resource_constraint=resource_constraint,
+        can_execute=can_execute,
+        defer_reason=defer_reason,
+    )
+
+
+def _compose_windup_readiness_preview(
+    lifecycle: LifecycleInterpretation,
+    export: ExportReadinessSummary,
+) -> WindupReadinessPreview:
+    """
+    Sestaví WindupReadinessPreview z LifecycleInterpretation a ExportReadinessSummary.
+
+    DIAGNOSTIC ONLY — z existujících fact bundles.
+    NESMÍ měnit ownership, NESMÍ aktivovat windup engine.
+    """
+    if not lifecycle.is_windup:
+        return WindupReadinessPreview(
+            readiness="not_active",
+            is_windup_phase=False,
+            synthesis_mode=None,
+            synthesis_engine=export.synthesis_engine,
+            has_export_data=export.has_ranked_data or export.has_gnn_predictions,
+            export_data_quality=_assess_export_quality(export),
+            defer_reason="not in WINDUP phase",
+        )
+
+    # In WINDUP — assess windup readiness
+    synthesis_mode = lifecycle.windup_local_mode
+    has_export_data = export.has_ranked_data or export.has_gnn_predictions
+    export_quality = _assess_export_quality(export)
+
+    if export_quality == "none":
+        readiness = "insufficient"
+        defer_reason = "no export data available for windup synthesis"
+    elif export_quality == "sparse":
+        readiness = "partial"
+        defer_reason = "limited export data for windup synthesis"
+    else:
+        readiness = "ready"
+        defer_reason = None
+
+    return WindupReadinessPreview(
+        readiness=readiness,
+        is_windup_phase=True,
+        synthesis_mode=synthesis_mode,
+        synthesis_engine=export.synthesis_engine,
+        has_export_data=has_export_data,
+        export_data_quality=export_quality,
+        defer_reason=defer_reason,
+    )
+
+
+def _assess_export_quality(export: ExportReadinessSummary) -> str:
+    """Assess export data quality for windup synthesis."""
+    if not export.has_ranked_data and not export.has_gnn_predictions:
+        return "none"
+    if export.has_ranked_data and export.gnn_predictions > 0:
+        return "ready"
+    return "sparse"
+
+
+def _compose_provider_activation_note(
+    precursors: PrecursorSummary,
+    lifecycle: LifecycleInterpretation,
+) -> ProviderActivationNote:
+    """
+    Sestaví ProviderActivationNote z PrecursorSummary a LifecycleInterpretation.
+
+    DIAGNOSTIC ONLY — deferred/unknown only.
+    NESMÍ simulovat load order, NESMÍ simulovat provider state machine.
+    NESMÍ vytvořit pseudo-authoritu provider plane.
+
+    Rozlišuje:
+    - status = "deferred": activation deferred to future phase
+    - status = "unknown": cannot determine provider readiness
+    - status = "not_ready": provider not ready
+    - status = "blocked": blocked by hard constraint
+    """
+    # Provider activation deferred in these cases:
+    # 1. Not in ACTIVE phase yet
+    # 2. No provider recommendation available
+    # 3. Hard constraints (lifecycle not ready)
+
+    if lifecycle.is_terminal:
+        status = "blocked"
+        deferral_reason = "lifecycle in terminal phase — sprint ending"
+        next_phase_hint = None
+    elif not lifecycle.is_active and not lifecycle.is_windup:
+        status = "deferred"
+        deferral_reason = f"lifecycle phase={lifecycle.workflow_phase} — not ACTIVE or WINDUP"
+        next_phase_hint = "ACTIVATE phase required"
+    elif lifecycle.should_prune:
+        status = "deferred"
+        deferral_reason = "resource pressure — control mode=prune/panic"
+        next_phase_hint = "NORMAL control mode required"
+    elif not precursors.has_provider_recommend:
+        status = "unknown"
+        deferral_reason = "no provider_recommend available in precursors"
+        next_phase_hint = "capabilities.py provider recommendation required"
+    elif lifecycle.phase_conflict:
+        status = "blocked"
+        deferral_reason = f"phase conflict: {lifecycle.phase_conflict_reason}"
+        next_phase_hint = None
+    else:
+        # Provider could activate but we defer to future phase
+        status = "deferred"
+        deferral_reason = "provider activation deferred — decision gate not yet passed"
+        next_phase_hint = "DECISION_GATE_READY required"
+
+    return ProviderActivationNote(
+        status=status,
+        deferral_reason=deferral_reason,
+        has_recommendation=precursors.has_provider_recommend,
+        recommendation=precursors.provider_recommend,
+        next_phase_hint=next_phase_hint,
+    )
 
 
 # =============================================================================

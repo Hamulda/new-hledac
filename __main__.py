@@ -2308,27 +2308,18 @@ async def _print_scorecard_report(
     md_path = _export_markdown_report(sprint_report, scorecard_data, sprint_id)
     print(f"Report saved: {md_path}")
 
-    # Sprint 8TA B.4: ghost_global upsert (top IOC entities from this sprint)
-    # Graph spelunking for entity export — SEPARATE from export_sprint JSON/seeds path.
-    # COMPAT SEAM: reads store._ioc_graph.get_nodes()[:100] directly.
-    # REMOVAL CONDITION: ghost_global upsert has a proper typed API (not graph internals).
-    #                        Until then, this remains an accepted compat seam.
-    if store is not None and hasattr(store, "_ioc_graph"):
+    # Sprint 8TF §2: ghost_global upsert (top IOC entities from this sprint)
+    # REMOVED: direct graph spelunking (graph.get_nodes()[:100]) — method never existed
+    #          on any graph backend, this path was always silently dead.
+    # REPLACED WITH: duckdb_store.get_top_entities_for_ghost_global() bounded store seam.
+    #                Returns list[tuple] matching upsert_global_entities() signature.
+    #                STORE IS NOT GRAPH TRUTH OWNER — seam is a read-only adapter.
+    if store is not None and hasattr(store, "get_top_entities_for_ghost_global"):
         try:
-            graph = store._ioc_graph
-            if graph is not None and hasattr(graph, "get_nodes"):
-                nodes = graph.get_nodes()[:100]  # top 100
-                entities = []
-                for n in nodes:
-                    if isinstance(n, dict):
-                        val = n.get("value", "")
-                        ioc_type = n.get("type", "unknown")
-                        conf = n.get("confidence", 0.5)
-                        if val:
-                            entities.append((val, ioc_type, float(conf)))
-                if entities and hasattr(store, "upsert_global_entities"):
-                    n_upserted = await store.upsert_global_entities(entities)
-                    logger.info("[SCORECARD] ghost_global: %d entities upserted", n_upserted)
+            entities = store.get_top_entities_for_ghost_global(n=100)
+            if entities and hasattr(store, "upsert_global_entities"):
+                n_upserted = await store.upsert_global_entities(entities)
+                logger.info("[SCORECARD] ghost_global: %d entities upserted", n_upserted)
         except Exception:
             pass
 

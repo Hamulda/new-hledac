@@ -92,6 +92,33 @@ class ToolExecLog:
     """
     Append-only tool execution log with hash-chain.
 
+    ROLE (Sprint 8VF):
+    ════════════════════════════════════════════════════════
+    AUDIT/LOGGING boundary — NOT an execution authority.
+    This class logs tool execution events for forensic audit
+    and correlation. It does NOT execute tools.
+
+    CORRELATION BOUNDARY:
+    - Designed to wrap ToolRegistry.execute_with_limits() calls
+    - ToolExecEvent.correlation dict carries: run_id, branch_id,
+      provider_id, action_id for cross-referencing
+    - Hash-chain provides tamper-evidence for audit
+
+    Execution vs Audit separation:
+    - ToolRegistry.execute_with_limits() → executes tools (canonical)
+    - ToolExecLog.log()                → records execution (audit)
+
+    DO NOT:
+    - Execute tools here — use ToolRegistry for that
+    - Make this a second execution authority
+    - Store raw inputs/outputs (hashes only)
+
+    RELATED COMPONENTS:
+    - ToolRegistry:    CANONICAL execution (controls what runs)
+    - GhostExecutor:   DONOR/COMPAT (legacy actions)
+    - CapabilityRouter: SIGNAL mapping (capability recommendations)
+    ════════════════════════════════════════════════════════
+
     Design principles:
     - NEVER store raw tool inputs/outputs
     - Store only hashes for tamper evidence

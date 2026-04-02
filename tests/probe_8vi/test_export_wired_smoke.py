@@ -17,7 +17,7 @@ async def test_export_sprint_wired_parity():
     Data source: scorecard["top_graph_nodes"] (ne scheduler._ioc_graph)
     """
     import sys
-    import os
+    import os  # noqa: F401
 
     # Patch SPRINT_STORE_ROOT before import
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -110,18 +110,16 @@ async def test_export_sprint_store_fallback():
                 # top_graph_nodes chybí!
             }
 
-            # Mock store s _ioc_graph.get_top_nodes_by_degree
-            mock_graph = MagicMock()
-            mock_graph.get_top_nodes_by_degree.return_value = [
+            # Mock store s get_top_seed_nodes (store-facing seam, ne graph internals)
+            mock_store = MagicMock()
+            mock_store.get_top_seed_nodes.return_value = [
                 {"value": "fallback.com", "ioc_type": "domain", "confidence": 0.8, "degree": 5},
             ]
-            mock_store = MagicMock()
-            mock_store._ioc_graph = mock_graph
 
             result = await export_sprint(mock_store, scorecard, "test_fallback_001")
 
-            # Musí použít fallback z store._ioc_graph
-            mock_graph.get_top_nodes_by_degree.assert_called_once_with(n=5)
+            # Sprint 8VX §B: fallback používá store.get_top_seed_nodes(), ne _ioc_graph internals
+            mock_store.get_top_seed_nodes.assert_called_once_with(n=5)
             assert result.get("seeds_json") not in ("", "None")
 
             seeds_path = pathlib.Path(result["seeds_json"])

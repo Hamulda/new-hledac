@@ -16,7 +16,8 @@ Hlavní body (Sprint 8VX):
 Remaining compat seams:
   - COMPAT_HANDOFF.ensure_export_handoff(): thin adapter, removal when
     export_sprint() accepts only ExportHandoff (not dict/None)
-  - store._ioc_graph.get_top_nodes_by_degree() fallback in export_sprint():
+  - store.get_top_seed_nodes() fallback in export_sprint():
+    Sprint 8VX §B: switched from store._ioc_graph.get_top_nodes_by_degree()
     REMOVAL CONDITION: duckdb_store.get_top_seed_nodes() covers all export use cases
   - __main__._compat_scheduler bridge: REMOVAL CONDITION: SprintScheduler cutover complete
 """

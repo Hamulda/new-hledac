@@ -6,9 +6,9 @@
 
 ## Ledger Entry #1: `sprint_exporter` → `scheduler._ioc_graph` coupling
 
-**Status: ✅ RESOLVED (Sprint 8VI)**
+**Status: ✅ RESOLVED (Sprint 8VI) — SPRINT 8VX §B FINISH**
 
-**Lokace:** `export/sprint_exporter.py:21`
+**Lokace:** `export/sprint_exporter.py:83-93`
 
 **Popis:**
 `sprint_exporter._generate_next_sprint_seeds()` volá `scheduler._ioc_graph.get_top_nodes_by_degree(n=5)`.
@@ -22,9 +22,14 @@ Toto předpokládá že `scheduler._ioc_graph` je DuckPGQGraph (quantum_pathfind
 - `scheduler` param REMOVED; data source = `scorecard["top_graph_nodes"]`
 - COMPAT BRIDGE: pokud `top_graph_nodes` chybí v scorecard, fallback na `store._ioc_graph.get_top_nodes_by_degree(n=5)`
 
+**Resolution (Sprint 8VX §B) — COMPLETE:**
+- COMPAT BRIDGE přepnut z `store._ioc_graph.get_top_nodes_by_degree()` na `store.get_top_seed_nodes()`
+- Store-facing seam — export consumer mluví se store API, ne graph internals
+- Fail-soft chování zachováno
+
 **Future owner:** `duckdb_store.get_top_seed_nodes()` — čisté store API bez graph internals
 
-**Removal condition:** `duckdb_store.get_top_nodes(n=5)` pokrývá všechny export use cases
+**Removal condition:** `duckdb_store.get_top_seed_nodes()` pokrývá všechny export use cases
 NEBO `windup_engine.run_windup()` plní `scorecard["top_graph_nodes"]` ve všech pathách
 
 ---
@@ -127,6 +132,43 @@ Ale toto je bridge protože budoucí cíl je: scheduler dostane store reference 
 
 ---
 
+## Ledger Entry #6: ghost_global entity export — direct graph spelunking removed
+
+**Status: ✅ RESOLVED Sprint 8TF**
+
+**Lokace:**
+- Old: `__main__.py:2311-2333` — direct `store._ioc_graph.get_nodes()[:100]`
+- New: `__main__.py` — `store.get_top_entities_for_ghost_global()`
+- Store method: `knowledge/duckdb_store.py` — `get_top_entities_for_ghost_global(n=100)`
+
+**Popis:**
+`__main__.py:_print_scorecard_report()` obsahoval přímé graph spelunking pro ghost_global upsert:
+```python
+graph = store._ioc_graph
+if graph is not None and hasattr(graph, "get_nodes"):
+    nodes = graph.get_nodes()[:100]  # top 100  ← NIKDY NEEXISTOVALO
+```
+Metoda `get_nodes()` **neexistuje** na žádném graph backendu (IOCGraph ani DuckPGQGraph).
+Kód vždy tiše failoval — ghost_global entity export byl vždy mrtvý.
+
+**Resolution (Sprint 8TF):**
+- Přímé graph spelunking **ODSTRANĚNO** z `__main__.py`
+- **NOVÝ STORE SEAM:** `duckdb_store.get_top_entities_for_ghost_global(n=100)`
+  - Read-only, fail-soft, vrací `list[tuple[str, str, float]]` — přesný shape pro `upsert_global_entities()`
+  - Interně volá `_ioc_graph.get_top_nodes_by_degree(n=100)` — správná capability
+  - DuckDBShadowStore zůstává **SIDE CAR**, není graph truth owner
+- `__main__.py` nyní volá store seam místo graph internals
+
+**STORE IS NOT GRAPH TRUTH OWNER:**
+`get_top_entities_for_ghost_global()` je thin read-only adapter. Truth owner zůstává:
+- `DuckPGQGraph.get_top_nodes_by_degree(n)` — jediný backend s touto capability
+
+**Future owner:** IOCGraph — až bude mít `get_top_nodes_by_degree(n)` implementaci, helper zmizí
+
+**Removal condition:** IOCGraph pokryje tuto capability a `duckdb_store.get_top_entities_for_ghost_global()` nebude potřeba
+
+---
+
 ## Summary Table
 
 | Entry | Debt | Severity | Status | Next Step |
@@ -136,6 +178,7 @@ Ale toto je bridge protože budoucí cíl je: scheduler dostane store reference 
 | #3 | Inline `_render_sprint_report_markdown` dupe | MED | ✅ RESOLVED 8VJ §B | Canonical renderer in sprint_markdown_reporter.py |
 | #4 | `_compat_scheduler` bridge | LOW | accepted | Store-first arch — sleduj SprintScheduler cutover |
 | #5 | Typed ExportHandoff handoff spot | MED | ✅ RESOLVED 8VJ §C | Windup engine → ExportHandoff (future) |
+| #6 | ghost_global direct graph spelunking | HIGH | ✅ RESOLVED 8TF | IOCGraph `get_top_nodes_by_degree()` (future) |
 
 **Sprint 8VJ §B uzavřeno:** Entry #3 — sprint markdown rendering přesunuto do `export/sprint_markdown_reporter.py`. Shell zůstává thin bridge pro path computation a orchestration.
 

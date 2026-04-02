@@ -658,6 +658,12 @@
       "type": "file"
     },
     {
+      "path": "export/sprint_exporter.py",
+      "accessCount": 4,
+      "lastAccessed": 1775133992856,
+      "type": "file"
+    },
+    {
       "path": "tests/probe_8se/test_capability_enforcement.py",
       "accessCount": 3,
       "lastAccessed": 1775096419670,
@@ -670,9 +676,15 @@
       "type": "file"
     },
     {
-      "path": "export/sprint_exporter.py",
+      "path": "tests/probe_8vi/test_export_wired_smoke.py",
+      "accessCount": 3,
+      "lastAccessed": 1775134012450,
+      "type": "file"
+    },
+    {
+      "path": "export/COMPAT_HANDOFF.py",
       "accessCount": 2,
-      "lastAccessed": 1775131904623,
+      "lastAccessed": 1775134034828,
       "type": "file"
     },
     {
@@ -694,9 +706,9 @@
       "type": "file"
     },
     {
-      "path": "export/COMPAT_HANDOFF.py",
+      "path": "export/COMPAT_DEBT_LEDGER.md",
       "accessCount": 1,
-      "lastAccessed": 1775131934137,
+      "lastAccessed": 1775134053348,
       "type": "file"
     }
   ],

@@ -372,3 +372,321 @@ class TestShadowReadinessPreviewStructure:
                 os.environ["HLEDAC_RUNTIME_MODE"] = original
             else:
                 os.environ.pop("HLEDAC_RUNTIME_MODE", None)
+
+
+class TestRicherReadinessPreview:
+    """Sprint 8VQ: Tests for richer readiness previews."""
+
+    def test_decision_gate_preview_fields(self):
+        """DecisionGateReadiness must have required fields."""
+        from hledac.universal.runtime.shadow_pre_decision import DecisionGateReadiness
+
+        gate = DecisionGateReadiness(
+            gate_status="ready",
+            blocker_count=0,
+            unknown_count=1,
+            compat_seam_count=1,
+            blocker_categories=[],
+            unknown_categories=["provider"],
+            is_proceed_allowed=True,
+            defer_to_provider=True,
+        )
+
+        assert gate.gate_status == "ready"
+        assert gate.blocker_count == 0
+        assert gate.is_proceed_allowed is True
+        assert gate.defer_to_provider is True
+
+    def test_tool_readiness_preview_fields(self):
+        """ToolReadinessPreview must have required fields."""
+        from hledac.universal.runtime.shadow_pre_decision import ToolReadinessPreview
+
+        tool = ToolReadinessPreview(
+            readiness="ready",
+            tool_count=5,
+            tool_names=["fetch", "search", "analyze"],
+            has_network_tools=True,
+            has_high_memory_tools=False,
+            control_mode="normal",
+            pruned_tool_count=0,
+            resource_constraint="none",
+            can_execute=True,
+            defer_reason=None,
+        )
+
+        assert tool.readiness == "ready"
+        assert tool.can_execute is True
+        assert tool.control_mode == "normal"
+
+    def test_windup_readiness_preview_fields(self):
+        """WindupReadinessPreview must have required fields."""
+        from hledac.universal.runtime.shadow_pre_decision import WindupReadinessPreview
+
+        windup = WindupReadinessPreview(
+            readiness="ready",
+            is_windup_phase=True,
+            synthesis_mode="synthesis",
+            synthesis_engine="test-engine",
+            has_export_data=True,
+            export_data_quality="ready",
+            defer_reason=None,
+        )
+
+        assert windup.readiness == "ready"
+        assert windup.is_windup_phase is True
+
+    def test_provider_activation_note_fields(self):
+        """ProviderActivationNote must have required fields."""
+        from hledac.universal.runtime.shadow_pre_decision import ProviderActivationNote
+
+        note = ProviderActivationNote(
+            status="deferred",
+            deferral_reason="lifecycle not in ACTIVE phase",
+            has_recommendation=False,
+            recommendation=None,
+            next_phase_hint="ACTIVATE phase required",
+        )
+
+        assert note.status == "deferred"
+        assert note.has_recommendation is False
+        assert note.next_phase_hint == "ACTIVATE phase required"
+
+    def test_decision_gate_blocked_when_blockers_present(self):
+        """DecisionGateReadiness must be blocked when blockers present."""
+        from hledac.universal.runtime.shadow_pre_decision import DecisionGateReadiness
+
+        gate = DecisionGateReadiness(
+            gate_status="blocked",
+            blocker_count=2,
+            unknown_count=0,
+            compat_seam_count=0,
+            blocker_categories=["lifecycle", "graph"],
+            unknown_categories=[],
+            is_proceed_allowed=False,
+            defer_to_provider=False,
+        )
+
+        assert gate.gate_status == "blocked"
+        assert gate.is_proceed_allowed is False
+        assert gate.blocker_count == 2
+
+    def test_pre_decision_summary_has_new_fields(self):
+        """PreDecisionSummary must have decision_gate, tool_readiness, windup_readiness, provider_note."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            PreDecisionSummary,
+            LifecycleInterpretation,
+            GraphCapabilitySummary,
+            ExportReadinessSummary,
+            ModelControlSummary,
+            PrecursorSummary,
+            DiffTaxonomy,
+        )
+
+        # Minimal PreDecisionSummary with new fields
+        pd = PreDecisionSummary(
+            parity_timestamp_monotonic=0.0,
+            parity_timestamp_wall="2026-04-02T00:00:00Z",
+            runtime_mode="scheduler_shadow",
+            lifecycle=LifecycleInterpretation(
+                workflow_phase="ACTIVE",
+                workflow_phase_entered_at=0.0,
+                control_phase_mode="normal",
+                control_phase_thermal="nominal",
+                windup_local_mode=None,
+                is_active=True,
+                is_windup=False,
+                is_export_ready=False,
+                is_terminal=False,
+                can_accept_work=True,
+                should_prune=False,
+                synthesis_mode_known=False,
+                phase_conflict=False,
+                phase_conflict_reason=None,
+            ),
+            graph=GraphCapabilitySummary(
+                backend="duckpgq",
+                nodes=100,
+                edges=500,
+                pgq_active=True,
+                top_nodes_count=10,
+                is_initialized=True,
+                has_structured_data=True,
+                is_rich=True,
+                readiness="rich",
+            ),
+            export_readiness=ExportReadinessSummary(
+                sprint_id="test",
+                synthesis_engine="test",
+                ranked_parquet_present=True,
+                gnn_predictions=10,
+                is_ready=True,
+                has_gnn_predictions=True,
+                has_ranked_data=True,
+                readiness="ready",
+            ),
+            model_control=ModelControlSummary(
+                tools_count=5,
+                sources_count=3,
+                privacy="STANDARD",
+                depth="DEEP",
+                models_needed=[],
+                has_tools=True,
+                has_sources=True,
+                is_high_quality=True,
+                readiness="ready",
+            ),
+            precursors=PrecursorSummary(
+                branch_decision_id=None,
+                provider_recommend=None,
+                correlation_run_id=None,
+                correlation_branch_id=None,
+                has_branch_decision=False,
+                has_provider_recommend=False,
+                has_correlation=False,
+                is_correlation_linked=False,
+                readiness="unknown",
+            ),
+            diff_taxonomy=[DiffTaxonomy.NONE],
+            blockers=[],
+            unknowns=["provider recommendation not available"],
+            mismatch_reasons={},
+            compat_seams=[],
+        )
+
+        # New fields must be present (can be None)
+        assert hasattr(pd, "decision_gate")
+        assert hasattr(pd, "tool_readiness")
+        assert hasattr(pd, "windup_readiness")
+        assert hasattr(pd, "provider_note")
+
+    def test_compose_decision_gate_ready(self):
+        """_compose_decision_gate_readiness must return ready when no blockers."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            _compose_decision_gate_readiness,
+        )
+
+        gate = _compose_decision_gate_readiness(
+            blockers=[],
+            unknowns=["some unknown"],
+            compat_seams=["windup_local_phase"],
+        )
+
+        assert gate.gate_status == "ready"
+        assert gate.is_proceed_allowed is True
+        assert gate.blocker_count == 0
+
+    def test_compose_decision_gate_blocked(self):
+        """_compose_decision_gate_readiness must return blocked when blockers present."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            _compose_decision_gate_readiness,
+        )
+
+        gate = _compose_decision_gate_readiness(
+            blockers=["lifecycle not ready", "graph backend unknown"],
+            unknowns=[],
+            compat_seams=[],
+        )
+
+        assert gate.gate_status == "blocked"
+        assert gate.is_proceed_allowed is False
+        assert gate.blocker_count == 2
+
+    def test_compose_windup_not_active(self):
+        """_compose_windup_readiness_preview must return not_active when not in WINDUP."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            _compose_windup_readiness_preview,
+            LifecycleInterpretation,
+            ExportReadinessSummary,
+        )
+
+        lc = LifecycleInterpretation(
+            workflow_phase="ACTIVE",
+            workflow_phase_entered_at=0.0,
+            control_phase_mode="normal",
+            control_phase_thermal="nominal",
+            windup_local_mode=None,
+            is_active=True,
+            is_windup=False,
+            is_export_ready=False,
+            is_terminal=False,
+            can_accept_work=True,
+            should_prune=False,
+            synthesis_mode_known=False,
+            phase_conflict=False,
+            phase_conflict_reason=None,
+        )
+        er = ExportReadinessSummary(
+            sprint_id="test",
+            synthesis_engine="test",
+            ranked_parquet_present=True,
+            gnn_predictions=10,
+            is_ready=True,
+            has_gnn_predictions=True,
+            has_ranked_data=True,
+            readiness="ready",
+        )
+
+        windup = _compose_windup_readiness_preview(lc, er)
+
+        assert windup.readiness == "not_active"
+        assert windup.is_windup_phase is False
+
+    def test_compose_provider_deferred_not_active(self):
+        """ProviderActivationNote must be deferred when lifecycle not in ACTIVE."""
+        from hledac.universal.runtime.shadow_pre_decision import (
+            _compose_provider_activation_note,
+            LifecycleInterpretation,
+            PrecursorSummary,
+        )
+
+        lc = LifecycleInterpretation(
+            workflow_phase="WARMUP",
+            workflow_phase_entered_at=0.0,
+            control_phase_mode="normal",
+            control_phase_thermal="nominal",
+            windup_local_mode=None,
+            is_active=False,
+            is_windup=False,
+            is_export_ready=False,
+            is_terminal=False,
+            can_accept_work=True,
+            should_prune=False,
+            synthesis_mode_known=False,
+            phase_conflict=False,
+            phase_conflict_reason=None,
+        )
+        pr = PrecursorSummary(
+            branch_decision_id=None,
+            provider_recommend=None,
+            correlation_run_id=None,
+            correlation_branch_id=None,
+            has_branch_decision=False,
+            has_provider_recommend=False,
+            has_correlation=False,
+            is_correlation_linked=False,
+            readiness="unknown",
+        )
+
+        note = _compose_provider_activation_note(pr, lc)
+
+        assert note.status == "deferred"
+        assert "not ACTIVE or WINDUP" in note.deferral_reason
+
+    def test_no_provider_simulation(self):
+        """ProviderActivationNote must NOT contain load_order or provider_state."""
+        from hledac.universal.runtime.shadow_pre_decision import ProviderActivationNote
+        import dataclasses
+
+        note = ProviderActivationNote(
+            status="deferred",
+            deferral_reason="test",
+            has_recommendation=False,
+            recommendation=None,
+            next_phase_hint=None,
+        )
+
+        # Ensure no load_order or provider_state fields exist
+        field_names = {f.name for f in dataclasses.fields(note)}
+        assert "load_order" not in field_names
+        assert "provider_state" not in field_names
+        assert "activation_sequence" not in field_names

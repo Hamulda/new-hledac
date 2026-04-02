@@ -1,6 +1,65 @@
-# Tool Capability Execution Enforcement — Sprint 8TD
+# Tool Capability Execution Enforcement — Sprint 8VF
 
 ## Bird's Eye View
+
+### Execution Plane Authority Matrix (Sprint 8VF)
+
+| Komponenta | Role | Canonical? | Donor/Compat? | Audit? |
+|------------|------|------------|---------------|--------|
+| `ToolRegistry` | Execution control + capability enforcement | ✅ **ANO** | ❌ | ❌ |
+| `GhostExecutor` | Legacy action executor (ActionType-based) | ❌ | ✅ **ANO** | ❌ |
+| `ToolExecLog` | Hash-chain audit pro tool invocations | ❌ | ❌ | ✅ **ANO** |
+| `CapabilityRouter` | Signal → Capability mapping (doporučení, ne enforcement) | ❌ | ❌ | ❌ |
+
+### Component Boundaries
+
+```
+ToolRegistry (canonical)
+├── execute_with_limits(available_capabilities=...) — capability gate
+├── check_capabilities() — enforcement hook
+├── validate_call() — rate limit check
+└── _execute_handler() — async/sync handler dispatch
+    ⚠️ NO audit/logging — use ToolExecLog for that
+
+GhostExecutor (donor/compat)
+├── execute(action, params) — SEPARATE execution path
+├── ActionType enum (NOT Tool model)
+├── _actions dict (NOT _tools registry)
+└── ⚠️ NOT canonical — migration candidate
+
+ToolExecLog (audit)
+├── log() — append-only hash-chain event
+├── ToolExecEvent.correlation — run_id, branch_id, provider_id, action_id
+└── ⚠️ NOT execution authority — instrumentation only
+
+CapabilityRouter (signal mapping)
+├── route(AnalyzerResult/dict) → Set[Capability]
+└── ⚠️ Recommendation only — no enforcement here
+```
+
+### Role Seams (Sprint 8VF)
+
+```
+GhostExecutor.execute()
+    ↓ SEPARATE PATH (not through ToolRegistry)
+    ↓ ActionType handlers live here
+    ↓ Migration target: ToolRegistry as Tool handlers
+
+ToolRegistry.execute_with_limits()
+    ↓ CANONICAL (all tool execution goes here)
+    ↓ check_capabilities() gate
+    ↓ Rate limits enforced
+    ↓ Future: wrapped by ToolExecLog for correlation
+
+ToolExecLog.log()
+    ↓ AUDIT ONLY (wrap ToolRegistry calls)
+    ↓ Hash-chain for tamper-evidence
+    ↓ correlation dict for run/branch/action tracking
+```
+
+---
+
+## Bird's Eye View (Legacy — Probes Still Valid)
 
 ### Current Triad State (Post-Sprint 8TD)
 
@@ -160,10 +219,24 @@ else:
 | Item | Status | Evidence |
 |------|--------|----------|
 | GhostExecutor NOT in ToolRegistry | ✅ Verified | `test_ghost_executor_not_in_tool_registry_canonical` |
-| INTEGRATION NOTE in docstring | ✅ Present | `ghost_executor.py:66-79` |
+| DONOR/COMPAT role in docstring | ✅ Present (Sprint 8VF) | `ghost_executor.py:62-84` |
+| REMOVAL CONDITION documented | ✅ Added (Sprint 8VF) | Removal when all actions migrated to Tool |
 | Separate action model | ✅ Verified | ActionType enum vs Tool model |
 | Not referenced as canonical | ✅ Verified | Docs say "ToolRegistry is canonical" |
 | GhostExecutor remains donor/compat | ✅ Enforced | Intentional boundary for future migration |
+
+### Removal Condition (Sprint 8VF)
+
+GhostExecutor je kandidát na deprecaci AŽ KDYŽ:
+1. Všechny GhostExecutor akce (SCAN, GOOGLE, DEEP_READ, STEALTH_HARVEST, OSINT_DISCOVERY...) jsou migrtovány do ToolRegistry jako Tool handlery
+2. Všechny call-sites používají ToolRegistry.execute_with_limits() místo GhostExecutor.execute()
+3. GhostNetworkDriver, StealthOrchestrator jsou začleněny jako dependency injection přes ToolRegistry
+
+### Future Owner (Sprint 8VF)
+
+Future owner GhostExecutor komponent:
+- **Pokud se migrace provede:** ToolRegistry převezme všechny akce jako Tool handlery
+- **Pokud se migrace NEprovádí:** GhostExecutor zůstává jako izolovaný donor/compat backend, žádná nová integrace
 
 ### Surface Overlap (Documented, Not Fixed)
 
@@ -212,7 +285,10 @@ GhostExecutor actions like `stealth_harvest`, `osint_discovery` COULD be impleme
 | End-to-end probe tests | ❌ None | ✅ Added | `TestEndToEndEnforcement` class (8 tests) |
 | Real call-site propagation | ❌ None | ❌ None | Zero production call-sites |
 | Bypass debt matrix formalization | ❌ None | ✅ **Formalized** | Updated in this sprint |
-| GhostExecutor donor/compat boundary | ✅ Docstring | ✅ Verified | `test_ghost_executor_is_donor_compat` |
+| GhostExecutor donor/compat boundary | ✅ Docstring | ✅ REMOVAL CONDITION + BOUNDARY SEAMS (Sprint 8VF) | `ghost_executor.py:62-84` |
+| GhostExecutor future owner | ❌ None | ✅ **Added** (Sprint 8VF) | ToolRegistry as migration target |
+| ToolExecLog correlation boundary | ✅ Docstring | ✅ **Clarified** (Sprint 8VF) | Correlation dict (run_id, branch_id, provider_id, action_id) |
+| ToolRegistry canonical role seams | ✅ Docstring | ✅ **Explicit DO/DON'T** (Sprint 8VF) | `tool_registry.py:279-306` |
 
 ---
 
@@ -250,7 +326,7 @@ GhostExecutor actions like `stealth_harvest`, `osint_discovery` COULD be impleme
 
 ---
 
-## Next Migration Step After Sprint 8TD
+## Next Migration Step After Sprint 8VF
 
 Before integrating with SprintScheduler dispatch:
 
@@ -258,7 +334,64 @@ Before integrating with SprintScheduler dispatch:
    - When scheduler is refactored, it becomes the canonical consumer
 2. **Populate more `required_capabilities`** for high-priority tools
 3. **GhostExecutor migration** plan (separate sprint)
+   - Current state: Donor/compat, REMOVAL CONDITION documented
+   - Migration target: ToolRegistry as Tool handlers
+   - Until then: GhostExecutor stays isolated as legacy backend
 4. **tool_exec_log integration** — wrap ToolRegistry calls for audit correlation
+   - Current state: AUDIT boundary clarified (Sprint 8VF)
+   - Next step: Wire ToolExecLog.log() around execute_with_limits() calls
+
+### Sprint 8VF Done
+- Execution plane je teď explicitně pojmenovaný
+- Canonical/donor/audit role jsou strukturované v kódu (ne jen docs)
+- REMOVAL CONDITION a FUTURE OWNER zdokumentovány
+- Žádný nový framework nevznikl
+
+---
+
+## Files Changed in Sprint 8VF
+
+| File | Change |
+|------|--------|
+| `execution/ghost_executor.py` | DONOR/COMPAT role clarified, REMOVAL CONDITION added, BOUNDARY SEAMS explicit |
+| `tool_registry.py` | Canonical execution-control surface role confirmed with boundary seams |
+| `tool_exec_log.py` | AUDIT boundary clarified, correlation role documented |
+| `TOOL_CAPABILITY_EXECUTION_ENFORCEMENT.md` | Authority matrix, component boundaries, role seams, removal condition, future owner |
+
+---
+
+## What Changed in Sprint 8VF
+
+### 1. GhostExecutor Donor/Compat Boundary Zpřesnění
+- Přidán REMOVAL CONDITION: kdy GhostExecutor becomes candidate for deprecation
+- Přidán BOUNDARY SEAMS: explicitně odděleno od ToolRegistry (ActionType vs Tool model, _actions vs _tools)
+- Přidán FUTURE OWNER: ToolRegistry jako cíl migrace
+- execute() remains SEPARATE PATH from ToolRegistry.execute_with_limits()
+
+### 2. ToolRegistry Canonical Role Potvrzena
+- Přidán explicitní docstring s DO/DON'T seznamem
+- Boundary seams: execute_with_limits, check_capabilities, validate_call, _execute_handler
+- Related components: GhostExecutor (donor), ToolExecLog (audit), CapabilityRouter (signal)
+- NO execution framework — zůstává jednoduchý registry
+
+### 3. ToolExecLog Korelační Boundary Čitelnější
+- Přidán explicitní CORRELATION BOUNDARY section
+- ToolExecEvent.correlation dict dokumentován (run_id, branch_id, provider_id, action_id)
+- Execution vs Audit separation clarified: ToolRegistry executes, ToolExecLog logs
+- DO NOT: execute tools here, create parallel authority, store raw data
+
+### 4. Dokumentace Aktualizována
+- Authority matrix (4-row table)
+- Component boundaries (ASCII diagram)
+- Role seams (Sprint 8VF section)
+- Removal condition (GhostExecutor)
+- Future owner (GhostExecutor → ToolRegistry)
+
+### 5. Testy Rozšířeny
+- GhostExecutor není canonical execution authority ✅
+- ToolRegistry zůstává canonical execution-control surface ✅
+- tool_exec_log je instrumentation, ne execution ✅
+- Korelační boundary čitelnější ✅
 
 ---
 
