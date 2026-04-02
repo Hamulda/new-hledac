@@ -2480,6 +2480,20 @@ async def _run_sprint_mode(
         from .patterns.pattern_matcher import configure_default_bootstrap_patterns_if_empty
         configure_default_bootstrap_patterns_if_empty()
 
+        # Sprint 8WL: Wire truth-write graph BEFORE active loop so buffered IOC writes
+        # are not silent no-op. IOCGraph is lightweight (~10MB Kuzu open, no MLX).
+        # Without this, _truth_write_graph is None in ACTIVE → _graph_ingest_findings()
+        # never fires. WINDUP block keeps inject_stix_graph for synthesis.
+        if store_instance is not None:
+            try:
+                from .knowledge.ioc_graph import IOCGraph
+                ioc_graph = IOCGraph()
+                await ioc_graph.initialize()
+                store_instance.inject_truth_write_graph(ioc_graph)
+                logger.info("[SPRINT 8WL] IOCGraph injected: truth_write_graph (ACTIVE)")
+            except Exception as e:
+                logger.warning(f"[SPRINT 8WL] IOCGraph init failed (continuing without): {e}")
+
         while lifecycle.current_phase == SprintPhase.ACTIVE:
             await asyncio.sleep(1.0)
 
@@ -2518,6 +2532,8 @@ async def _run_sprint_mode(
         # DuckPGQGraph is analytics/donor — lacks STIX capability.
         # We create it here in WINDUP (after ACTIVE phase collected IOCs)
         # and inject into store for synthesis consumption.
+        # Note: inject_truth_write_graph was moved to ACTIVE start (Sprint 8WL) so
+        # buffered IOC writes are not silent no-op during ACTIVE phase.
         if store_instance is not None:
             try:
                 from .knowledge.ioc_graph import IOCGraph
@@ -2525,10 +2541,7 @@ async def _run_sprint_mode(
                 await ioc_graph.initialize()
                 # Sprint 8VQ: Dedicated STIX-only slot — independent of analytics graph
                 store_instance.inject_stix_graph(ioc_graph)
-                # Sprint 8WA/F7: Also wire truth-write slot — enables ACTIVE-phase buffered
-                # IOC writes via _graph_ingest_findings(). Without this, truth-write is no-op.
-                store_instance.inject_truth_write_graph(ioc_graph)
-                logger.info("[SPRINT 8VQ/8WA] IOCGraph injected: stix_graph + truth_write_graph")
+                logger.info("[SPRINT 8VQ] IOCGraph injected: stix_graph (WINDUP)")
             except Exception as e:
                 logger.warning(f"[SPRINT 8VQ] IOCGraph init failed (STIX unavailable): {e}")
 

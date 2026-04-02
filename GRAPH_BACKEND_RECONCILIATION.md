@@ -1162,7 +1162,7 @@ DuckDBShadowStore **není** graph authority — je to sidecar container se třem
 
 | Consumer | Path | Graph source | Status |
 |---|---|---|---|
-| `_graph_ingest_findings()` | ACTIVE-phase buffered writes | `_truth_write_graph` (IOCGraph) | ⚠️ TRUTH-WRITE SLOT NEVER INJECTED in ACTIVE — tichý no-op |
+| `_graph_ingest_findings()` | ACTIVE-phase buffered writes | `_truth_write_graph` (IOCGraph) | ✅ Sprint 8WL: IOCGraph injected at ACTIVE start — buffered writes flow |
 | `_build_stix_context()` Priority 1 | STIX synthesis | `_stix_graph` (IOCGraph) | ✅ IOCGraph created + injected v WINDUP bloku |
 | `_build_stix_context()` Priority 2 | Analytics fallback | `_ioc_graph` (DuckPGQGraph) | ✅ explicit `unavailable` label |
 | `_run_sprint_mode()` stats | Analytics diagnostics | `get_graph_stats()` seam | ✅ |
@@ -1185,14 +1185,17 @@ Toto je existing behavior (před F7) — ne nový problém. F7 toto označuje ja
 
 **F7 CLOSURE (Sprint 8F7):** `_truth_write_graph` je nyní injectovaný v WINDUP bloku `__main__.py` současně s `_stix_graph`. Aktivní path: WINDUP blok → `inject_truth_write_graph(ioc_graph)` → `_truth_write_graph` slot je osazen → `truth_write_graph_supports_buffered_writes()` → `True` → `_graph_ingest_findings()` je volán z `async_ingest_findings_batch()` (stále v WINDUP kontextu, ne ACTIVE).
 
+**8WL CLOSURE (Sprint 8WL):** `inject_truth_write_graph()` přesunuta z WINDUP bloku do ACTIVE start bloku (`__main__.py` ~line 2487). ACTIVE fáze nyní má truth-write graph od prvního pipeline běhu. WINDUP blok si ponechává `inject_stix_graph()` pro STIX syntézu.
+
 ### 5. Debt sekce — F7 aktualizace
 
-**[F7-DEBT-1] TRUTH-WRITE GAP → CLOSED (Sprint 8F7)**
+**[F7-DEBT-1] TRUTH-WRITE GAP → CLOSED (Sprint 8F7, 8WL)**
 
 - Scope: WINDUP blok `__main__.py` — `inject_truth_write_graph(ioc_graph)` nyní volán
 - Root cause (before): `inject_truth_write_graph()` existovala ale nikdy se nevolala
-- Fix: WINDUP blok nyní injectuje IOCGraph do obou slotů (`inject_stix_graph` + `inject_truth_write_graph`)
-- Status: **CLOSED** — truth-write slot je osazený, `_graph_ingest_findings()` je aktivní
+- Fix (8F7): WINDUP blok nyní injectuje IOCGraph do obou slotů (`inject_stix_graph` + `inject_truth_write_graph`)
+- Fix (8WL): `inject_truth_write_graph()` přesunuta do ACTIVE start bloku — truth-write graph dostupný od prvního pipeline run
+- Status: **CLOSED** — truth-write slot osazen v ACTIVE, `_graph_ingest_findings()` aktivní od začátku ACTIVE fáze
 
 **[DEBT-3] duckdb_store._ioc_graph schizofrenie → RESOLVED (Sprint 8WA)**
 - Tri-slot architecture: `_truth_write_graph`, `_ioc_graph`, `_stix_graph` — plně oddělené
@@ -1251,8 +1254,8 @@ tests/probe_8wa/test_truth_write_graph_slot.py
 48 tests passed
 ```
 
-### 9. Co zůstává po F7
+### 9. Co zůstává po F7 / 8WL
 
 1. **`get_top_graph_nodes()` na store** — stále chybí; export bere z scorecard přes existující `get_top_seed_nodes(n=5)`
-2. **IOC data in ACTIVE phase** — buffered writes flow do `_graph_ingest_findings()` triggeru, ale `_truth_write_graph` je osazen až ve WINDUP. ACTIVE fáze stále zapisuje pouze do LMDB/DuckDB. Plné ACTIVE-phase graph wiring by vyžadovalo vytvoření IOCGraph instance v ACTIVE a inject ji tam — to je samostatný sprint.
-3. **Schematická poznámka:** `inject_truth_write_graph` i `inject_stix_graph` nyní sdílejí stejnou IOCGraph instanci. Obě role (truth-write pro buffered writes, STIX pro export) jsou oddělené koncepčně, ale backendově stejný Kuzu graph. Toto je conscious trade-off, ne bug.
+2. **IOC data in ACTIVE phase** → **CLOSED (Sprint 8WL)**: `inject_truth_write_graph(ioc_graph)` nyní volána na začátku ACTIVE bloku (před active loop). Truth-write graph je dostupný od prvního pipeline run. WINDUP blok si ponechává `inject_stix_graph()` pro STIX syntézu. Dvě různé IOCGraph instance (ACTIVE-start vs WINDUP) — obě Kuzu-backed, obě plně funkční.
+3. **Schematická poznámka:** ACTIVE-start `inject_truth_write_graph()` a WINDUP `inject_stix_graph()` nyní vytvářejí dvě oddělené IOCGraph instance. Obě role (truth-write pro buffered writes, STIX pro export) jsou koncepčně i backendově oddělené. Toto je conscious trade-off, ne bug.

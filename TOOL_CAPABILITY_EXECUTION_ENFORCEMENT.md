@@ -767,3 +767,153 @@ Testy z `probe_8se` a `probe_8vf` již pokrývají:
 **No new framework:**
 - `test_no_new_execution_authority_created` ✅
 - `test_logger_is_optional_not_required` ✅
+
+---
+
+## Sprint F9 (Current): Scheduler-Side Execution Context Prewire
+
+### Bird's Eye View: Why This Is PREWIRE, Not Activation
+
+Prewire = readiness preparation without activation. Scheduler side gains explicit
+readiness/prewire obraz over existing execution surfaces without any real
+`execute_with_limits()` calls or side effects.
+
+**What F9 prewire does:**
+- Rozšiřuje existující `DispatchReadinessPreview` o `ExecutionContextReadiness`
+- Separuje capability / correlation / audit readiness do tří oddělených dimenzí
+- Přidává `blocker_matrix` pro explicitní blocker reasons
+- Připravuje seam pro budoucí F9 cutover bez aktivace
+
+**What F9 prewire does NOT do:**
+- Real `execute_with_limits()` calls from scheduler
+- GhostExecutor migration activation
+- New execution framework
+- New DTO world outside types.py
+- New parallel preview object (používá existující DispatchReadinessPreview)
+
+---
+
+### Execution Context Readiness — Three Separated Dimensions
+
+```
+┌─────────────────────────────────────────────────────────┐
+│         ExecutionContextReadiness (DIAGNOSTIC ONLY)      │
+├─────────────────┬───────────────────┬───────────────────┤
+│ CAPABILITY      │ CORRELATION       │ AUDIT             │
+│ readiness       │ readiness         │ readiness         │
+├─────────────────┼───────────────────┼───────────────────┤
+│ capability_     │ correlation_ready │ audit_ready       │
+│ ready: bool     │ run_id_present    │ exec_logger_note  │
+│ capability_     │ branch_id_present │                   │
+│ missing: List[] │ provider_present  │                   │
+│                 │ action_present    │                   │
+│                 │ correlation_note  │                   │
+└─────────────────┴───────────────────┴───────────────────┘
+         ↓
+All three must be "ready" for canonical execute_with_limits call
+```
+
+---
+
+### Execution Plane Matrix (Updated F9)
+
+| Komponenta | Role | Canonical? | Donor/Compat? | Audit? | Execution Authority? |
+|------------|------|------------|---------------|--------|---------------------|
+| `ToolRegistry` | Execution control + capability enforcement | ✅ **ANO** | ❌ | ❌ | ✅ **ANO** |
+| `GhostExecutor` | Legacy action executor (ActionType-based) | ❌ | ✅ **ANO** | ❌ | ❌ (donor only) |
+| `ToolExecLog` | Hash-chain audit pro tool invocations | ❌ | ❌ | ✅ **ANO** | ❌ |
+| `DispatchReadinessPreview` | Diagnostic dispatch parity preview | ❌ | ❌ | ❌ | ❌ |
+| `ExecutionContextReadiness` | Diagnostic capability/correlation/audit separation | ❌ | ❌ | ❌ | ❌ |
+
+---
+
+### Scheduler-Side Prewire State (Current)
+
+| Dimension | Status | Evidence |
+|-----------|--------|----------|
+| `preview_dispatch_parity()` | ✅ EXISTS | `shadow_pre_decision.py:1792` |
+| `ExecutionContextReadiness` | ✅ ADDED (F9) | `shadow_pre_decision.py:1659` |
+| `build_execution_context_readiness()` | ✅ ADDED (F9) | `shadow_pre_decision.py:1792` |
+| Capability readiness | ✅ Separated | `ExecutionContextReadiness.capability_ready` |
+| Correlation readiness | ✅ Separated | `ExecutionContextReadiness.correlation_ready` |
+| Audit readiness | ✅ Separated | `ExecutionContextReadiness.audit_ready` |
+| Blocker matrix | ✅ ADDED (F9) | `ExecutionContextReadiness.blocker_matrix` |
+| Canonical vs runtime_only | ✅ Separated | `ExecutionContextReadiness.canonical_tool_dispatch` |
+
+---
+
+### Blocker Ledger for Real F9 Cutover
+
+| Blocker | Severity | Status | Notes |
+|---------|----------|--------|-------|
+| **Scheduler guardrail** | GUARDRAIL | ⚠️ FORBIDDEN | Nesahej na scheduler dle CLAUDE.md |
+| **GhostExecutor akce nemají Tool mapping** | HIGH | ⚠️ EXISTUJE | Akce jako deep_read, stealth_harvest nejsou v ToolRegistry |
+| **Žádné real call-sites s available_capabilities** | MEDIUM | ⚠️ EXISTUJE | Všechny používají None-skip |
+| **exec_logger není propojený na scheduler kontext** | MEDIUM | ⚠️ PARTIAL | Korelace předávána přes `_tool_exec_logger` attribute |
+| **ToolExecLog nemá real-time flush** | LOW | ⚠️ EXISTUJE | Batch fsync, ne real-time |
+| **No capability population pro všechny tooly** | MEDIUM | ⚠️ PARTIAL | Reprezentativní tooly mají required_capabilities |
+
+---
+
+### What Scheduler Now Previews
+
+**NEW (F9):** Scheduler nyní umí previewnout:
+
+1. **Capability readiness** — zda `available_capabilities` stačí pro všechny tool candidates
+2. **Correlation readiness** — zda scheduler má `run_id` / `branch_id` pro audit trail
+3. **Audit readiness** — zda je `_tool_exec_logger` dostupný v scheduler kontextu
+4. **Blocker matrix** — explicitní seznam blocker reasons per tool/task_type
+5. **Canonical vs runtime_only** — čistá klasifikace dispatch path
+
+---
+
+### Explicitní Odpovědi (F9 Prewire)
+
+**1. Co je canonical execution-control surface?**
+→ `ToolRegistry.execute_with_limits()` — jediný canonical entry point pro tool execution s enforcementem
+
+**2. Co je donor/compat?**
+→ `GhostExecutor` — ActionType-based akce (SCAN, GOOGLE, DEEP_READ, STEALTH_HARVEST, OSINT_DISCOVERY), NOT canonical
+
+**3. Co je audit boundary?**
+→ `ToolExecLog` — hash-chain audit logging, correlation storage, NE execution authority
+
+**4. Co scheduler nově umí previewnout?**
+→ `ExecutionContextReadiness` s třemi separovanými dimenzemi: capability, correlation, audit
+
+**5. Co pořád chybí před skutečným F9 cutoverem?**
+→ Scheduler guardrail (nedotknutelný), GhostExecutor akce bez Tool mapping, real call-sites s capabilities
+
+---
+
+### Files Changed in Sprint F9 (Current)
+
+| File | Change |
+|------|--------|
+| `runtime/shadow_pre_decision.py` | ADDED: `ExecutionContextReadiness` dataclass, `build_execution_context_readiness()` function, `execution_context` field on `DispatchReadinessPreview` |
+| `runtime/sprint_scheduler.py` | UPDATED: `consume_shadow_pre_decision()` attaches `execution_context` via `build_execution_context_readiness()` |
+| `tests/probe_8se/test_execution_context_prewire.py` | ADDED: 14 tests covering execution context prewire |
+| `TOOL_CAPABILITY_EXECUTION_ENFORCEMENT.md` | ADDED: F9 prewire section, execution-plane matrix update, blocker ledger, scheduler-side prewire state |
+
+---
+
+### Test Coverage (F9 Prewire)
+
+**New tests (`test_execution_context_prewire.py`):**
+
+| Test | Invariant |
+|------|-----------|
+| `test_execution_context_readiness_dataclass` | ExecutionContextReadiness has all fields |
+| `test_execution_context_to_dict` | to_dict() serializes correctly |
+| `test_build_execution_context_readiness_full` | All contexts provided |
+| `test_build_execution_context_readiness_no_correlation` | correlation_context=None |
+| `test_build_execution_context_readiness_partial_correlation` | Partial keys |
+| `test_build_execution_context_readiness_exec_logger` | exec_logger availability |
+| `test_blocker_matrix_populated` | blocker_matrix entries for blocked tools |
+| `test_runtime_only_no_canonical_mapping` | runtime_only handlers get blocker |
+| `test_dispatch_readiness_preview_with_execution_context` | execution_context attached |
+| `test_to_dict_includes_execution_context` | to_dict() includes execution_context |
+| `test_preview_dispatch_parity_execution_context_none_initially` | Initially None |
+| `test_preview_dispatch_parity_integrates_with_execution_context` | Integration works |
+| `test_no_execute_with_limits_in_module` | No execute_with_limits in module |
+| `test_build_execution_context_readiness_is_diagnostic_only` | Diagnostic-only function |

@@ -803,6 +803,21 @@ class UniversalMemoryCoordinator:
             "should_throttle": self.should_throttle()
         }
 
+    def get_reranking_context(self) -> dict:
+        """Reranking context pro lancedb_store adaptive reranking.
+
+        Narrow seam — lancedb_store NEvolá _on_battery_power() přímo.
+        Tato metoda je jediný entry point pro thermal/battery awareness
+        v search_similar_adaptive().
+        """
+        state = self.get_power_state()
+        try:
+            import psutil
+            state["available_gb"] = psutil.virtual_memory().available / (1024**3)
+        except Exception:
+            state["available_gb"] = 8.0
+        return state
+
     def _on_battery_power(self) -> bool:
         """Detekuje běh na baterii – cache s TTL."""
         now = time.time()

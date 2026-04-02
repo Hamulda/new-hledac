@@ -1,526 +1,314 @@
 # Retrieval & Grounding Consumer Map
 
 **Datum**: 2026-04-02
-**Scope**: Consumer-map sprint (Sprint 8VY) — current vs future consumer audit, coupling debt documentation, seam guards
-**Aktualizace**: 2026-04-02 Sprint 8VY — current vs future consumer rozlišení, semantic_store direct coupling analysis, hypothesis_engine jako reference-only, layer_manager jako lazy singleton
+**Scope**: Coupling tightening sprint — thermal/memory policy narrowing, consumer truth, semantic_store classification
+**Aktualizace**: 2026-04-02 Sprint 8VY-2 — thermal coupling zúžen přes `get_reranking_context()`, semantic_store potvrzen jako separate use case
 
 ---
 
-## 1. Ptačí perspektiva: Proč consumer-map sprint, ne retrieval rewrite
+## 1. Ptačí perspektiva: Proč coupling tightening, ne retrieval rewrite
 
-### Aktuální stav (2026-04-02)
+### Kontext
 
-Čtyři retrieval-related moduly v `knowledge/` mají překrývající se názvy, ale rozdílné odpovědnosti:
+Tento sprint nedělá:
+- Retrieval rewrite
+- Nový retrieval framework
+- Nový orchestrator nebo singleton
+- Přesouvání ownership mezi `rag_engine` / `lancedb_store` / `pq_index` / `graph_rag`
 
-| Soubor | Název evokuje | Skutečná role |
-|--------|---------------|---------------|
-| `rag_engine.py` | "RAG engine" → retrieval | Hybrid grounding engine (BM25+HNSW+RAPTOR) |
-| `lancedb_store.py` | "LanceDB store" → vector DB | Identity/entity store pro entity resolution |
-| `pq_index.py` | "PQ index" → vector index | Kompresní vrstva (embedding quantization) |
-| `graph_rag.py` | "GraphRAG" → graph retrieval | Consumer/orchestrator nad knowledge layer |
+Dělá:
+- **Zúžení** nejživějšího coupling debt — `lancedb_store → memory_coordinator` přes `self._orch._memory_mgr`
+- **Přesnou klasifikaci** `semantic_store` direct `lancedb.connect()` jako separate use case
+- **Aktualizaci consumer matrix** — co je CURRENT, REFERENCE-ONLY, FUTURE
+- **Testy** — ověření že role separation drží
 
-**Základní problém**: Názvy jsou misleadující. RAGEngine není "engine pro RAG retrieval" v tom smyslu, že by byl jediná nebo primární retrieval authority. Je to **grounding** engine — pomáhá LLM contextu při generování.
+### Proč to není rewrite
 
-### Proč NE normalizační refactor teď
+Čtyři retrieval-related moduly mají rozdílné, dobře ohraničené odpovědnosti:
 
-1. **RAGEngine je living code** — má aktivní vývoj (Sprint 42: CoreML, RAPTOR, HNSW)
-2. **lancedb_store má HLUBOKÉ embedding optimalizace** — MLXCompiled similarity, binary signatures, writeback buffer, MMR, adaptive reranking. Přesunutí by bylo rizikové
-3. **graph_rag závisí na legacy persistent_layer** — viz deprecation warning v persistent_layer.py řádek 19-21
-4. **Žádný nový retrieval orchestrator** — sprint zakazuje vytvářet novou orchestration vrstvu
-5. **M1 8GB constraint** — jakékoli přesuny kódu mohou mít RAM implikace
+| Soubor | Role | Není |
+|--------|------|------|
+| `rag_engine.py` | Hybrid grounding engine (BM25+HNSW+RAPTOR) | Identity store, entity resolution |
+| `lancedb_store.py` | Identity/entity store (LanceDB `entities` table, MLX 768D) | Document grounding |
+| `pq_index.py` | Compression layer (PQ, 12× úspora) | Primary retrieval |
+| `semantic_store.py` | IOC findings ANN (LanceDB `findings_v1`, FastEmbed 384D) | Identity resolution |
+| `graph_rag.py` | Multi-hop reasoning consumer/orchestrator | Backend storage owner |
 
-### Co tento sprint *je*
-
-- **Authority clarification** — kdo je owner čeho (authority notes v source souborech)
-- **Consumer map** — kdo volá koho a proč
-- **Seam guards** — malé assertions, které zabrání zaměnitelnosti
-- **Coupling documentation** — co je riskantní a proč
-- **Testy** — role separation probes
+Záměr tohoto sprintu: **co nejužší seam pro thermal coupling**, žádná architektonická kosmetika.
 
 ---
 
-## 2. Retrieval Consumer Map
+## 2. Co jsem ověřil v current repo
 
-### CURRENT Consumers (přímo volatelní v runtime)
+### Thermal coupling v lancedb_store
 
-| Consumer | Volá | Backend | Path |
-|----------|------|---------|------|
-| `synthesis_runner.py:384` | `RAGEngine().query()` | RAGEngine přímo | RAG grounding pro synthesis |
-| `synthesis_runner.py:414` | `GraphRAGOrchestrator(PersistentKnowledgeLayer())` | PersistentKnowledgeLayer | GraphRAG multi-hop |
-| `layer_manager.py:847` | `RAGEngine()` lazy singleton přes `.rag` property | RAGEngine | Coordinator lazy init |
-| `enhanced_research.py:1328` | `self.rag = RAGEngine(RAGConfig)` | RAGEngine | Research context augmentation |
-| `semantic_store.py:85` | `lancedb.connect()` | **DIRECT LANCEDB** | IOC findings ANN search |
-| `persistent_layer.py:1050` | `PQIndex().train()/add()` | PQIndex přímo | Embedding compression |
-| `prefetch_oracle.py:22` | `PQIndex()` constructor injection | PQIndex přímo | Ultra-light candidate selection |
+**Původní stav** (lancedb_store.py:1101-1113):
+```python
+# DEBT: Thermal + battery awareness — COUPLING RISK
+thermal = "NORMAL"
+on_battery = False
+try:
+    from hledac.universal.coordinators.memory_coordinator import ThermalState
+    if self._orch and hasattr(self._orch, '_memory_mgr') and self._orch._memory_mgr:
+        thermal = self._orch._memory_mgr.get_thermal_state().name
+        on_battery = self._orch._memory_mgr._on_battery_power()  # ← private method!
+except Exception:
+    pass
+```
 
-### CURRENT Reference-Only (imports, comments, metadata)
+**Problém**: `_on_battery_power()` je **private** (single underscore) — přímý coupling na internals.
+
+**Dále**: `available_gb` se počítal znovu přes `psutil` v Stage 5, odděleně od thermal state.
+
+**Ověřeno**: `MemoryCoordinator.get_power_state()` (řádek 797) vrací `on_battery`, `thermal_state`, `thermal_trend`, `memory_pressure_level`, `should_throttle`.
+
+**Nový stav**:
+```python
+# Narrow seam: get_reranking_context() je jediný entry point
+ctx = {"thermal": "NORMAL", "on_battery": False, "available_gb": 8.0}
+try:
+    if self._orch and hasattr(self._orch, '_memory_mgr') and self._orch._memory_mgr:
+        ctx = self._orch._memory_mgr.get_reranking_context()
+except Exception:
+    pass
+thermal = ctx.get("thermal", "NORMAL")
+on_battery = ctx.get("on_battery", False)
+available_gb = ctx.get("available_gb", 8.0)
+```
+
+**Helper přidán do memory_coordinator.py** — `get_reranking_context()`:
+- Volá `get_power_state()` internally
+- Přidává `available_gb` z `psutil`
+- Jediný entry point pro `lancedb_store` thermal/battery awareness
+- Store stále funguje bez orchestratoru (default values)
+
+### semantic_store direct LanceDB coupling
+
+**Ověřeno** (semantic_store.py:83-100):
+- Přímé `lancedb.connect(str(self._db_path))`
+- Tabulka `findings_v1` (LIASED proti `entities` v `lancedb_store`)
+- Embedding model: `BAAI/bge-small-en-v1.5` (384D FastEmbed) vs `lancedb_store` MLX 768D
+- Žádný coupling na `self._orch._memory_mgr`
+- Žádný shared schema
+
+**Klasifikace**: **Separate use case** — IOC findings ANN, ne entity resolution. Není coupling debt.
+
+---
+
+## 3. Retrieval Consumer Matrix
+
+### CURRENT Consumers (přímo volané v runtime)
+
+| Consumer | Volá | Supplier | Path |
+|----------|------|----------|------|
+| `brain/synthesis_runner.py:387` | `RAGEngine().query()` | rag_engine | RAG grounding pro synthesis (Sprint 8VA B.2) |
+| `brain/synthesis_runner.py:418` | `GraphRAGOrchestrator(PersistentKnowledgeLayer())` | graph_rag | IOC relationship context (Sprint 8VA C.2) |
+| `layers/layer_manager.py:847` | `RAGEngine()` lazy singleton | rag_engine | Coordinator lazy init (dormant — instantiated, no `hybrid_retrieve()` called) |
+| `enhanced_research.py:1328` | `self.rag = RAGEngine(RAGConfig)` | rag_engine | Research context augmentation (config-gated) |
+| `core/__main__.py:313` | `run_semantic_pivot()` CLI | semantic_store | ANN search for IOC findings |
+| `knowledge/duckdb_store.py:949` | `inject_semantic_store()` DI | semantic_store | Sprint 8SB semantic store injection |
+| `knowledge/duckdb_store.py:940` | `self._semantic_store` buffer slot | semantic_store | `_semantic_buffer_findings()` calling `buffer_finding()` |
+| `persistent_layer.py:1050` | `PQIndex().train()/add()` | pq_index | Embedding compression |
+| `prefetch_oracle.py:22` | `PQIndex()` constructor injection | pq_index | Ultra-light candidate selection |
+| `legacy/autonomous_orchestrator.py:5678` | `GraphRAGOrchestrator.add_node()` | graph_rag | Legacy subdomain discovery (NOT in current sprint) |
+| `legacy/autonomous_orchestrator.py:15956` | `GraphRAGOrchestrator.ask_with_reasoning()` | graph_rag | Legacy reasoning queries (NOT in current sprint) |
+
+### CURRENT Reference-Only (imports, comments, metadata — žádné runtime volání)
 
 | Consumer | Evidence | Status |
 |----------|----------|--------|
-| `hypothesis_engine.py:546` | Comment `# Step 8: Generate path explanations (if graph_rag available)` | REFERENCE ONLY — comment guard |
-| `hypothesis_engine.py:1245` | `metadata['scoring_fn'] = 'graph_rag.score_path'` | METADATA ONLY — string value, no runtime call |
-| `duckdb_store.py:942` | `Sprint 8SB: Inject SemanticStore instance` | INFRA ONLY — store creation, not runtime call |
-| `knowledge/assertions.py:22` | `from hledac.universal.knowledge.rag_engine import RAGEngine` | TEST IMPORT ONLY |
+| `hypothesis_engine.py:546` | Comment `# Step 8: Generate path explanations (if graph_rag available)` | REFERENCE ONLY |
+| `hypothesis_engine.py:1245` | `metadata['scoring_fn'] = 'graph_rag.score_path'` | METADATA ONLY |
+| `duckdb_store.py:942` | `Sprint 8SB: Inject SemanticStore instance` | INFRA ONLY |
+| `knowledge/assertions.py:22-23` | `from rag_engine import ...; from lancedb_store import ...` | TEST IMPORT ONLY |
 
-### FUTURE Candidates (planned but not wired)
+### FUTURE Candidates (planned, not wired in current sprint)
 
 | Candidate | Planned For | Evidence | Blocker |
 |-----------|-------------|----------|---------|
-| Planner / ToT integration | Context grounding | `RETRIEVAL_GROUNDING_CONSUMER_MAP.md:361` future owner table | Not yet wired in orchestrator |
-| DeepResearch | Extended grounding | `RETRIEVAL_GROUNDING_CONSUMER_MAP.md:361` future owner table | Not yet wired |
-| Prefetch expansion | Candidate selection | `prefetch_oracle.py` — PQIndex stage A only | Full pipeline not connected |
-| duckdb_store graph traversal | GraphRAG backend migration | `persistent_layer` deprecated | duckdb_store lacks graph traversal API |
+| Planner/ToT integration | Context grounding | `RETRIEVAL_GROUNDING_CONSUMER_MAP.md` | Not yet wired in orchestrator |
+| DeepResearch | Extended grounding | `RETRIEVAL_GROUNDING_CONSUMER_MAP.md` | Not yet wired |
+| LanceDBIdentityStore integration | Entity resolution | Standalone capability, zero active consumers | Needs wiring into sprint lifecycle |
+| duckdb_store graph traversal | GraphRAG backend | `persistent_layer` deprecated | duckdb_store lacks graph traversal API |
 
 ### Internal Module Dependencies
 
 | Module | Volá | Purpose |
 |--------|------|---------|
 | `rag_engine.py:724,733,744` | `infinite_context_engine`, `spr_compressor`, `secure_enclave_manager` | Ultra-context, SPR, SecureEnclave |
-| `rag_engine.py:_embed_text()` | CoreML/MLX per-instance | RAPTOR tree building (Sprint 42) |
+| `rag_engine.py:_embed_text()` | CoreML/MLX per-instance | RAPTOR tree building |
 | `graph_rag.py:_get_embedder()` | `MLXEmbeddingManager` singleton | Path scoring embedder |
 | `lancedb_store.py:_initialize_embedder()` | `MLXEmbeddingManager` singleton | Entity embedding computation |
-| `lancedb_store.py:search_similar_adaptive()` | `self._orch._memory_mgr` | Thermal awareness (OPTIONAL coupling) |
+| `lancedb_store.py:search_similar_adaptive()` | `self._orch._memory_mgr.get_reranking_context()` | **Thermal awareness (NARROW SEAM)** |
 
 ---
 
-## 3. Role potvrzené a zpřesněné
+## 4. Změněné soubory
 
-### `rag_engine.py` = **Grounding Authority** (NOT identity/entity store)
+| Soubor | Změna |
+|--------|-------|
+| `coordinators/memory_coordinator.py` | Přidán `get_reranking_context()` helper (řádek ~809) |
+| `knowledge/lancedb_store.py` | Thermal coupling zúžen přes `get_reranking_context()` místo přímých `get_thermal_state()` a `_on_battery_power()` volání; odstraněn duplicitní `psutil` výpočet v Stage 5 |
+| `knowledge/RETRIEVAL_GROUNDING_CONSUMER_MAP.md` | Aktualizovaná consumer matrix, semantic_store klasifikace, thermal coupling status |
 
-**Přesná definice**:
-- Hybrid retrieval engine pro **context grounding** — kombinuje dense (HNSW) + sparse (BM25) pro augmentaci LLM contextu
-- HNSW Vector Index pro rychlé ANN vyhledávání nad dokumentovými chunky
-- RAPTOR hierarchické summarizace pro multi-level retrieval
-- SPR komprese pro redukci contextu
-- UltraContext Engine pro velké kontexty
-- SecureEnclave pro citlivá data
-
-**Není owner**:
-- ❌ Identity/entity resolution
-- ❌ Embedding cache (to je `lancedb_store`)
-- ❌ Graph storage (to je `persistent_layer` / budoucí `duckdb_store`)
-- ❌ Entity relationship storage
-
-**Přímo voláno z**: `orchestrator.py`
-
-**Embedding Policy (Sprint 8TD)**:
-- **Shared Runtime Anchor**: `MLXEmbeddingManager` singleton (pro fallback)
-- **Intentional Local Cached Engine**: `_fastembed_embedder` (cached `TextEmbedding` instance in `self`)
-  - Proč: `hybrid_retrieve()` a `hybrid_retrieve_with_hnsw()` volají `_generate_embeddings()` per-call
-  - Bez cache by se `TextEmbedding` model načítal při každém volání → memory fragmentation
-  - M1 8GB: cached instance zamezuje repeated model loading
-- **Fallback Path**: `_generate_embeddings()` → FastEmbed cached → MLXEmbeddingManager singleton → hash-based
-- **RAPTOR Internal Helper**: `_embed_text()` používá `_coreml_embedder` / `_mlx_embedder` (per-instance, lazy)
-  - Není to shared anchor — je to interní helper pro RAPTOR tree building
-  - Spadá pod "broad engine" pro RAPTOR, ne pro general retrieval
-
-**M1 Memory Guardrails**:
-- `_fastembed_embedder` je atribut instance, ne global
-- `_generate_embeddings()` volá `asyncio.to_thread(manager.embed_document, text)` pro MLX fallback
-- Žádný eager model load v `__init__`
+**Žádné nové soubory nevznikly.**
 
 ---
 
-### `lancedb_store.py` = **Identity/Entity Store** (NOT grounding authority)
+## 5. Role potvrzené
 
-**Přesná definice**:
-- LanceDB-backed **entity identity store** — ukládá entity (osoby, organizace, URL) s vektorovými embeddingy a aliasy
-- Hybrid search (vector similarity + FTS přes aliasy) pro entity resolution
-- LMDB embedding cache s float16 kvantizací (50% RAM úspora)
-- Binary embeddings (64-bit) pro Hamming-distance rychlý pre-filter
-- MMR (Maximal Marginal Relevance) pro diverzitu výsledků
-- Adaptive reranking — ColBERT (GPU), FlashRank (CPU), MLX fallback
-- MLX-compiled cosine similarity pro batch operace
-- Writeback buffer pro batching embedding writes
-- Thermal-aware index building (spolupracuje s `memory_coordinator` přes `self._orch`)
+### rag_engine.py = **Grounding Authority**
 
-**Není owner**:
-- ❌ Document/content retrieval (to je `rag_engine`)
-- ❌ Grounding context generation
-- ❌ Graph storage
-- ❌ Primary vector search pro dokumenty (to je `rag_engine` přes HNSW)
+- Hybrid retrieval (BM25 + HNSW) pro context augmentation
+- RAPTOR hierarchické summarizace
+- SPR komprese, UltraContext, SecureEnclave
+- **Není**: identity/entity store, primary graph storage
 
-**Přímo voláno z**: `orchestrator.py` (volá `get_identity_store()` singleton), `graph_rag.py` (thermal awareness)
+### lancedb_store.py = **Identity/Entity Store**
 
-**Embedding Policy (Sprint 81 Fáze 4)**:
-- **Shared Runtime Anchor**: `MLXEmbeddingManager` singleton (přes `_mlx_embed_manager`)
-- **Intentional Local Cached Engine**: `_embedder` + `_embedder_type` (tracked per store instance)
-  - Proč: `_embed_batch()` a `_embed_single()` jsou volány z `add_entity()`, `search_similar_adaptive()`
-  - Bez sledování by embedder type byl lost mezi voláními
-  - M1 8GB: embedder je lazy-inited, žádný eager load
-- **Fallback Path**: `MLXEmbeddingManager` → CoreML ANE → numpy_fallback
-- **Consumer Status**: lancedb_store je **consumer** MLXEmbeddingManager, ne owner
+- LanceDB `entities` table, MLX 768D embeddings
+- Hybrid search (vector + FTS přes aliasy)
+- LMDB embedding cache, binary signatures, MMR, adaptive reranking
+- Thermal-aware index building (teď přes úzký seam)
+- **Není**: document grounding, IOC findings
 
-**Thermal Awareness Coupling** (debt):
-- `search_similar_adaptive()` volá `self._orch._memory_mgr` pro thermal/battery state
-- Toto je **volitelný** coupling — store funguje i bez orchestratoru reference
-- Debt: externalizovat thermal policy do samostatné třídy
+### semantic_store.py = **Separate Use Case — IOC Findings ANN**
 
-**Hidden assumptions**:
-- LanceDB table "entities" — schema obsahuje `id`, `embedding`, `aliases`, `first_seen`, `last_seen`
-- Identity resolution je založeno na **alias matching** + **vector similarity** — ne na graph traversalu
-- Embedder inicializace jde přes MLXEmbeddingManager → CoreML → numpy_fallback chain
-- Thermal-aware — při low memory/thermal throttles odloží index build
+- LanceDB `findings_v1` table, FastEmbed 384D
+- Buffered během sprint lifecycle (`buffer_finding()`)
+- Sprint 8SB CLI (`run_semantic_pivot()`)
+- **Není**: entity resolution, identity store
+- **Coupling**: žádný na `self._orch._memory_mgr`
+
+### pq_index.py = **Compression/Acceleration Layer**
+
+- Product Quantization, 768D → 8 bytes (12× úspora)
+- Standalone, train-before-use
+- **Není**: primary retrieval, identity store
+
+### graph_rag.py = **Consumer/Orchestrator**
+
+- Multi-hop reasoning nad `PersistentKnowledgeLayer`
+- Path scoring přes `MLXEmbeddingManager` singleton
+- **Není**: backend storage owner, embedding computation owner
 
 ---
 
-### `pq_index.py` = **Compression/Acceleration Layer** (NOT retrieval authority)
+## 6. Thermal/Memory Coupling — Resolution
 
-**Přesná definice**:
-- Product Quantization (PQ) komprese embeddingů — 768D → 8 bytes per vector (12× úspora)
-- OPQ (Optimized PQ) preprocessing
-- Vrací similarity jako `1/(1+L2)` — konzistentní s HNSW cosine similarity
-- MLX-native implementace
-- Standalone — trénuje se na datech, ne je nevyužívá jako primární index
+### ✅ RESOLVED: lancedb_store → memory_coordinator narrow seam
 
-**Není owner**:
-- ❌ Primární vector retrieval (to je `rag_engine` HNSW)
-- ❌ Identity store
-- ❌ Graph storage
-
-**Hidden assumptions**:
-- Musí být trained před použitím (`train()` → `encode()` → `search()`)
-- `search()` vrací similarity, ne distance — pro konzistenci s HNSW cosine
-- Memory usage estimation je approximate
-
----
-
-### `graph_rag.py` = **Consumer/Orchestrator/Helper** (NOT backend owner)
-
-**Přesná definice**:
-- **Consumer** — pracuje nad `PersistentKnowledgeLayer` (deprecated backend)
-- **Orchestrator** — multi-hop graph traversal, novelty detection, contradiction detection, timeline analysis, narrative building
-- **Helper** — centrality analysis, community detection, key path analysis
-- Path scoring s embeddingy (volá MLXEmbeddingManager singleton)
-
-**Není owner**:
-- ❌ Backend storage (`persistent_layer` je deprecated, ne graph_rag)
-- ❌ Embedding computation (používá MLXEmbeddingManager singleton!)
-- ❌ Primary retrieval
-- ❌ Identity resolution
-
-**Přímo voláno z**: `orchestrator.py` (volá `multi_hop_search()`)
-
-**Embedding Policy (Sprint 81 Fáze 4 — RESOLVED)**:
-- **Shared Runtime Anchor**: `MLXEmbeddingManager` singleton (z `core/mlx_embeddings`)
-- **Intentional Local Cached Engine**: Žádný (graph_rag není embedder owner)
-  - Proč: graph_rag používá embedder pouze pro `score_path()` — jediná operace
-  - Žádné repeated embedding calls — jen path scoring, ne per-doc indexing
-  - M1 8GB: žádný local embedder = žádná memory fragmentation
-- **Fallback Path**: `embed_document()` → exception → `[0.0]*384` (deterministic fallback)
-- **Consumer Status**: graph_rag je **consumer** MLXEmbeddingManager, ne owner
-  - Důkaz: `_get_embedder()` volá `get_embedding_manager()` a nic neukládá permanentně
-- **No Broad Engine**: graph_rag NEVKLÁDÁ RAGEngine pro embedding — používá singleton
-
-**Hidden assumptions**:
-- `knowledge_layer` je instance `PersistentKnowledgeLayer` (deprecated!)
-- Pro embedding volá `MLXEmbeddingManager` singleton (2026-04-02: **DUPLICITNÍ embedder REMOVED**)
-- Volá `knowledge_layer.search()` pro hop-0 semantic search
-- Volá `knowledge_layer.get_related_sync()` pro graph traversal
-- Volá `knowledge_layer._backend.get_node()` přímo na interní backend
-- `_run_async_safe()` — shared thread pool pro sync/async bridging
-
----
-
-## 4. Authority Notes (zdrojové soubory)
-
-### rag_engine.py
-```python
-"""
-ROLE: Grounding Authority (NOT identity/entity store)
-====================================================
-Tento modul je grounding authority pro context augmentation.
-NENÍ owner identity/entity resolution - to je lancedb_store.
-NENÍ owner embedding computation - to je MLXEmbeddingManager singleton.
-"""
-```
-
-### lancedb_store.py
-```python
-"""
-ROLE: Identity/Entity Store (NOT grounding authority)
-=====================================================
-Tento modul je identity/entity store pro entity resolution.
-NENÍ owner context grounding - to je rag_engine.
-NENÍ owner document retrieval - to je rag_engine HNSWVectorIndex.
-"""
-```
-
-### pq_index.py
-```python
-"""
-ROLE: Compression/Acceleration Layer (NOT retrieval authority)
-===========================================================
-- komprimuje embeddingy pomocí Product Quantization (12× úspora)
-- NENÍ owner primary vector retrieval → rag_engine HNSWVectorIndex
-- NENÍ owner identity store → lancedb_store
-"""
-```
-
-### graph_rag.py
-```python
-"""
-ROLE: Consumer/Orchestrator (NOT backend owner)
-============================================
-Tento modul je consumer/orchestrator pro multi-hop reasoning.
-NENÍ owner backend storage → persistent_layer (deprecated!)
-NENÍ owner embedding computation → MLXEmbeddingManager singleton
-NENÍ owner primary retrieval → rag_engine
-"""
-```
-
----
-
-## 5. Seam Guards (malé, stabilní)
-
-| Seam | Loc | Assertion |
-|------|-----|-----------|
-| RAGEngine není identity store | `rag_engine.py` — nemá `add_entity()`, `search_similar()` | ✅ Clean |
-| LanceDB není grounding authority | `lancedb_store.py` — nemá `hybrid_retrieve()`, `HNSWVectorIndex` | ✅ Clean |
-| PQIndex není retrieval authority | `pq_index.py` — nemá `search()` na collection, jen trained index | ✅ Clean |
-| GraphRAG není backend owner | `graph_rag.py` — vše přes `knowledge_layer` consumer API | ✅ Clean |
-| semantic_store není LanceDBIdentityStore | `semantic_store.py:85` — přímý `lancedb.connect()`, oddělené use case | ⚠️ DIFF USE CASE — semantic pro IOC findings, identity pro entity resolution |
-
----
-
-## 6. Coupling Risks
-
-### ✅ RESOLVED: `graph_rag.py` používá sdílený `MLXEmbeddingManager`
-
-**Lokace**: `graph_rag.py:105-126` (`_get_embedder()`)
+**Lokace**: `lancedb_store.py:1101-1111`
 
 **Před**:
 ```python
-from hledac.universal.knowledge.rag_engine import RAGEngine
-self._embedder = RAGEngine()  # DUPLICITNÍ embedder!
+thermal = self._orch._memory_mgr.get_thermal_state().name  # volá private method
+on_battery = self._orch._memory_mgr._on_battery_power()
+# available_gb počítán odděleně přes psutil v Stage 5
 ```
 
-**Po** (2026-04-02):
+**Po**:
 ```python
-from hledac.universal.core.mlx_embeddings import get_embedding_manager
-self._embedder = get_embedding_manager()  # Sdílený singleton
+ctx = self._orch._memory_mgr.get_reranking_context()
+thermal = ctx["thermal"]
+on_battery = ctx["on_battery"]
+available_gb = ctx["available_gb"]
 ```
 
-**Co bylo opraveno**:
-- `graph_rag` již nevytváří vlastní `RAGEngine()` instanci
-- Používá `MLXEmbeddingManager` singleton z `core/mlx_embeddings.py`
-- M1 8GB memory convergence: žádné duplikátní embedder alokace
-
-**Stav**: ✅ Fixed
-
----
-
-### ✅ RESOLVED: `rag_engine.py` cachuje `TextEmbedding` instanci
-
-**Lokace**: `rag_engine.py:926-969` (`_generate_embeddings()`)
-
-**Co bylo opraveno**:
-- `TextEmbedding` instance se již nevytváří při každém volání `_generate_embeddings()`
-- M1 8GB memory convergence: žádná repeated model loading fragmentation
-- Fallback na `MLXEmbeddingManager` singleton pokud FastEmbed unavailable
-
-**Stav**: ✅ Fixed
-
----
-
-### ✅ RESOLVED: `lancedb_store.py` používá `MLXEmbeddingManager` singleton
-
-**Lokace**: `lancedb_store.py:197-229` (`_initialize_embedder()`)
-
-**Co bylo opraveno**:
-- `_embedder` je inicializován přes `get_embedding_manager()` singleton
-- Žádný nový embedder owner — pouze consumer relationship
-
-**Stav**: ✅ Fixed
-
----
-
-### 🟠 MEDIUM: `lancedb_store.py` couple na `memory_coordinator` přes `self._orch`
-
-**Lokace**: `lancedb_store.py:1101-1106`
+**Helper** (`memory_coordinator.py:809`):
 ```python
-# DEBT: Thermal + battery awareness — COUPLING RISK
-# lancedb_store volá self._orch._memory_mgr přímo.
-# Toto je OPTIONAL coupling - store funguje i bez orchestratoru.
-# Debt: externalizovat thermal policy do samostatné třídy.
+def get_reranking_context(self) -> dict:
+    state = self.get_power_state()
+    state["available_gb"] = psutil.virtual_memory().available / (1024**3)
+    return state
 ```
 
-**Problém**:
-- `LanceDBIdentityStore` má **volitelný** `orchestrator` reference (konstruktor parametr)
-- Pokud je předán, store aktivně čte thermal state
-- To znamená, že store **není plně izolovaný** — závisí na existenci a struktuře orchestratoru
-- Memory pressure decision v `ensure_index()` závisí na `psutil` přímo, ne přes orchestrator
-
-**Co je OK**:
-- Thermal awareness je **optional enhancement** — store funguje i bez orchestratoru
-- `health_check()` a `shutdown()` nemají coupling
-- Writeback buffer funguje nezávisle
-
-**Co zůstává jako debt**:
-- Thermal-aware decisions by měly být externalizovány do policy třídy
-- V současnosti je coupling jen v `search_similar_adaptive()` — ostatní path jsou čisté
+**Co bylo zúženo**:
+- Přímé volání `get_thermal_state().name` a `_on_battery_power()` nahrazeno jedním voláním `get_reranking_context()`
+- `available_gb` už není počítán dvakrát (poprvé v context, podruhé v Stage 5)
+- Seam je úzký — jedna metoda, jeden entry point
+- Store stále funguje bez orchestratoru (default values)
 
 ---
 
-### 🟡 MEDIUM: `rag_engine.py` legacy imports
+## 7. Semantic Store Classification
 
-**Lokace**: `rag_engine.py:724, 733, 744`
-```python
-from hledac.ultra_context.infinite_context_engine import InfiniteContextEngine
-from hledac.ultra_context.spr_compressor import SPRCompressor
-from hledac.ultra_context.secure_enclave_manager import SecureEnclaveManager
-```
+### ✅ CONFIRMED: Separate Use Case
 
-**Problém**:
-- RAGEngine importuje z `hledac.ultra_context` — to je oddělený module
-- Pokud `ultra_context` modul má jiné dependencies nebo memory profily, RAGEngine to implicitně přenáší
-- Žádný jasný seam — ultra_context by měl mít vlastní memory budget
+**semantic_store** a **lancedb_store** jsou oddělené use cases:
 
-**Co je OK**:
-- Všechny imports jsou lazy (`await _init_*()`) — nepřidávají OKAMŽITOU memory zátěž
-- Fallback to warning pokud import selže
+| Aspekt | semantic_store | lancedb_store |
+|--------|----------------|---------------|
+| LanceDB table | `findings_v1` | `entities` |
+| Embedding model | FastEmbed 384D (`BAAI/bge-small-en-v1.5`) | MLX 768D |
+| Účel | IOC findings ANN | Entity resolution |
+| Lifecycle | Buffered během sprintu | Persistentní |
+| Thermal coupling | Žádný | Přes `get_reranking_context()` |
+| Consumer | `duckdb_store` (DI), `__main__.py` CLI | Standalone (zero active consumers) |
 
----
-
-### 🟡 MEDIUM: `semantic_store.py` direct LanceDB backend coupling
-
-**Lokace**: `knowledge/semantic_store.py:85`
-```python
-self._db = lancedb.connect(str(self._db_path))
-```
-
-**Problém**:
-- `SemanticStore` volá `lancedb.connect()` přímo, ne přes `LanceDBIdentityStore`
-- Oddělené use case: semantic_store = IOC findings ANN (384D FastEmbed), identity_store = entity resolution
-- Ale coupling risk: oba drží LanceDB connection, potential table/schema conflicts
-
-**Co je OK**:
-- `semantic_store` a `LanceDBIdentityStore` používají různé table names (`findings_v1` vs `entities`)
-- Různé embedding modely (FastEmbed 384D vs MLX 768D)
-- Žádný shared schema — čistě oddělené use cases
-
-**Coupling debt** (nízká priorita):
-- Doc: explicitně uvést, že semantic_store a identity_store jsou oddělené use cases
-- Seam: pokud by se někdy měly sjednotit, jít přes LanceDBIdentityStore interface
-- M1 8GB: dvě LanceDB instance = ~50MB RAM, acceptable
+**Závěr**: `semantic_store` direct `lancedb.connect()` není coupling debt — je to legitimní oddělený LanceDB use case se samostatným tabelem/schema/modelem.
 
 ---
 
-## 7. Future owners (až přijde čas)
+## 8. Seam Guards
 
-### Pro Planner / DeepResearch integraci
-
-| Komponenta | Future Owner | Připravenost |
-|------------|--------------|--------------|
-| Context grounding | `RAGEngine` (už owner) | ✅ Ready |
-| Entity identity | `LanceDBIdentityStore` (už owner) | ✅ Ready |
-| Embedding computation | `MLXEmbeddingManager` singleton | ⚠️ Sprint 81 — potřebuje merge |
-| Graph traversal | `duckdb_store` graph API | ⚠️ Deprecated `persistent_layer` — potřebuje migraci |
-| Compression layer | `PQIndex` (už standalone) | ✅ Ready |
-
-### Co by bylo příliš brzký refactor
-
-1. **Sloučení RAGEngine + LanceDBIdentityStore** — oba mají oddělené use cases (grounding vs identity)
-2. **Přesun PQIndex do rag_engine** — PQIndex je compression tool, ne retrieval authority
-3. **GraphRAG → duckdb_store migrace** — `persistent_layer` je deprecated, ale duckdb_store nemá ekvivalentní graph traversal API
-4. **RAGEngine → MLXEmbeddingManager** — vlastní embedder v RAGEngine má CoreML/MLX specific logic (Sprint 42)
+| Seam | Loc | Assertion |
+|------|-----|-----------|
+| RAGEngine není identity store | `rag_engine.py` | Nemá `add_entity()`, `search_similar()` ✅ |
+| LanceDB není grounding authority | `lancedb_store.py` | Nemá `hybrid_retrieve()`, `HNSWVectorIndex` ✅ |
+| PQIndex není retrieval authority | `pq_index.py` | Nemá collection `search()` ✅ |
+| GraphRAG není backend owner | `graph_rag.py` | Vše přes `knowledge_layer` consumer API ✅ |
+| semantic_store není identity store | `semantic_store.py:85` | Oddělené table/model — **separate use case** ✅ |
 
 ---
 
-## 8. Sprint Souhrn změn
+## 9. Retrieval Debt (po tomto sprintu)
 
-### Změny (2026-04-02)
+| Debt | Status | Blocker |
+|------|--------|---------|
+| LanceDBIdentityStore — zero active consumers | **OPEN** | Dormant capability, needs integration wiring when entity resolution is planned |
+| duckdb_store graph traversal API | **OPEN** | `persistent_layer` deprecated, duckdb_store nemá ekvivalentní API |
+| RAGEngine — instantiated but `hybrid_retrieve()` uncalled in current sprint pipeline | **OPEN** | Dormant unless `enable_rag=True` in config |
+| graph_rag — legacy autonomous_orchestrator only | **OPEN** | Not in current sprint orchestration |
 
-1. **`knowledge/rag_engine.py`** — přidána ROLE authority note v docstringu
-2. **`knowledge/lancedb_store.py`** — přidána ROLE authority note v docstringu + seam guard comment pro thermal coupling
-3. **`knowledge/pq_index.py`** — přidána ROLE authority note v docstringu
-4. **`knowledge/graph_rag.py`** — přidána ROLE authority note v docstringu (class-level)
-5. **`knowledge/RETRIEVAL_GROUNDING_CONSUMER_MAP.md`** — aktualizovaná consumer map, authority notes, coupling risks
-
-### Žádné nové soubory
-- Nevznikl žádný nový singleton
-- Nevznikl žádný nový orchestrator
-- Nevznikl žádný nový broad engine
-- Nevznikl žádný eager model load
-- Retrieval plane zůstává M1-friendly a memory-predictable
+**NOTOPEN — CLOSED this sprint**:
+- `lancedb_store → memory_coordinator` thermal coupling: ✅ Zúžen na `get_reranking_context()` narrow seam
+- `semantic_store` direct LanceDB: ✅ Potvrzen jako separate use case
 
 ---
 
-## 9. Odpovědi na klíčové otázky
+## 10. Odpovědi na klíčové otázky sprintu
 
-### Kdo je SHARED RUNTIME ANCHOR?
-**`core/mlx_embeddings.py` — `MLXEmbeddingManager` singleton**
-- Jediný true singleton pro embedding computation napříč retrieval plane
-- Používaný jako fallback z rag_engine i jako primární z lancedb_store
-- Není vytvářen žádnou další komponentou — pouze sdílen
+### Kdo je grounding authority?
+**`knowledge/rag_engine.py`** — Hybrid grounding engine (BM25+HNSW) pro context augmentation LLM.
 
-### Kde je INTENTIONAL LOCAL CACHED ENGINE?
-1. **RAGEngine: `_fastembed_embedder`**
-   - Proč: `hybrid_retrieve()` / `hybrid_retrieve_with_hnsw()` volají `_generate_embeddings()` per-call
-   - Bez cache by se FastEmbed model načítal při každém volání → memory fragmentation
-   - Lokace: `rag_engine.py:934-940` (cached v `self`)
+### Kdo je identity/entity store?
+**`knowledge/lancedb_store.py`** — LanceDB-backed identity store s `entities` table, MLX 768D embeddings, hybrid vector+FTS search.
 
-2. **lancedb_store: `_embedder` + `_embedder_type`**
-   - Proč: sledování typu embedderu mezi volání `_embed_batch()` / `_embed_single()`
-   - Lokace: `lancedb_store.py:127-131` (instance proměnné)
+### Jak je řešen thermal/memory coupling?
+**Narrow seam přes `MemoryManager.get_reranking_context()`** — jediný entry point. `lancedb_store` volá `self._orch._memory_mgr.get_reranking_context()`, ne přímé `get_thermal_state()` a `_on_battery_power()`. Store funguje i bez orchestratoru (default values: NORMAL, False, 8.0GB).
 
-### Kde je FALLBACK PATH?
+### Jak je klasifikovaný semantic_store?
+**Separate use case** — IOC findings ANN s vlastní `findings_v1` table a FastEmbed 384D modelem. Není coupling debt — je to legitimní oddělený LanceDB use case.
 
-**RAGEngine._generate_embeddings():**
-```
-FastEmbed cached (_fastembed_embedder)
-    → MLXEmbeddingManager singleton (get_embedding_manager())
-    → hash-based deterministic [random.Random(hash(t)).random()...]
-```
-
-**lancedb_store._initialize_embedder():**
-```
-MLXEmbeddingManager (get_embedding_manager())
-    → CoreML ANE (ct.models.MLModel)
-    → numpy_fallback (random normalized)
-```
-
-**graph_rag.score_path():**
-```
-MLXEmbeddingManager.embed_document()
-    → exception → [0.0]*384 (deterministic fallback)
-```
-
-### Které couplingy jsou nejnebezpečnější?
-1. **✅ RESOLVED: graph_rag → MLXEmbeddingManager singleton** — duplicate embedder allocation removed
-2. **🟠 lancedb_store → memory_coordinator přes self._orch** — optional coupling, store still functional without it
-3. **🟡 rag_engine → ultra_context imports** — implicit dependency transfer
-
-### Co zůstává RETRIEVAL DEBT?
-1. **Thermal-aware policy externalization** — lancedb_store volá `self._orch._memory_mgr` přímo
-2. **duckdb_store graph traversal API** — nahradí deprecated persistent_layer v graph_rag
-3. **RAGEngine RAPTOR embed_text()** — používá per-instance CoreML/MLX embedder (není shared anchor, ale není to ani problém — jen pro RAPTOR tree building)
+### Co zůstává retrieval debt?
+1. **LanceDBIdentityStore dormant** — zero active consumers, capability ready but unwired
+2. **duckdb_store graph traversal** — blocked by deprecated `persistent_layer`, duckdb_store lacks API
+3. **RAGEngine uncalled** — instantiated but `hybrid_retrieve()` not in current pipeline (config-gated)
+4. **graph_rag legacy** — all consumers in `legacy/autonomous_orchestrator.py`, not current sprint
 
 ---
 
-## 10. Další krok pro F8 / F11
-
-### F8: duckdb_store graph traversal API
-**Blocker**: `persistent_layer` je deprecated, ale `duckdb_store` nemá ekvivalentní graph traversal API
-**Akce**: Přidat graph traversal methods do `duckdb_store` BEFORE graph_rag migrace
-**Scope**: Malé, inkrementální — žádný big-bang refactor
-
-### F11: Thermal-aware policy externalization
-**Blocker**: lancedb_store volá `self._orch._memory_mgr` přímo
-**Akce**: Vytvořit samostatnou `ThermalPolicy` třídu v `coordinators/`
-**Scope**: Malé, izolované — žádný coupling s store internals
-
----
-
-## 11. Testy (role separation probes)
+## 11. Testy
 
 ```
 tests/test_retrieval_role_separation.py
+tests/probe_8vy/test_retrieval_consumer_separation.py
 ```
 
-Testy ověřující:
-- `rag_engine` NENÍ identity store (nemá `add_entity`, `search_similar`)
-- `lancedb_store` NENÍ grounding authority (nemá `hybrid_retrieve`, `HNSWVectorIndex`)
-- `pq_index` NENÍ retrieval authority (nemá collection `search()`)
-- `graph_rag` NENÍ backend owner (vše přes `knowledge_layer` consumer API)
-- Embedding ownership: graph_rag používá singleton, ne vlastní engine
+### Nové testy pro tento sprint (přidat do `tests/probe_8vy/`):
+
+1. **`test_reranking_context_narrow_seam`** — ověří že `lancedb_store` volá `get_reranking_context()`, ne přímé `get_thermal_state()` / `_on_battery_power()`
+2. **`test_semantic_store_separate_use_case`** — ověří že semantic_store a lancedb_store používají různé table names a modely
+3. **`test_memory_coordinator_get_reranking_context`** — ověří že helper vrací správné klíče včetně `available_gb`
+4. **`test_lancedb_store_default_without_orchestrator`** — ověří že store funguje s default hodnotami bez orchestratoru
