@@ -39,12 +39,12 @@ async def export_sprint(
       - ExportHandoff.top_nodes — kanonický zdroj pro seed generation
       - ExportHandoff.scorecard — kanonický zdroj pro JSON report
 
-    ACCEPTED COMPAT SEAM — graph fallback:
-      - Pokud top_nodes prázdné (windup běžel ale neplnil top_graph_nodes),
-        zkusí store._ioc_graph.get_top_nodes_by_degree(n=5)
-      - REMOVAL CONDITION: duckdb_store.get_top_seed_nodes() pokrývá všechny
-        export use cases. Dokud neexistuje, fallback zůstává.
-      - Future owner: duckdb_store.get_top_seed_nodes()
+    ACCEPTED COMPAT SEAM — store-facing fallback:
+      - Pokud top_nodes prázdné (windup běžel ale neplnil ExportHandoff.top_nodes),
+        zkusí store.get_top_seed_nodes(n=5) — store-facing seam (post-8VX).
+      - REMOVAL CONDITION: ExportHandoff.top_nodes always populated in ALL windup paths.
+      - Future owner: duckdb_store.get_top_seed_nodes() — already implemented, this
+        fallback is the compat bridge pending windup engine producing typed ExportHandoff.
     """
     from paths import SPRINT_STORE_ROOT
     from export.COMPAT_HANDOFF import ensure_export_handoff
@@ -74,10 +74,10 @@ async def export_sprint(
         report_path = None
 
     # 2. Seed tasky pro příští sprint — top_nodes z ExportHandoff (typed)
-    # COMPAT SEAM: windup_engine.run_windup() získal top_graph_nodes z
-    # scheduler._ioc_graph.get_top_nodes_by_degree(n=10) a uložil do scorecard.
-    # ExportHandoff.from_windup() extrahuje top_graph_nodes → top_nodes.
-    # Tím pádem export nepotřebuje přístup ke scheduler._ioc_graph přímo.
+    # COMPAT SEAM (pre-8VZ): windup_engine wrote top_graph_nodes to scorecard dict.
+    # Post-8VZ: __main__._print_scorecard_report() sources top_nodes directly from
+    # store.get_top_seed_nodes() and passes them to ExportHandoff(...) constructor.
+    # Export does NOT access scheduler._ioc_graph — store-facing seam only.
     top_nodes = eh.top_nodes if eh.top_nodes else []
 
     # COMPAT BRIDGE: If top_nodes still empty (e.g. _windup_synthesis()
@@ -109,12 +109,13 @@ def _generate_next_sprint_seeds(
     """
     Generuje PivotTask seed JSON pro příští sprint.
 
-    Zdroj: top IOC nodes z windup phase scorecard (windup_engine.run_windup()
-    získal data z scheduler._ioc_graph.get_top_nodes_by_degree()).
+    Zdroj: top_nodes z ExportHandoff.top_nodes (kanonicky post-8VZ).
+    Fallback: store.get_top_seed_nodes() — store-facing seam (post-8VX).
 
-    COMPAT SEAM — future owner: duckdb_store.get_top_seed_nodes()
-    Removal condition: export_sprint() převezme store param a volá
-    store.get_top_seed_nodes() přímo; top_nodes pak půjde z ExportHandoff.top_nodes
+    Post-8VZ canonical path:
+      __main__._print_scorecard_report() → store.get_top_seed_nodes(n=10)
+        → ExportHandoff(top_nodes=...) → export_sprint() → _generate_next_sprint_seeds()
+    Žádný přístup k scheduler._ioc_graph internals.
 
     Každý top IOC generuje 3 follow-up tasky:
       - rdap_lookup (nejvyšší priorita)

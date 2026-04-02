@@ -1183,15 +1183,16 @@ Důsledek:
 
 Toto je existing behavior (před F7) — ne nový problém. F7 toto označuje jako **TRUTH-WRITE GAP** (viz sekce 5).
 
+**F7 CLOSURE (Sprint 8F7):** `_truth_write_graph` je nyní injectovaný v WINDUP bloku `__main__.py` současně s `_stix_graph`. Aktivní path: WINDUP blok → `inject_truth_write_graph(ioc_graph)` → `_truth_write_graph` slot je osazen → `truth_write_graph_supports_buffered_writes()` → `True` → `_graph_ingest_findings()` je volán z `async_ingest_findings_batch()` (stále v WINDUP kontextu, ne ACTIVE).
+
 ### 5. Debt sekce — F7 aktualizace
 
-**[F7-DEBT-1] TRUTH-WRITE GAP: `_truth_write_graph` nikdy není injectovaný v ACTIVE**
+**[F7-DEBT-1] TRUTH-WRITE GAP → CLOSED (Sprint 8F7)**
 
-- Scope: ACTIVE fáze — `async_ingest_findings_batch` trigger → `_graph_ingest_findings()`
-- Root cause: `inject_truth_write_graph()` existuje ale nikdy se nevolá
-- Impact: buffered IOC writes jsou no-op, dokud store nemá injected IOCGraph
-- Resolution: patří do dalšího sprintu (F-sprint focused na ACTIVE-phase graph wiring)
-- Status: **EXISTING BEHAVIOR, not new bug**
+- Scope: WINDUP blok `__main__.py` — `inject_truth_write_graph(ioc_graph)` nyní volán
+- Root cause (before): `inject_truth_write_graph()` existovala ale nikdy se nevolala
+- Fix: WINDUP blok nyní injectuje IOCGraph do obou slotů (`inject_stix_graph` + `inject_truth_write_graph`)
+- Status: **CLOSED** — truth-write slot je osazený, `_graph_ingest_findings()` je aktivní
 
 **[DEBT-3] duckdb_store._ioc_graph schizofrenie → RESOLVED (Sprint 8WA)**
 - Tri-slot architecture: `_truth_write_graph`, `_ioc_graph`, `_stix_graph` — plně oddělené
@@ -1220,26 +1221,38 @@ Active runtime path (`__main__._windup_synthesis()`) je plně nezávislá na `wi
 
 ### 7. Změny provedené ve F7
 
-Žádné produkční soubory nebyly změněny. F7 je čistě dokumentační + testovací sprint.
+**Produkční změna:**
+- `__main__.py` WINDUP blok: přidán `store_instance.inject_truth_write_graph(ioc_graph)` hned po `inject_stix_graph(ioc_graph)`. Stejná IOCGraph instance je nyní injectovaná do obou slotů.
 
-### 8. Testy přidány ve F7
+**Testovací změna:**
+- `tests/probe_8f7/test_graph_capability_closure.py`: aktualizován `TestF7TruthWriteGap` — `test_inject_truth_write_graph_not_called_in_main` → `test_inject_truth_write_graph_is_called_in_main`
+
+### 8. Testy — F7 stav
 
 ```
-tests/probe_8f7/test_graph_capability_closure.py — NOVÝ
-  F7.1: IOCGraph = GraphTruthStore (authority label v docstringu)
-  F7.2: DuckPGQGraph = GraphAnalyticsProvider (authority label v docstringu)
-  F7.3: DuckDBShadowStore is NOT graph authority (store seams are adapters only)
-  F7.4: Three slots are independent (_truth_write_graph ≠ _ioc_graph ≠ _stix_graph)
-  F7.5: No generic get_graph() introduced
-  F7.6: inject_truth_write_graph never called in production (TRUTH-WRITE GAP)
-  F7.7: windup_engine.run_windup is DORMANT (never called from __main__)
-  F7.8: Active _windup_synthesis uses store seams (not scheduler private fields)
-  F7.9: Capability matrix: IOCGraph has STIX, DuckPGQGraph does not
-  F7.10: Capability matrix: IOCGraph has buffered writes, DuckPGQGraph does not
+tests/probe_8f7/test_graph_capability_closure.py
+  F7.1: IOCGraph = GraphTruthStore (authority label v docstringu) ✅
+  F7.2: DuckPGQGraph = GraphAnalyticsProvider (authority label v docstringu) ✅
+  F7.3: DuckDBShadowStore is NOT graph authority (store seams are adapters only) ✅
+  F7.4: Three slots are independent (_truth_write_graph ≠ _ioc_graph ≠ _stix_graph) ✅
+  F7.5: No generic get_graph() introduced ✅
+  F7.6: inject_truth_write_graph IS called in production — F7 wiring CLOSED ✅
+  F7.7: windup_engine.run_windup is DORMANT (never called from __main__) ✅
+  F7.8: Active _windup_synthesis uses store seams (not scheduler private fields) ✅
+  F7.9: Capability matrix: IOCGraph has STIX, DuckPGQGraph does not ✅
+  F7.10: Capability matrix: IOCGraph has buffered writes, DuckPGQGraph does not ✅
+
+tests/probe_8wa/test_truth_write_graph_slot.py
+  Tri-slot independence (truth ≠ ioc ≠ stix) ✅
+  inject_truth_write_graph sets/cets slot ✅
+  truth_write_graph_supports_buffered_writes() check ✅
+  aclose flushes truth_write_graph separately ✅
+
+48 tests passed
 ```
 
-### 9. Co zůstává pro další sprinty
+### 9. Co zůstává po F7
 
-1. **F-sprint: ACTIVE-phase truth-write graph wiring** — inject `IOCGraph` do `_truth_write_graph` během ACTIVE fáze, aby buffered writes fungovaly
-2. **F-sprint: `get_top_graph_nodes()` na store** — stále chybí, export bere z scorecard
-3. **F-sprint: Scheduler cutover** — `scheduler._ioc_graph` zůstává DuckPGQGraph path
+1. **`get_top_graph_nodes()` na store** — stále chybí; export bere z scorecard přes existující `get_top_seed_nodes(n=5)`
+2. **IOC data in ACTIVE phase** — buffered writes flow do `_graph_ingest_findings()` triggeru, ale `_truth_write_graph` je osazen až ve WINDUP. ACTIVE fáze stále zapisuje pouze do LMDB/DuckDB. Plné ACTIVE-phase graph wiring by vyžadovalo vytvoření IOCGraph instance v ACTIVE a inject ji tam — to je samostatný sprint.
+3. **Schematická poznámka:** `inject_truth_write_graph` i `inject_stix_graph` nyní sdílejí stejnou IOCGraph instanci. Obě role (truth-write pro buffered writes, STIX pro export) jsou oddělené koncepčně, ale backendově stejný Kuzu graph. Toto je conscious trade-off, ne bug.

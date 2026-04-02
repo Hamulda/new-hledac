@@ -1019,7 +1019,7 @@ Stále přísně platí:
 | Soubor | Změna |
 |--------|--------|
 | `runtime/shadow_inputs.py` | Přidán `ProviderRuntimeFactsBundle` dataclass a `collect_provider_runtime_facts()` funkce |
-| `runtime/shadow_pre_decision.py` | Přidány `runtime_loaded`, `runtime_current_model`, `runtime_initialized` do `ProviderReadinessPreview`; rozšířena `compose_pre_decision()` o `runtime_facts` parametr; aktualizovány všechny `ProviderReadinessPreview` konstruktory |
-| `runtime/sprint_scheduler.py` | Přidán `collect_provider_runtime_facts` import; volá se v `consume_shadow_pre_decision()` a předává do `compose_pre_decision()` |
+| `runtime/shadow_pre_decision.py` | Přidány `runtime_loaded`, `runtime_current_model`, `runtime_initialized` do `ProviderReadinessPreview`; rozšířena `compose_pre_decision()` o `runtime_facts` parametr; aktualizovány všechny `ProviderReadinessPreview` konstruktory; `PreDecisionSummary.to_dict()` serializuje `runtime_facts` |
+| `runtime/sprint_scheduler.py` | `consume_shadow_pre_decision()` nyní volá `get_model_lifecycle_status()` a předává `lifecycle_status` do `collect_provider_runtime_facts()` — COMPAT path místo UNKNOWN |
 | `SHADOW_SCHEDULER_PARITY.md` | Přidána F3.13 sekce |
-| `tests/probe_8vm/test_shadow_consumer_seam.py` | Přidány testy pro `TestProviderRuntimeFactsBundle` a `TestProviderRuntimeFactsIntegration` |
+| `tests/probe_8vm/test_shadow_consumer_seam.py` | Přidány testy pro `TestProviderRuntimeFactsBundle` a `TestProviderRuntimeFactsIntegration` včetně `to_dict()` serializace a COMPAT/UNKNOWN stability |

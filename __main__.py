@@ -2525,7 +2525,10 @@ async def _run_sprint_mode(
                 await ioc_graph.initialize()
                 # Sprint 8VQ: Dedicated STIX-only slot — independent of analytics graph
                 store_instance.inject_stix_graph(ioc_graph)
-                logger.info("[SPRINT 8VQ] IOCGraph truth-store created and injected for STIX")
+                # Sprint 8WA/F7: Also wire truth-write slot — enables ACTIVE-phase buffered
+                # IOC writes via _graph_ingest_findings(). Without this, truth-write is no-op.
+                store_instance.inject_truth_write_graph(ioc_graph)
+                logger.info("[SPRINT 8VQ/8WA] IOCGraph injected: stix_graph + truth_write_graph")
             except Exception as e:
                 logger.warning(f"[SPRINT 8VQ] IOCGraph init failed (STIX unavailable): {e}")
 

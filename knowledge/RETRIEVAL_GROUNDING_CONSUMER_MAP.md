@@ -1,8 +1,8 @@
 # Retrieval & Grounding Consumer Map
 
 **Datum**: 2026-04-02
-**Scope**: Consumer-map sprint — authority clarification, seam guards, embedding policy documentation
-**Aktualizace**: 2026-04-02 — authority notes v source souborech, seam guard pro thermal coupling, nové testy
+**Scope**: Consumer-map sprint (Sprint 8VY) — current vs future consumer audit, coupling debt documentation, seam guards
+**Aktualizace**: 2026-04-02 Sprint 8VY — current vs future consumer rozlišení, semantic_store direct coupling analysis, hypothesis_engine jako reference-only, layer_manager jako lazy singleton
 
 ---
 
@@ -41,20 +41,45 @@
 
 ## 2. Retrieval Consumer Map
 
-### Consumer → Provider → Owner
+### CURRENT Consumers (přímo volatelní v runtime)
 
-| Consumer | Co potřebuje | Current Provider | Correct Future Owner | Mismatch / Risk | Blocker |
-|----------|--------------|------------------|---------------------|-----------------|---------|
-| `orchestrator.py` (SprintScheduler) | Context grounding pro LLM | `RAGEngine.hybrid_retrieve()` | `RAGEngine` (už správně) | Žádný — přímá cesta | Žádný |
-| `graph_rag.py` → `_get_embedder()` | Embedding pro path scoring | **`get_embedding_manager()` singleton** ✅ | `MLXEmbeddingManager` | Žádný | Žádný |
-| `lancedb_store.py` → `add_entity()` | Identity resolution | `LanceDBIdentityStore` | `LanceDBIdentityStore` (správně) | Žádný | Žádný |
-| `lancedb_store.py` → `_initialize_embedder()` | Embedding computation | `MLXEmbeddingManager` singleton ✅ | `MLXEmbeddingManager` | Žádný | Žádný |
-| `lancedb_store.py` → `search_similar_adaptive()` | Thermal awareness | `memory_coordinator.py` přes `self._orch` | Závislost na orchestrator | **Coupling risk** — store závisí na orchestrator | Refactor thermal awareness mimo orch |
-| `graph_rag.py` → `multi_hop_search()` | Knowledge graph traversal | `PersistentKnowledgeLayer` (deprecated) | `duckdb_store` (future) | **Legacy coupling** — graph_rag používá deprecated API | duckdb_store graph traversal API |
-| `rag_engine.py` → `UltraContext` | Infinite context | `infinite_context_engine` import na řádku 724 | Stejně | Žádný | Žádný |
-| `rag_engine.py` → `SPRCompressor` | Semantic compression | `spr_compressor` import na řádku 733 | Stejně | Žádný | Žádný |
-| `rag_engine.py` → `SecureEnclave` | Secure processing | `secure_enclave_manager` import na řádku 744 | Stejně | Žádný | Žádný |
-| `rag_engine.py` → `_embed_text()` | CoreML/MLX embedder (RAPTOR) | `ModernBERTEmbedder` + coremltools | `_generate_embeddings()` pro hybrid_retrieve | RAPTOR používá vlastní CoreML path | Sprint 42 legacy — není urgentní |
+| Consumer | Volá | Backend | Path |
+|----------|------|---------|------|
+| `synthesis_runner.py:384` | `RAGEngine().query()` | RAGEngine přímo | RAG grounding pro synthesis |
+| `synthesis_runner.py:414` | `GraphRAGOrchestrator(PersistentKnowledgeLayer())` | PersistentKnowledgeLayer | GraphRAG multi-hop |
+| `layer_manager.py:847` | `RAGEngine()` lazy singleton přes `.rag` property | RAGEngine | Coordinator lazy init |
+| `enhanced_research.py:1328` | `self.rag = RAGEngine(RAGConfig)` | RAGEngine | Research context augmentation |
+| `semantic_store.py:85` | `lancedb.connect()` | **DIRECT LANCEDB** | IOC findings ANN search |
+| `persistent_layer.py:1050` | `PQIndex().train()/add()` | PQIndex přímo | Embedding compression |
+| `prefetch_oracle.py:22` | `PQIndex()` constructor injection | PQIndex přímo | Ultra-light candidate selection |
+
+### CURRENT Reference-Only (imports, comments, metadata)
+
+| Consumer | Evidence | Status |
+|----------|----------|--------|
+| `hypothesis_engine.py:546` | Comment `# Step 8: Generate path explanations (if graph_rag available)` | REFERENCE ONLY — comment guard |
+| `hypothesis_engine.py:1245` | `metadata['scoring_fn'] = 'graph_rag.score_path'` | METADATA ONLY — string value, no runtime call |
+| `duckdb_store.py:942` | `Sprint 8SB: Inject SemanticStore instance` | INFRA ONLY — store creation, not runtime call |
+| `knowledge/assertions.py:22` | `from hledac.universal.knowledge.rag_engine import RAGEngine` | TEST IMPORT ONLY |
+
+### FUTURE Candidates (planned but not wired)
+
+| Candidate | Planned For | Evidence | Blocker |
+|-----------|-------------|----------|---------|
+| Planner / ToT integration | Context grounding | `RETRIEVAL_GROUNDING_CONSUMER_MAP.md:361` future owner table | Not yet wired in orchestrator |
+| DeepResearch | Extended grounding | `RETRIEVAL_GROUNDING_CONSUMER_MAP.md:361` future owner table | Not yet wired |
+| Prefetch expansion | Candidate selection | `prefetch_oracle.py` — PQIndex stage A only | Full pipeline not connected |
+| duckdb_store graph traversal | GraphRAG backend migration | `persistent_layer` deprecated | duckdb_store lacks graph traversal API |
+
+### Internal Module Dependencies
+
+| Module | Volá | Purpose |
+|--------|------|---------|
+| `rag_engine.py:724,733,744` | `infinite_context_engine`, `spr_compressor`, `secure_enclave_manager` | Ultra-context, SPR, SecureEnclave |
+| `rag_engine.py:_embed_text()` | CoreML/MLX per-instance | RAPTOR tree building (Sprint 42) |
+| `graph_rag.py:_get_embedder()` | `MLXEmbeddingManager` singleton | Path scoring embedder |
+| `lancedb_store.py:_initialize_embedder()` | `MLXEmbeddingManager` singleton | Entity embedding computation |
+| `lancedb_store.py:search_similar_adaptive()` | `self._orch._memory_mgr` | Thermal awareness (OPTIONAL coupling) |
 
 ---
 
@@ -254,6 +279,7 @@ NENÍ owner primary retrieval → rag_engine
 | LanceDB není grounding authority | `lancedb_store.py` — nemá `hybrid_retrieve()`, `HNSWVectorIndex` | ✅ Clean |
 | PQIndex není retrieval authority | `pq_index.py` — nemá `search()` na collection, jen trained index | ✅ Clean |
 | GraphRAG není backend owner | `graph_rag.py` — vše přes `knowledge_layer` consumer API | ✅ Clean |
+| semantic_store není LanceDBIdentityStore | `semantic_store.py:85` — přímý `lancedb.connect()`, oddělené use case | ⚠️ DIFF USE CASE — semantic pro IOC findings, identity pro entity resolution |
 
 ---
 
@@ -353,6 +379,30 @@ from hledac.ultra_context.secure_enclave_manager import SecureEnclaveManager
 **Co je OK**:
 - Všechny imports jsou lazy (`await _init_*()`) — nepřidávají OKAMŽITOU memory zátěž
 - Fallback to warning pokud import selže
+
+---
+
+### 🟡 MEDIUM: `semantic_store.py` direct LanceDB backend coupling
+
+**Lokace**: `knowledge/semantic_store.py:85`
+```python
+self._db = lancedb.connect(str(self._db_path))
+```
+
+**Problém**:
+- `SemanticStore` volá `lancedb.connect()` přímo, ne přes `LanceDBIdentityStore`
+- Oddělené use case: semantic_store = IOC findings ANN (384D FastEmbed), identity_store = entity resolution
+- Ale coupling risk: oba drží LanceDB connection, potential table/schema conflicts
+
+**Co je OK**:
+- `semantic_store` a `LanceDBIdentityStore` používají různé table names (`findings_v1` vs `entities`)
+- Různé embedding modely (FastEmbed 384D vs MLX 768D)
+- Žádný shared schema — čistě oddělené use cases
+
+**Coupling debt** (nízká priorita):
+- Doc: explicitně uvést, že semantic_store a identity_store jsou oddělené use cases
+- Seam: pokud by se někdy měly sjednotit, jít přes LanceDBIdentityStore interface
+- M1 8GB: dvě LanceDB instance = ~50MB RAM, acceptable
 
 ---
 

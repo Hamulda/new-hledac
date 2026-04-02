@@ -620,6 +620,8 @@ class PreDecisionSummary:
             } if self.provider_readiness else None,
             # Sprint F3.11: Dispatch parity preview
             "dispatch_parity": self.dispatch_parity.to_dict() if self.dispatch_parity else None,
+            # Sprint F3.13: Provider runtime facts — read-only runtime model state
+            "runtime_facts": self.runtime_facts.to_dict() if self.runtime_facts else None,
         }
 
 
