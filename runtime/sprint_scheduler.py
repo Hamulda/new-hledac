@@ -1818,6 +1818,22 @@ class SprintScheduler:
                 "control_mode": pd.dispatch_parity.control_mode,
             }
 
+        # Sprint F3.5-F3.6: Provider readiness preview — diagnostic only, no activation
+        if pd.provider_readiness is not None:
+            result["provider_readiness"] = {
+                "readiness": pd.provider_readiness.readiness,
+                "has_recommendation": pd.provider_readiness.has_recommendation,
+                "recommendation": pd.provider_readiness.recommendation,
+                "lifecycle_ready": pd.provider_readiness.lifecycle_ready,
+                "control_ready": pd.provider_readiness.control_ready,
+                "thermal_safe": pd.provider_readiness.thermal_safe,
+                "has_facts": pd.provider_readiness.has_facts,
+                "blockers": pd.provider_readiness.blockers,
+                "unknowns": pd.provider_readiness.unknowns,
+                "next_phase_hint": pd.provider_readiness.next_phase_hint,
+                "deferred_reasons": pd.provider_readiness.deferred_reasons,
+            }
+
         return result
 
     # ── Internal reset ────────────────────────────────────────────────────

@@ -387,6 +387,52 @@ class ProviderActivationNote:
 
 
 @dataclass
+class ProviderReadinessPreview:
+    """
+    Provider readiness preview — explicitní klasifikace provider readiness.
+
+    DIAGNOSTIC ONLY — preview readiness bez activation.
+    NESMÍ volat load_model(), acquire(), unload(), execute_with_limits().
+    NESMÍ domýšlet chybějící facts jako ready.
+
+    Rozlišuje TŘI různé věci (NESMÍ splývat):
+    1. recommendation fact — co capabilities.py doporučuje
+    2. readiness preview — diagnostická klasifikace readiness z facts
+    3. actual activation — skutečné volání provider pool
+
+    Readiness klasifikace (pouze pokud facts podporují):
+    - ready: lifecycle ACTIVE/WINDUP + has_recommendation + normal/prune control
+    - deferred: lifecycle not ready OR recommendation deferred to future phase
+    - blocked: hard constraint (terminal phase, phase_conflict, panic mode)
+    - unknown: facts insufficient to determine readiness
+    - compat: lifecycle in COMPAT path (WARMUP), readiness indeterminate
+    """
+    # Source facts
+    has_recommendation: bool
+    recommendation: Optional[str]
+
+    # Readiness classification
+    readiness: str  # "ready" | "deferred" | "blocked" | "unknown" | "compat"
+
+    # Per-dimension facts
+    lifecycle_ready: bool          # is_active or is_windup
+    control_ready: bool          # control_mode in (normal, prune)
+    thermal_safe: bool          # thermal_state in (nominal, fair, throttled) — NOT critical
+    has_facts: bool              # has_recommendation AND has lifecycle facts
+
+    # Blockers/detections
+    blockers: List[str]          # Hard constraints blocking readiness
+    unknowns: List[str]          # Facts insufficient to determine readiness
+
+    # Hints
+    next_phase_hint: Optional[str]  # What would change readiness
+    deferred_reasons: List[str]     # Why deferred (if readiness = deferred)
+
+    # No simulation fields (enforced by tests)
+    # NO: load_order, provider_state, activation_sequence, actual_model_loaded
+
+
+@dataclass
 class PreDecisionSummary:
     """
     Pre-decision summary artifact — composed from ParityArtifact.
@@ -435,6 +481,9 @@ class PreDecisionSummary:
     tool_readiness: Optional[ToolReadinessPreview] = None
     windup_readiness: Optional[WindupReadinessPreview] = None
     provider_note: Optional[ProviderActivationNote] = None
+
+    # Sprint F3.5-F3.6: Provider readiness preview — diagnostic only, no activation
+    provider_readiness: Optional[ProviderReadinessPreview] = None
 
     # Sprint F3.11: Dispatch parity preview — diagnostic only, no execute_with_limits
     dispatch_parity: Optional[DispatchReadinessPreview] = None
@@ -547,6 +596,20 @@ class PreDecisionSummary:
                 "recommendation": self.provider_note.recommendation,
                 "next_phase_hint": self.provider_note.next_phase_hint,
             } if self.provider_note else None,
+            # Sprint F3.5-F3.6: Provider readiness preview
+            "provider_readiness": {
+                "readiness": self.provider_readiness.readiness,
+                "has_recommendation": self.provider_readiness.has_recommendation,
+                "recommendation": self.provider_readiness.recommendation,
+                "lifecycle_ready": self.provider_readiness.lifecycle_ready,
+                "control_ready": self.provider_readiness.control_ready,
+                "thermal_safe": self.provider_readiness.thermal_safe,
+                "has_facts": self.provider_readiness.has_facts,
+                "blockers": self.provider_readiness.blockers,
+                "unknowns": self.provider_readiness.unknowns,
+                "next_phase_hint": self.provider_readiness.next_phase_hint,
+                "deferred_reasons": self.provider_readiness.deferred_reasons,
+            } if self.provider_readiness else None,
             # Sprint F3.11: Dispatch parity preview
             "dispatch_parity": self.dispatch_parity.to_dict() if self.dispatch_parity else None,
         }
@@ -614,6 +677,11 @@ def compose_pre_decision(
         pr, lc
     )
 
+    # --- Sprint F3.5-F3.6: Provider Readiness Preview (diagnostic only) ---
+    provider_readiness = _compose_provider_readiness_preview(
+        lc, mc
+    )
+
     return PreDecisionSummary(
         parity_timestamp_monotonic=parity_artifact.timestamp_monotonic,
         parity_timestamp_wall=parity_artifact.timestamp_wall,
@@ -633,6 +701,8 @@ def compose_pre_decision(
         tool_readiness=tool_readiness,
         windup_readiness=windup_readiness,
         provider_note=provider_note,
+        # Sprint F3.5-F3.6: Provider readiness preview
+        provider_readiness=provider_readiness,
     )
 
 
@@ -1216,6 +1286,206 @@ def _compose_provider_activation_note(
         has_recommendation=precursors.has_provider_recommend,
         recommendation=precursors.provider_recommend,
         next_phase_hint=next_phase_hint,
+    )
+
+
+def _compose_provider_readiness_preview(
+    lifecycle: LifecycleInterpretation,
+    model_control: ModelControlSummary,
+) -> ProviderReadinessPreview:
+    """
+    Sestaví ProviderReadinessPreview z LifecycleInterpretation a ModelControlSummary.
+
+    DIAGNOSTIC ONLY — readiness preview bez activation.
+    NESMÍ volat load_model(), acquire(), unload(), execute_with_limits().
+    NESMÍ domýšlet chybějící facts jako ready.
+
+    Rozlišuje TŘI různé věci (NESMÍ splývat):
+    1. recommendation fact — co capabilities.py doporučuje (model_control.models_needed)
+    2. readiness preview — diagnostická klasifikace readiness z facts
+    3. actual activation — skutečné volání provider pool
+
+    Readiness klasifikace:
+    - ready: lifecycle ACTIVE/WINDUP + models_needed non-empty + normal/prune control
+    - deferred: lifecycle not ready OR models_needed empty
+    - blocked: hard constraint (terminal phase, phase_conflict, panic mode)
+    - unknown: facts insufficient to determine readiness
+    - compat: lifecycle in COMPAT path (WARMUP), readiness indeterminate
+
+    Provider recommendation fact (model_control.models_needed):
+    - models_needed: [str] — seznam požadovaných modelů z analyzer/analyzer_result
+    - source: raw_profile["models_needed"] v ModelControlFactsBundle
+    """
+    blockers: List[str] = []
+    unknowns: List[str] = []
+    deferred_reasons: List[str] = []
+
+    # Per-dimension facts
+    lifecycle_ready = lifecycle.is_active or lifecycle.is_windup
+    control_ready = lifecycle.control_phase_mode in ("normal", "prune")
+    thermal_safe = lifecycle.control_phase_thermal != "critical"
+    has_facts = model_control.models_needed is not None and len(model_control.models_needed) > 0
+
+    # Blocked: hard constraints
+    if lifecycle.is_terminal:
+        blockers.append(f"lifecycle in terminal phase={lifecycle.workflow_phase}")
+        return ProviderReadinessPreview(
+            has_recommendation=has_facts,
+            recommendation=str(model_control.models_needed) if has_facts else None,
+            readiness="blocked",
+            lifecycle_ready=lifecycle_ready,
+            control_ready=control_ready,
+            thermal_safe=thermal_safe,
+            has_facts=has_facts,
+            blockers=blockers,
+            unknowns=[],
+            next_phase_hint=None,
+            deferred_reasons=[],
+        )
+
+    if lifecycle.phase_conflict:
+        blockers.append(f"phase_conflict: {lifecycle.phase_conflict_reason}")
+        return ProviderReadinessPreview(
+            has_recommendation=has_facts,
+            recommendation=str(model_control.models_needed) if has_facts else None,
+            readiness="blocked",
+            lifecycle_ready=lifecycle_ready,
+            control_ready=control_ready,
+            thermal_safe=thermal_safe,
+            has_facts=has_facts,
+            blockers=blockers,
+            unknowns=[],
+            next_phase_hint=None,
+            deferred_reasons=[],
+        )
+
+    if lifecycle.control_phase_mode == "panic":
+        blockers.append("control_mode=panic — provider activation blocked")
+        return ProviderReadinessPreview(
+            has_recommendation=has_facts,
+            recommendation=str(model_control.models_needed) if has_facts else None,
+            readiness="blocked",
+            lifecycle_ready=lifecycle_ready,
+            control_ready=control_ready,
+            thermal_safe=thermal_safe,
+            has_facts=has_facts,
+            blockers=blockers,
+            unknowns=[],
+            next_phase_hint=None,
+            deferred_reasons=[],
+        )
+
+    if not lifecycle_ready:
+        # Lifecycle not active yet — deferred
+        deferred_reasons.append(f"lifecycle phase={lifecycle.workflow_phase} not ACTIVE/WINDUP")
+        unknowns.append("provider readiness deferred — lifecycle not in ACTIVE/WINDUP")
+
+        # COMPAT path: WARMUP phase means we can't determine
+        if lifecycle.workflow_phase == "WARMUP":
+            return ProviderReadinessPreview(
+                has_recommendation=has_facts,
+                recommendation=str(model_control.models_needed) if has_facts else None,
+                readiness="compat",
+                lifecycle_ready=lifecycle_ready,
+                control_ready=control_ready,
+                thermal_safe=thermal_safe,
+                has_facts=has_facts,
+                blockers=[],
+                unknowns=unknowns,
+                next_phase_hint="ACTIVE phase required",
+                deferred_reasons=deferred_reasons,
+            )
+
+        return ProviderReadinessPreview(
+            has_recommendation=has_facts,
+            recommendation=str(model_control.models_needed) if has_facts else None,
+            readiness="deferred",
+            lifecycle_ready=lifecycle_ready,
+            control_ready=control_ready,
+            thermal_safe=thermal_safe,
+            has_facts=has_facts,
+            blockers=[],
+            unknowns=unknowns,
+            next_phase_hint="ACTIVE phase required",
+            deferred_reasons=deferred_reasons,
+        )
+
+    # Lifecycle is ACTIVE or WINDUP — assess readiness dimensions
+    if not control_ready:
+        deferred_reasons.append(f"control_mode={lifecycle.control_phase_mode} not normal/prune")
+        unknowns.append("provider readiness deferred — control mode not ready")
+
+    if not thermal_safe:
+        deferred_reasons.append(f"thermal_state={lifecycle.control_phase_thermal} is critical")
+        unknowns.append("provider readiness deferred — thermal pressure critical")
+
+    # No recommendation fact available
+    if not has_facts:
+        unknowns.append("provider recommendation fact not available — models_needed empty/unknown")
+
+    # Classification: ready requires ALL of lifecycle_ready, control_ready, thermal_safe, has_facts
+    if lifecycle_ready and control_ready and thermal_safe and has_facts:
+        # Only mark as ready if we have actual recommendation fact
+        if model_control.readiness in ("ready", "partial"):
+            return ProviderReadinessPreview(
+                has_recommendation=has_facts,
+                recommendation=str(model_control.models_needed),
+                readiness="ready",
+                lifecycle_ready=lifecycle_ready,
+                control_ready=control_ready,
+                thermal_safe=thermal_safe,
+                has_facts=has_facts,
+                blockers=[],
+                unknowns=[],
+                next_phase_hint=None,
+                deferred_reasons=[],
+            )
+        else:
+            # readiness="unknown" from model_control — insufficient facts
+            unknowns.append("model_control.readiness=unknown — insufficient facts")
+            return ProviderReadinessPreview(
+                has_recommendation=has_facts,
+                recommendation=str(model_control.models_needed) if has_facts else None,
+                readiness="unknown",
+                lifecycle_ready=lifecycle_ready,
+                control_ready=control_ready,
+                thermal_safe=thermal_safe,
+                has_facts=has_facts,
+                blockers=[],
+                unknowns=unknowns,
+                next_phase_hint="model_control readiness required",
+                deferred_reasons=deferred_reasons,
+            )
+
+    # Deferred or unknown
+    if unknowns or deferred_reasons:
+        return ProviderReadinessPreview(
+            has_recommendation=has_facts,
+            recommendation=str(model_control.models_needed) if has_facts else None,
+            readiness="deferred" if deferred_reasons else "unknown",
+            lifecycle_ready=lifecycle_ready,
+            control_ready=control_ready,
+            thermal_safe=thermal_safe,
+            has_facts=has_facts,
+            blockers=[],
+            unknowns=unknowns,
+            next_phase_hint="normal control mode + non-critical thermal required",
+            deferred_reasons=deferred_reasons,
+        )
+
+    # Fallback — should not reach here
+    return ProviderReadinessPreview(
+        has_recommendation=has_facts,
+        recommendation=str(model_control.models_needed) if has_facts else None,
+        readiness="unknown",
+        lifecycle_ready=lifecycle_ready,
+        control_ready=control_ready,
+        thermal_safe=thermal_safe,
+        has_facts=has_facts,
+        blockers=[],
+        unknowns=["insufficient facts to classify provider readiness"],
+        next_phase_hint="additional lifecycle/model facts required",
+        deferred_reasons=[],
     )
 
 

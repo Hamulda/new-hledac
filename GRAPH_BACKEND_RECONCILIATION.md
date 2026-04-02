@@ -979,3 +979,113 @@ Je to stále sidecar adapter — pouze s explicitnějším, auditable rozhraním
 2. **`get_top_graph_nodes()`** — stále chybí na store, export bere z scorecard
 3. **Shell boundary pro `DuckPGQGraph` specifická volání** — pokud nějaké existují v other modules (ne v __main__.py scope tohoto sprintu)
 4. **ACTUAL sprint scheduler cutover** — COMPAT LAYER comment říká "when SprintScheduler becomes canonical" — toto je oddělený sprint
+
+
+## 18. Sprint 8WD — Windup/Synthesis Consumer Truth Cleanup (2026-04-02)
+
+### 1. Ptačí perspektiva: Proč je to consumer-truth cleanup, ne windup rewrite
+
+Consumer-truth cleanup znamená, že active consumers (`_windup_synthesis()`) čtou lifecycle a graph truth přes **explicitní seams** místo nahodilých scheduler private fields. Nejedná se o:
+
+- Přepisování windup logiky
+- Změnu graph backendů
+- Vytvoření nového frameworku
+- Změnu scheduler cutover
+
+Active path (`__main__._windup_synthesis()`) je **přímo volaná** z `_run_sprint_mode()`. Dormant path (`runtime/windup_engine.py::run_windup()`) je definovaná, ale **nikdy nevolaná**.
+
+### 2. Windup/Synthesis Truth Matrix — ACTIVE / SHARED / DORMANT
+
+| Path | Status | Definice | Volána z | Lifecycle source | Graph source |
+|---|---|---|---|---|---|
+| `__main__._windup_synthesis()` | **ACTIVE** | `__main__.py:2629` | `_run_sprint_mode()` | `lifecycle` param → `inject_lifecycle_adapter()` | `store.get_stix_graph()` → Priority 1, `store.get_analytics_graph_for_synthesis()` → Priority 2 |
+| `runtime/windup_engine.run_windup()` | **DORMANT** | `runtime/windup_engine.py:31` | Nikdy | `scheduler._lc_adapter` (ale path nikdy nevolána) | `scheduler._ioc_graph` (ale path nikdy nevolána) |
+
+### 3. Consumer Truth Map — Active Path
+
+**`_windup_synthesis()` — ACTIVE runtime path:**
+
+| Truth | Zdroj | Seam | Status |
+|---|---|---|---|
+| Lifecycle gate | `lifecycle` param → `runner.inject_lifecycle_adapter()` | Priorita 1: adapter | ✅ FIXED (Sprint 8WD) |
+| STIX context | `store.get_stix_graph()` → `runner.inject_stix_graph()` | Priorita 1: truth-store | ✅ (Sprint 8VQ) |
+| Analytics graph | `store.get_analytics_graph_for_synthesis()` → `runner.inject_graph()` | Read-only seam | ✅ (Sprint 8VY) |
+| Episode context | `store` → `runner._duckdb_store` | Store-facing | ✅ (Sprint 8UC) |
+| Hypothesis graph | `ioc_graph=None` | Intentional — hypothesis engine nemá graph pipeline | ✅ Intentional |
+| DuckDB findings | `store.get_top_findings()` | Store-facing | ✅ (Sprint 8QC) |
+
+### 4. Co bylo opraveno (Sprint 8WD)
+
+**P1 (CRITICAL):** `_windup_synthesis()` dostával `lifecycle` jako parametr, ale **nikdy ho neinjektoval** do SynthesisRunner. Výsledek: `_is_windup_allowed()` degradovala na utils compat místo runtime truth.
+
+**Fix:**
+```python
+# __main__.py:2667-2670 — PŘED
+runner._duckdb_store = store
+
+# Sprint 8WD: Inject runtime lifecycle — PREFERRED truth for windup gate
+if lifecycle is not None:
+    runner.inject_lifecycle_adapter(lifecycle)
+```
+
+**Důsledek:** `_is_windup_allowed()` nyní dostává runtime lifecycle přes Path 1 (injected adapter) → `_lifecycle_gate_source = "runtime"`.
+
+### 5. Hypothesis graph — INTENTIONAL None
+
+`_windup_synthesis()` volá:
+```python
+hypotheses = _hyp_engine.generate_sprint_hypotheses(
+    findings=finding_texts,
+    ioc_graph=None,  # ← INTENTIONAL
+    max_hypotheses=3,
+)
+```
+
+`ioc_graph=None` je **intentional design**. HypothesisEngine nemá graph pipeline dnes. Předávání DuckPGQGraph by bylo klamné — hypothesis by si myslela že má graph context, ale ve skutečnosti ho nevyužívá.
+
+### 6. runtime/windup_engine.py::run_windup() — DORMANT
+
+`runtime/windup_engine.py::run_windup()` je **DORMANT** — definovaná ale nikdy nevolaná. Zůstává jako shared seam pro případné budoucí použití, ale **NENÍ active runtime truth**.
+
+| Aspekt | Status |
+|---|---|
+| Definice | `runtime/windup_engine.py:31` |
+| Volána z `__main__.py` | ❌ NE — nikdy |
+| Lifecycle | `scheduler._lc_adapter` přes `inject_lifecycle_adapter()` |
+| Graph | `scheduler._ioc_graph` přes `inject_graph()` |
+| STIX | `scheduler._ioc_graph` (DuckPGQGraph — nemá STIX) |
+
+### 7. Co zůstává pro další F-sprinty
+
+1. **IOCGraph v ACTIVE fázi** — truth-write graph se vytváří ve WINDUP bloku, ale ne v ACTIVE bloku
+2. **`get_top_graph_nodes()`** — stále chybí na store, export bere z scorecard
+3. **runtime/windup_engine cutover** — pokud by se měla dormant path stát active, vyžadovala by plnohodnotný lifecycle injection stejně jako `_windup_synthesis()`
+
+### 8.Změněné soubory
+
+| Soubor | Změna |
+|---|---|
+| `__main__.py` | `_windup_synthesis()`: přidán `runner.inject_lifecycle_adapter(lifecycle)` před `synthesize_findings()` |
+| `tests/probe_8wd/test_windup_synthesis_lifecycle_injection.py` | **NOVÝ** — 10 probe testů |
+| `GRAPH_BACKEND_RECONCILIATION.md` | Sekce 18 — Sprint 8WD výsledky |
+
+### 9. Testy — uzamykající invarianty
+
+```
+tests/probe_8wd/test_windup_synthesis_lifecycle_injection.py — 10 PASSED
+  WD.1: inject_lifecycle_adapter → source='runtime' ✓
+  WD.2: windup_engine.run_windup() dormant ✓
+  WD.3: runtime adapter preferred over compat ✓
+  WD.4: hypothesis ioc_graph=None intentional ✓
+  WD.5: analytics_graph seam read-only ✓
+  WD.6: žádný GraphProtocol/newwindup framework ✓
+```
+
+### 10. Co bylo schválně NEděláno
+
+1. **Žádný nový framework** — žádný WindupFramework, WindupScheduler, BaseWindup
+2. **Žádný GraphProtocol** — graph zůstává na úrovni slotů (`_ioc_graph`, `_stix_graph`, `_truth_write_graph`)
+3. **Žádný scheduler cutover** — `scheduler._ioc_graph` zůstává DuckPGQGraph path
+4. **Žádná změna dormant path** — `runtime/windup_engine.run_windup()` není opravována jako by byla active
+5. **Žádné nové produkční soubory** — pouze probe test
+6. **Žádný nový windup DTO** — lifecycle gate zůstává na existing `_lifecycle_adapter` seam

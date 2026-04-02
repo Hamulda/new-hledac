@@ -113,28 +113,39 @@ class ModelManager:
     }
 
     # ========================================================================
-    # Sprint 8TF: Phase Drift Guard
+    # F6.5: Ownership Closure — Phase Drift Guard
     # ========================================================================
     # WORKFLOW-LEVEL phase → model mapping.
     #
-    # AUTHORITY: This map is STRICTLY workflow-level — it is NOT the same
-    # as the coarse-grained phase system used by capabilities.ModelLifecycleManager
-    # (BRAIN/TOOLS/SYNTHESIS/CLEANUP). These two phase systems have DIFFERENT
-    # semantics and MUST NOT be conflated.
+    # AUTHORITY (F6.5): This map is STRICTLY Layer 1 (workflow-level).
+    # It is NOT the same as the coarse-grained phase system in
+    # capabilities.ModelLifecycleManager (BRAIN/TOOLS/SYNTHESIS/CLEANUP).
     #
-    # Layer 1 — Workflow-level (this map):
-    #   PLAN/DECIDE/SYNTHESIZE → Hermes
-    #   EMBED/DEDUP/ROUTING → ModernBERT
-    #   NER/ENTITY → GLiNER
+    # OWNERSHIP DECLARATION (F6.5):
+    #   - Acquire/load owner:       THIS CLASS (ModelManager singleton)
+    #   - Unload/cleanup owner:     THIS CLASS._release_current_async()
+    #                               + brain.model_lifecycle.unload_model() (7K SSOT)
+    #   - Phase enforcer:           capabilities.ModelLifecycleManager (FACADE only)
+    #   - Capability layer:         NOT a load owner — NEVER call this map directly
     #
-    # Layer 2 — Coarse-grained (capabilities.ModelLifecycleManager):
-    #   BRAIN/TOOLS/SYNTHESIS/CLEANUP — entirely different strings
+    # LAYER MAPPING (F6.5) — MUST NOT BE CONFLATED:
+    #   Layer 1 (workflow-level, this map):
+    #     PLAN/DECIDE/SYNTHESIZE → hermes
+    #     EMBED/DEDUP/ROUTING → modernbert
+    #     NER/ENTITY → gliner
+    #   Layer 2 (coarse-grained, ModelLifecycleManager):
+    #     BRAIN/TOOLS/SYNTHESIS/CLEANUP — entirely different strings
+    #   Layer 3 (windup-local, windup_engine.SynthesisRunner):
+    #     Own isolated model plane with Qwen/SmolLM
     #
-    # Layer 3 — Windup-local (windup_engine.SynthesisRunner):
-    #   Own isolated model plane with Qwen/SmolLM
+    # INVARIANTS (F6.5) — HARD:
+    #   - acquire != phase enforcement
+    #   - unload != phase policy
+    #   - workflow phases (Layer 1) != coarse phases (Layer 2)
+    #   - SYNTHESIZE (Layer 1) ≠ SYNTHESIS (Layer 2)
+    #   - capability layer MUST NOT become third model truth
     #
-    # Consumers reading phase facts should use brain.model_phase_facts
-    # to avoid implicit cross-layer confusion.
+    # Use brain.model_phase_facts.is_same_layer() to validate before comparison.
     # ========================================================================
     PHASE_MODEL_MAP: Dict[str, ModelName] = {
         "PLAN": "hermes",

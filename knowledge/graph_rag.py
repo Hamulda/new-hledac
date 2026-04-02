@@ -2,6 +2,15 @@
 GraphRAGOrchestrator - Multi-Hop Reasoning for KuzuDB
 =======================================================
 
+ROLE: Consumer/Orchestrator (NOT backend owner)
+============================================
+Tento modul je consumer/orchestrator pro multi-hop reasoning.
+NENÍ owner backend storage → persistent_layer (deprecated!)
+NENÍ owner embedding computation → MLXEmbeddingManager singleton
+NENÍ owner primary retrieval → rag_engine
+
+Embedding policy: _get_embedder() → MLXEmbeddingManager singleton (shared, ne vlastní)
+
 Graph-based RAG orchestrator optimized for M1 Silicon (8GB RAM).
 Enables multi-hop reasoning over disk-based knowledge graph.
 
@@ -77,6 +86,13 @@ class GraphContradiction:
 class GraphRAGOrchestrator:
     """
     GraphRAG orchestrator for multi-hop reasoning.
+
+    ROLE: Consumer/Orchestrator (NOT backend owner)
+    ================================================
+    - multi-hop graph traversal (consumer přes knowledge_layer)
+    - NENÍ owner backend storage → persistent_layer (deprecated!)
+    - NENÍ owner embedding → MLXEmbeddingManager singleton přes _get_embedder()
+    - NENÍ owner primary retrieval → rag_engine
 
     Performs multi-hop search over knowledge graph to find
     relationships that aren't visible in single documents.

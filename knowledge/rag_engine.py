@@ -1,6 +1,12 @@
 """
 RAGEngine - Ultra Context + SPR Compression + Hybrid Retrieval + HNSW Vector Search
 
+ROLE: Grounding Authority (NOT identity/entity store)
+====================================================
+Tento modul je grounding authority pro context augmentation.
+NENÍ owner identity/entity resolution - to je lancedb_store.
+NENÍ owner embedding computation - to je MLXEmbeddingManager singleton.
+
 Integruje:
 - InfiniteContextEngine pro velké kontexty
 - SPRCompressor pro sémantickou kompresi
@@ -645,6 +651,13 @@ class RaptorNode:
 class RAGEngine:
     """
     RAG engine s Ultra Context a SPR kompresí.
+
+    ROLE: Grounding Authority (NOT identity/entity store)
+    =====================================================
+    - context grounding (hybrid_retrieve, HNSWVectorIndex, RAPTOR)
+    - NENÍ owner identity/entity resolution → lancedb_store
+    - NENÍ owner embedding cache → MLXEmbeddingManager singleton
+    - Embedding policy: _fastembed_embedder (cached per-instance), fallback → MLXEmbeddingManager
 
     Features:
     - 6-stupňový pipeline: Query → Retrieval → Rerank → Compress → Generate → Validate

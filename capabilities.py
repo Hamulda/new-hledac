@@ -341,40 +341,50 @@ class CapabilityRouter:
 
 class ModelLifecycleManager:
     """
-    Enforces hard phase invariants for model lifecycle.
+    F6.5: Coarse-grained phase enforcement FACADE.
 
-    Authority note (Sprint 8ME + 8TF + 8TF-R):
-    This class is a FACADE / PHASE ENFORCER — it does NOT own model load/unload.
-    It orchestrates phase transitions through CapabilityRegistry.load/unload.
+    OWNERSHIP DECLARATION (F6.5) — EXPLICIT:
+      - Acquire/load owner:        brain.model_manager.ModelManager (singleton)
+      - Unload/cleanup owner:      ModelManager._release_current_async()
+                                    + brain.model_lifecycle.unload_model() (7K SSOT)
+      - Phase enforcer (THIS):      COARSE-GRAINED phase enforcement ONLY
+      - Capability layer:            NOT a load owner — NEVER becomes model truth
 
-    OWNERSHIP DECLARATION (Sprint 8TF-R):
-      - Runtime-wide acquire/load owner:  brain.model_manager.ModelManager
-      - Runtime-wide unload owner:        ModelManager._release_current_async()
-                                           + brain.model_lifecycle.unload_model() (7K SSOT)
-      - This facade:                       COARSE-GRAINED phase enforcement ONLY
-
-    THIS FACADE IS NOT A LOAD OWNER:
+    THIS FACADE IS NOT A LOAD OWNER — F6.5 LOCKED INVARIANTS:
       - Does NOT call ModelManager.load_model() directly
       - Does NOT hold model references
       - Does NOT create model engines
       - Does NOT manage MLX buffer initialization
-      Violating any of the above creates a THIRD MODEL TRUTH — forbidden.
+      Violating any of the above CREATES A THIRD MODEL TRUTH — FORBIDDEN.
 
-    PHASE STRING LAYERS (Sprint 8TF-R) — MUST NOT BE CONFLATED:
-      Layer 1 (Workflow-level):   ModelManager.PHASE_MODEL_MAP
-                                  Strings: PLAN/DECIDE/SYNTHESIZE/EMBED/DEDUP/ROUTING/NER/ENTITY
-      Layer 2 (Coarse-grained):  ModelLifecycleManager.enforce_phase_models()
-                                  Strings: BRAIN/TOOLS/SYNTHESIS/CLEANUP
-      Layer 3 (Windup-local):     windup_engine.SynthesisRunner
-                                  Strings: Qwen/SmolLM isolation (no string mapping)
+    F6.5 LAYER MAPPING — MUST NOT BE CONFLATED:
+      Layer 1 (workflow-level, ModelManager.PHASE_MODEL_MAP):
+        PLAN/DECIDE/SYNTHESIZE → hermes
+        EMBED/DEDUP/ROUTING → modernbert
+        NER/ENTITY → gliner
+        Strings: PLAN, DECIDE, SYNTHESIZE, EMBED, DEDUP, ROUTING, NER, ENTITY
+      Layer 2 (coarse-grained, THIS class):
+        BRAIN → hermes loaded, others released
+        TOOLS → hermes released, on-demand
+        SYNTHESIS → hermes loaded, others released  ← NOTE: ≠ SYNTHESIZE
+        CLEANUP → all released
+        Strings: BRAIN, TOOLS, SYNTHESIS, CLEANUP
+      Layer 3 (windup-local, windup_engine.SynthesisRunner):
+        Own isolated model plane with Qwen/SmolLM
 
-    CRITICAL DRIFT GUARD (Sprint 8TF-R):
-      "SYNTHESIZE" (Layer 1) ≠ "SYNTHESIS" (Layer 2) — they are different strings
-      with different semantics. Implicit mapping creates false equivalence.
-      Use brain.model_phase_facts.is_same_layer() to validate before comparison.
+    F6.5 HARD INVARIANTS:
+      - acquire ≠ phase enforcement
+      - unload ≠ phase policy
+      - Layer 1 phases NEVER directly passed to ModelLifecycleManager
+      - Layer 2 phases NEVER directly passed to ModelManager.PHASE_MODEL_MAP
+      - SYNTHESIZE (Layer 1) ≠ SYNTHESIS (Layer 2) — false equivalence
+      - capability layer MUST NOT become third model truth
 
-    Future: If seam extraction lands, this facade may delegate to
-    ModelManager.with_phase() directly, eliminating the CapabilityRegistry round-trip.
+    DRIFT GUARD: Use brain.model_phase_facts.is_same_layer() to validate
+    before comparing or mapping phase strings across layers.
+
+    Future seam: This facade may delegate to ModelManager.with_phase()
+    after seam extraction — eliminating the CapabilityRegistry round-trip.
     """
 
     def __init__(self, registry: CapabilityRegistry):

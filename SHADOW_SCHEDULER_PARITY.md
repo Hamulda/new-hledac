@@ -748,3 +748,149 @@ Pure function — DIAGNOSTIC ONLY, žádné `execute_with_limits()`, žádné pr
 | `SHADOW_SCHEDULER_PARITY.md` | Aktualizována F3.11 sekce — canonical read-side owner, mapping ownership normalized |
 | `TOOL_CAPABILITY_EXECUTION_ENFORCEMENT.md` | Aktualizováno — canonical/read-only seams rozšířeny o dispatch preview mapping |
 | `tests/probe_8vm/test_shadow_consumer_seam.py` | Přidány testy pro mapping ownership normalization |
+
+---
+
+## F3.12: Provider Readiness Preview (Sprint F3.5-F3.6)
+
+### Bird's-Eye View: Proč je provider readiness preview správný další krok
+
+Dispatch preview už uměl rozlišovat canonical vs runtime_only_compat dispatch path.
+Chyběla explicitní klasifikace **provider readiness** — ne simulace provider plane,
+ale read-only diagnostická klasifikace readiness z dostupných facts.
+
+**Provider readiness preview** přidává:
+- Explicitní rozlišení TŘÍ různých věcí: recommendation fact, readiness preview, actual activation
+- Read-only diagnostická klasifikace: ready/deferred/blocked/unknown/compat
+- Žádné domýšlení chybějících facts jako ready
+- Žádné load_model(), acquire(), unload(), execute_with_limits()
+
+### Proč je to PARITY PREVIEW, ne activation
+
+| Aktivita | Co dělá | V čem je parity? |
+|----------|----------|------------------|
+| Recommendation fact | Co `capabilities.py` doporučuje (`models_needed`) | Čte facts z model_control |
+| Readiness preview | Diagnostická klasifikace readiness z lifecycle+model_control facts | Porovnává lifecycle state vs readiness门槛 |
+| Actual activation | Skutečné volání provider pool přes `acquire()`/`load_model()` | **NENÍ součástí parity** |
+
+Provider readiness preview čte pouze **facts** (lifecycle phase, control mode, thermal state, models_needed).
+NESMÍ volat žádné activation API.
+
+### Co je nové v F3.12
+
+#### 1. ProviderReadinessPreview dataclass
+Explicitní readiness preview bez activation:
+
+| Field | Meaning |
+|-------|---------|
+| `has_recommendation` | models_needed fact available |
+| `recommendation` | Raw models_needed string |
+| `readiness` | "ready" \| "deferred" \| "blocked" \| "unknown" \| "compat" |
+| `lifecycle_ready` | is_active or is_windup |
+| `control_ready` | control_mode in (normal, prune) |
+| `thermal_safe` | thermal_state != critical |
+| `has_facts` | models_needed non-empty |
+| `blockers` | Hard constraints |
+| `unknowns` | Insufficient facts |
+| `deferred_reasons` | Why deferred |
+
+**NESMÍ obsahovat**: `load_order`, `provider_state`, `activation_sequence`, `actual_model_loaded`
+
+#### 2. _compose_provider_readiness_preview()
+Pure function — DIAGNOSTIC ONLY, žádné activation API.
+
+#### 3. Read-only fact sources
+| Source | Fact | Read-only |
+|--------|------|-----------|
+| LifecycleInterpretation | `is_active`, `is_windup`, `is_terminal`, `control_phase_mode`, `control_phase_thermal`, `phase_conflict` | ✅ |
+| ModelControlSummary | `models_needed`, `readiness` | ✅ |
+| Žádné provider API | `acquire()`, `load_model()`, `unload()`, `execute_with_limits()` | ❌ |
+
+### Provider Readiness Matrix
+
+| Readiness | Lifecycle | Control | Thermal | Facts | Co to znamená |
+|-----------|-----------|---------|---------|-------|---------------|
+| ready | ACTIVE/WINDUP | normal/prune | non-critical | non-empty | Všechny podmínky splněny |
+| deferred | not ACTIVE/WINDUP | any | any | any | Lifecycle not ready |
+| blocked | any | panic | any | any | Hard constraint |
+| unknown | ACTIVE/WINDUP | normal/prune | non-critical | empty | Facts insufficient |
+| compat | WARMUP | normal | non-critical | any | COMPAT path, indeterminate |
+
+### Scheduler Shadow Provider-Readiness Matrix
+
+| Readiness Domain | Source | Read-only | No Activation | Deferred Note |
+|-----------------|--------|-----------|---------------|---------------|
+| Lifecycle | SprintLifecycleManager | ✅ | ✅ | N/A |
+| Graph | DuckPGQGraph | ✅ | ✅ | N/A |
+| Export | ExportHandoff/scorecard | ✅ | ✅ | N/A |
+| Model/Control | AnalyzerResult/raw_profile | ✅ | ✅ | N/A |
+| Decision Gate | blockers/unknowns/compat | ✅ | ✅ | Provider only |
+| Tool Readiness | control_phase + graph hints | ✅ | ✅ | N/A |
+| Windup Readiness | lifecycle + export facts | ✅ | ✅ | N/A |
+| Provider Activation | precursors + lifecycle | ✅ | ✅ | ✅ Deferred only |
+| **Provider Readiness** | **lifecycle + model_control** | **✅** | **✅** | **✅ all states** |
+
+### Co scheduler-shadow TEĎ UMÍ previewovat (F3.12)
+
+1. **Provider readiness classification** — explicitní ready/deferred/blocked/unknown/compat
+2. **Per-dimension facts** — lifecycle_ready, control_ready, thermal_safe, has_facts
+3. **No simulation** — žádné load_order, provider_state, activation_sequence
+4. **Missing facts → unknown/deferred** — ne heuristické "ready"
+
+### Co scheduler-shadow STÁLE NESMÍ (hard boundaries)
+
+| Zakázáno | Proč |
+|----------|------|
+| load_model() | Mění runtime state |
+| acquire() | Aktivuje provider pool |
+| unload() | Deaktivace provideru |
+| execute_with_limits() | Tool execution |
+| Provider state machine simulation | Vznik pseudo-authority |
+| Provider load order simulation | Vznik pseudo-authority |
+| Domýšlení facts jako ready | Facts insufficient → unknown/deferred |
+
+### Tři různé věci NESMÍ splývat
+
+1. **Recommendation fact** (`has_recommendation`, `models_needed`) — co `capabilities.py` říká
+2. **Readiness preview** (`ProviderReadinessPreview.readiness`) — diagnostická klasifikace
+3. **Actual activation** (volání `acquire()`/`load_model()`) — **NIKDY součástí parity**
+
+### Guardraily Implementované v F3.12
+
+1. **Žádné activation API** — _compose_provider_readiness_preview() nevolá load_model/acquire/unload/execute_with_limits
+2. **Žádné simulation fields** — ProviderReadinessPreview NESMÍ mít load_order/provider_state/activation_sequence
+3. **Facts-based classification** — missing facts → unknown/deferred, ne heuristické ready
+4. **Pure function** — žádné side effects v _compose_provider_readiness_preview()
+5. **No bg_tasks** — readiness počítáno synchronně v consume_shadow_pre_decision()
+6. **Three-way distinction** — recommendation fact vs readiness preview vs actual activation NESMÍ splývat
+
+### Co NENÍ v tomto sprintu
+
+| Co | Proč deferred |
+|----|---------------|
+| Skutečná provider activation | Vyžaduje scheduler_active mode + provider pool API |
+| Provider plane simulace | Vznik pseudo-authority |
+| Provider load order | Vyžaduje runtime provider state |
+| Plná provider readiness parity | Vyžaduje live provider facts |
+
+### Co chybí do reálné provider activation parity (F4+)
+
+1. **Provider activation API** — acquire(), load_model(), unload() volání v scheduler_active
+2. **Provider state tracking** — který provider je aktuálně loaded
+3. **Provider readiness live facts** — skutečný provider state z runtime
+4. **Provider load order** — pořadí provider activation
+
+### Co chybí do scheduler_active (F5+)
+
+1. **Actual provider activation** — scheduler_active musí aktivovat providery přes provider pool
+2. **Provider orchestration** — scheduler řídí provider lifecycle
+3. **Provider-aware dispatch** — dispatch přes aktivní provider
+
+### Soubory Změněné v F3.12
+
+| Soubor | Změna |
+|--------|--------|
+| `runtime/shadow_pre_decision.py` | Přidán `ProviderReadinessPreview` dataclass, `_compose_provider_readiness_preview()` funkce, integrace do `compose_pre_decision()` |
+| `runtime/sprint_scheduler.py` | Rozšířen `_build_shadow_readiness_preview()` o `provider_readiness` sekci |
+| `SHADOW_SCHEDULER_PARITY.md` | Přidána F3.12 sekce |
+| `tests/probe_8vm/test_shadow_consumer_seam.py` | Přidány testy pro `TestProviderReadinessPreview` |

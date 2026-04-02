@@ -2664,6 +2664,11 @@ async def _windup_synthesis(
     # Sprint 8UC B.2: Inject DuckDB store for episode recall
     runner._duckdb_store = store
 
+    # Sprint 8WD: Inject runtime lifecycle — PREFERRED truth for windup gate
+    # runtime/_windup_synthesis() ACTIVE path: lifecycle param is the canonical runtime manager
+    if lifecycle is not None:
+        runner.inject_lifecycle_adapter(lifecycle)
+
     # Get top findings from store
     findings: list[dict] = []
     try:

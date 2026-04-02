@@ -1,39 +1,52 @@
 """
-Model Lifecycle Management - Sprint 7C+8C+8ME+8TF+8TF-R
-========================================================
+F6.5: Model Lifecycle Management — Multi-Role Module
+=====================================================
 
-Authority note (Sprint 8ME + 8TF + 8TF-R):
-This module is MULTI-ROLE — do not treat it as a single owner.
+F6.5 OWNERSHIP DECLARATION:
+  This module is MULTI-ROLE — do NOT treat it as a single owner.
+  Each role is explicitly listed below.
 
-ROLES (Sprint 8TF-R):
-  1. Emergency seam: watchdog flag + safe callback pattern
-  2. MLX lazy init helper: delegates to mlx_cache.init_mlx_buffers()
-  3. Unload helper (7K SSOT): delegates to engine.unload(), fail-open
-  4. Lifecycle shadow-state: O(1) status tracking
-  5. Structured-generation sidecar: class ModelLifecycle (Qwen/SmolLM, windup-local)
+F6.5 EXPLICIT ROLES:
+  ┌─────────────────────────────────┬──────────────────────────────────────────┐
+  │ Role                             │ Canonical Owner                         │
+  ├─────────────────────────────────┼──────────────────────────────────────────┤
+  │ 1. Emergency seam                │ model_lifecycle (watchdog flag)        │
+  │ 2. MLX lazy init helper          │ mlx_cache.init_mlx_buffers()           │
+  │ 3. Unload helper (7K SSOT)       │ engine.unload() — delegát, fail-open  │
+  │ 4. Lifecycle shadow-state        │ model_lifecycle (O(1), side-effect free)│
+  │ 5. Structured-generation sidecar │ class ModelLifecycle (windup-local)    │
+  └─────────────────────────────────┴──────────────────────────────────────────┘
 
-THIS MODULE IS NOT THE RUNTIME-WIDE LOAD OWNER:
+F6.5 THIS MODULE IS NOT THE RUNTIME-WIDE LOAD OWNER:
   - load_model() / unload_model() at module level are UNLOAD HELPERS
-  - They delegate to engine.unload() (7K SSOT), not a separate authority
-  - The canonical runtime-wide acquire/load owner is ModelManager
+  - They delegate to engine.unload() (7K SSOT), NOT a separate authority
+  - Canonical runtime-wide acquire/load owner: brain.model_manager.ModelManager
   - This module does NOT hold canonical model state for the runtime-wide plane
 
-PHASE STRING LAYERS (Sprint 8TF-R) — MUST NOT BE CONFLATED:
-  Layer 1 (Workflow-level):   ModelManager.PHASE_MODEL_MAP
-                              Strings: PLAN/DECIDE/SYNTHESIZE/EMBED/DEDUP/ROUTING/NER/ENTITY
-  Layer 2 (Coarse-grained):  ModelLifecycleManager — BRAIN/TOOLS/SYNTHESIS/CLEANUP
-  Layer 3 (Windup-local):     windup_engine.SynthesisRunner — Qwen/SmolLM isolation
+F6.5 LAYER MAPPING — MUST NOT BE CONFLATED:
+  Layer 1 (workflow-level, ModelManager.PHASE_MODEL_MAP):
+    PLAN/DECIDE/SYNTHESIZE → hermes
+    EMBED/DEDUP/ROUTING → modernbert
+    NER/ENTITY → gliner
+    Strings: PLAN, DECIDE, SYNTHESIZE, EMBED, DEDUP, ROUTING, NER, ENTITY
+  Layer 2 (coarse-grained, ModelLifecycleManager):
+    BRAIN/TOOLS/SYNTHESIS/CLEANUP — entirely different strings
+  Layer 3 (windup-local, windup_engine.SynthesisRunner):
+    Own isolated model plane with Qwen/SmolLM
 
-The structured-generation sidecar (class ModelLifecycle) is windup-local.
-It is NOT part of the runtime-wide model plane.
+F6.5 HARD INVARIANTS:
+  - acquire ≠ phase enforcement
+  - unload ≠ phase policy
+  - workflow phases (Layer 1) ≠ coarse phases (Layer 2)
+  - SYNTHESIZE (Layer 1) ≠ SYNTHESIS (Layer 2)
+  - capability layer MUST NOT become third model truth
+  - windup-local model world ≠ runtime-wide model plane
 
-Canonical runtime-wide owners (Sprint 8TF-R):
-  - acquire/load: brain.model_manager.ModelManager
-  - unload/cleanup: ModelManager._release_current_async() + engine.unload() (7K SSOT)
-
-Drift risk: This module must NOT conflate the three phase layers above.
-Consumers needing phase facts should use brain.model_phase_facts.is_same_layer()
-to validate before comparing phase strings across layers.
+F6.5 structured-generation sidecar (class ModelLifecycle):
+  - Windup-local, isolated from runtime-wide model plane
+  - Qwen/SmolLM model (separate from Hermes/ModernBERT/GLiNER)
+  - NOT part of the runtime-wide model plane
+  - Consumers needing phase facts should use brain.model_phase_facts.is_same_layer()
 """
 
 # Transitional Czech prose follows after blank line below.
@@ -544,7 +557,13 @@ def _get_mlx_safe() -> Any:
 
 class ModelLifecycle:
     """
-    Sprint 8QC: Model lifecycle s Outlines MLX structured generation.
+    F6.5: Structured-generation sidecar (windup-local).
+
+    This class is a WINDUP-LOCAL sidecar — it is NOT part of the runtime-wide
+    model plane. It uses Qwen/SmolLM models (separate from Hermes/ModernBERT/GLiNER).
+
+    Role: Structured-generation only — Outlines MLX constrained generation.
+    This class does NOT participate in the runtime-wide model lifecycle.
 
     3-tier model discovery:
       Tier 1: Qwen3-0.6B
