@@ -53,8 +53,9 @@ class TestGraphRAGScorePath:
         orchestrator = GraphRAGOrchestrator(mock_layer)
         orchestrator._embedder = MagicMock()
 
-        # Mock embedder
-        orchestrator._embedder._embed_text = AsyncMock(return_value=[0.1] * 384)
+        # Mock embedder - MLXEmbeddingManager uses embed_document (sync, called via asyncio.to_thread)
+        import numpy as np
+        orchestrator._embedder.embed_document = MagicMock(return_value=np.array([0.1] * 384))
 
         result = await orchestrator.score_path(
             ["node1", "node2", "node3"],
@@ -86,7 +87,8 @@ class TestGraphRAGScorePath:
 
         orchestrator = GraphRAGOrchestrator(mock_layer)
         orchestrator._embedder = MagicMock()
-        orchestrator._embedder._embed_text = AsyncMock(return_value=[0.1] * 384)
+        import numpy as np
+        orchestrator._embedder.embed_document = MagicMock(return_value=np.array([0.1] * 384))
 
         # 20 nodes, but max_nodes = 5 - path[:5] for nodes to score
         nodes = [f"node{i}" for i in range(20)]
@@ -153,7 +155,8 @@ class TestScorePathComponents:
 
         orchestrator = GraphRAGOrchestrator(mock_layer)
         orchestrator._embedder = MagicMock()
-        orchestrator._embedder._embed_text = AsyncMock(return_value=[0.5] * 384)
+        import numpy as np
+        orchestrator._embedder.embed_document = MagicMock(return_value=np.array([0.5] * 384))
 
         # Short path
         short_score = await orchestrator.score_path(

@@ -924,20 +924,49 @@ class RAGEngine:
         return results[:top_k]
     
     async def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for texts using FastEmbed or fallback."""
+        """Generate embeddings for texts using cached FastEmbed or MLXEmbeddingManager.
+
+        M1 8GB: TextEmbedding instance is cached in self._fastembed_embedder
+        to avoid repeated model loading (memory fragmentation prevention).
+        Falls back to MLXEmbeddingManager singleton if FastEmbed unavailable.
+        """
+        # Sprint 8TD: Cache FastEmbed instance to avoid repeated model loading
+        if not hasattr(self, '_fastembed_embedder') or self._fastembed_embedder is None:
+            try:
+                from fastembed import TextEmbedding
+                self._fastembed_embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+                logger.debug("[FastEmbed] TextEmbedding instance cached in RAGEngine")
+            except ImportError:
+                self._fastembed_embedder = False  # Mark as unavailable
+                logger.debug("[FastEmbed] Not available, will use MLXEmbeddingManager fallback")
+
+        if self._fastembed_embedder:
+            try:
+                embeddings = list(self._fastembed_embedder.embed(texts))
+                return [list(e) for e in embeddings]
+            except Exception as e:
+                logger.warning(f"FastEmbed embed failed: {e}, falling back to MLXEmbeddingManager")
+
+        # Fallback to MLXEmbeddingManager singleton
         try:
-            from fastembed import TextEmbedding
-            model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-            embeddings = list(model.embed(texts))
-            return [list(e) for e in embeddings]
-        except ImportError:
-            logger.warning("FastEmbed not available, using fallback embeddings")
-            # Fallback: deterministic hash-based embeddings
-            import random
-            return [
-                [random.Random(hash(t)).random() for _ in range(384)]
-                for t in texts
-            ]
+            from hledac.universal.core.mlx_embeddings import get_embedding_manager
+            manager = get_embedding_manager()
+            results = []
+            for text in texts:
+                # Use embed_document (sync) via asyncio.to_thread
+                result = await asyncio.to_thread(manager.embed_document, text)
+                emb = result.tolist() if hasattr(result, 'tolist') else list(result)
+                results.append(emb)
+            return results
+        except Exception as e:
+            logger.warning(f"MLXEmbeddingManager fallback failed: {e}")
+
+        # Last resort: deterministic hash-based embeddings
+        import random
+        return [
+            [random.Random(hash(t)).random() for _ in range(384)]
+            for t in texts
+        ]
     
     def _dense_retrieval(
         self,

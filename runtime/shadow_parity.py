@@ -57,7 +57,7 @@ Canonical facts owners:
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -145,6 +145,12 @@ class ParityArtifact:
     # Source tracking (for debugging which inputs were used)
     input_sources: Dict[str, str]  # bundle_name → source_module
 
+    # Fact stability breakdown — distinguishes STABLE vs COMPAT vs UNKNOWN inputs
+    # This prevents compat seams from being treated as authoritative facts
+    fact_stability_breakdown: Dict[str, str] = field(default_factory=dict)
+    # List of bundles that used COMPAT/legacy paths (not typed contracts)
+    compat_seams: List[str] = field(default_factory=list)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "mode": self.mode,
@@ -176,6 +182,8 @@ class ParityArtifact:
             "mismatch_categories": self.mismatch_categories,
             "mismatch_details": self.mismatch_details,
             "input_sources": self.input_sources,
+            "fact_stability_breakdown": self.fact_stability_breakdown,
+            "compat_seams": self.compat_seams,
         }
 
 
@@ -271,6 +279,21 @@ def run_shadow_parity(
         "correlation": "types.py",
     }
 
+    # --- Fact stability breakdown ---
+    # Prevents compat seams from being treated as authoritative facts
+    fact_stability_breakdown = {
+        "lifecycle_snapshot": lifecycle_bundle.fact_stability,
+        "graph_summary": graph_bundle.fact_stability,
+        "model_control_facts": model_control_bundle.fact_stability,
+    }
+    compat_seams: List[str] = []
+    if lifecycle_bundle.fact_stability == "COMPAT":
+        compat_seams.append("lifecycle_snapshot/windup_local_phase")
+    if graph_bundle.fact_stability == "COMPAT":
+        compat_seams.append("graph_summary/scorecard_top_nodes")
+    if model_control_bundle.fact_stability == "COMPAT":
+        compat_seams.append("model_control_facts/raw_profile")
+
     return ParityArtifact(
         mode=runtime_mode,
         timestamp_monotonic=now_monotonic,
@@ -301,6 +324,8 @@ def run_shadow_parity(
         mismatch_categories=mismatches if mismatches else ["NONE"],
         mismatch_details=mismatch_details if mismatch_details else {"note": "no mismatches detected"},
         input_sources=input_sources,
+        fact_stability_breakdown=fact_stability_breakdown,
+        compat_seams=compat_seams,
     )
 
 

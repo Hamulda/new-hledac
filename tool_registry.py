@@ -641,6 +641,9 @@ class ToolRegistry:
             KeyError: If tool not found
             ValidationError: If arguments invalid
             RuntimeError: If rate limit exceeded, timeout, or capability check fails
+
+        NOTE: None-skip is intentional backward compatibility. This will emit a
+        deprecation warning in a future sprint. Pass explicit capability sets.
         """
         tool = self.get_tool(tool_name)
 
@@ -649,6 +652,18 @@ class ToolRegistry:
             satisfied, reason = self.check_capabilities(tool_name, available_capabilities)
             if not satisfied:
                 raise RuntimeError(f"Capability check failed: {reason}")
+        else:
+            # Sprint 8SG: None-skip deprecation warning (controlled compat debt)
+            import warnings
+            warnings.warn(
+                f"[TOOL REGISTRY] execute_with_limits(tool_name={tool_name!r}, "
+                f"available_capabilities=None) — capability check SKIPPED. "
+                f"This is backward-compatible None-skip. "
+                f"Tool '{tool_name}' requires capabilities: {tool.required_capabilities}. "
+                f"Pass available_capabilities as explicit set to enable enforcement.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         # Validate arguments
         validated = tool.validate_args(args)

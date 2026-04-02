@@ -315,9 +315,12 @@ class TestRunWarmupIsOrchestration:
     """run_warmup() is orchestration, NOT lifecycle authority."""
 
     def test_run_warmup_is_async(self):
-        """run_warmup() must be an async function."""
-        assert hasattr(runtime_lifecycle, "run_warmup")
-        assert asyncio.iscoroutinefunction(runtime_lifecycle.run_warmup)
+        """run_warmup() must be an async function in __main__.py (orchestration, not lifecycle)."""
+        # Sprint 8VX: run_warmup moved from runtime/sprint_lifecycle.py → __main__.py
+        _MAIN_PY = os.path.join(_ROOT, "hledac", "universal", "__main__.py")
+        main_mod = _load("hledac.universal.__main__", _MAIN_PY)
+        assert hasattr(main_mod, "run_warmup"), "run_warmup must be in __main__.py (Sprint 8VX)"
+        assert asyncio.iscoroutinefunction(main_mod.run_warmup)
 
     def test_run_warmup_not_on_manager(self):
         """run_warmup must NOT be a SprintLifecycleManager method."""

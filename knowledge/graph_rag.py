@@ -103,17 +103,25 @@ class GraphRAGOrchestrator:
         logger.info("GraphRAGOrchestrator initialized")
 
     async def _get_embedder(self):
-        """Get or create cached embedder (lazy initialization)."""
+        """
+        Get shared MLXEmbeddingManager singleton (memory-convergent).
+
+        M1 8GB: graph_rag NENÍ embedder owner. Používá sdílený
+        MLXEmbeddingManager singleton z core/mlx_embeddings.py.
+        Žádné duplikátní RAGEngine() vytváření.
+        """
         if self._embedder is None:
             if self._embedder_lock is None:
                 self._embedder_lock = asyncio.Lock()
             async with self._embedder_lock:
                 if self._embedder is None:
                     try:
-                        from hledac.universal.knowledge.rag_engine import RAGEngine
-                        self._embedder = RAGEngine()
+                        # Sprint 81 Fáze 4: Sdílený singleton místo RAGEngine()
+                        from hledac.universal.core.mlx_embeddings import get_embedding_manager
+                        self._embedder = get_embedding_manager()
+                        logger.debug("[EMBEDDER] graph_rag using shared MLXEmbeddingManager singleton")
                     except Exception as e:
-                        logger.warning(f"Failed to create embedder: {e}")
+                        logger.warning(f"Failed to get shared embedder: {e}")
                         return None
         return self._embedder
 
@@ -156,8 +164,14 @@ class GraphRAGOrchestrator:
                 relevance_score = 0.5
             else:
                 if hypothesis_emb is None:
-                    hypothesis_emb = await embedder._embed_text(hypothesis)
-                    if hypothesis_emb is None:
+                    # MLXEmbeddingManager.embed_document is sync - use asyncio.to_thread
+                    try:
+                        emb_result = await asyncio.to_thread(embedder.embed_document, hypothesis)
+                        if emb_result is not None and len(emb_result) > 0:
+                            hypothesis_emb = emb_result.tolist() if hasattr(emb_result, 'tolist') else list(emb_result)
+                        else:
+                            hypothesis_emb = [0.0] * 384  # Fallback
+                    except Exception:
                         hypothesis_emb = [0.0] * 384  # Fallback
                 else:
                     hypothesis_emb = np.array(hypothesis_emb)

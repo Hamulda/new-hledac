@@ -493,21 +493,23 @@ class TestEndToEndEnforcement:
 
 class TestNoneSkipWarning:
     """
-    None-skip containment tests.
+    None-skip containment tests (Sprint 8SG).
 
-    These tests document that None-skip is:
-    1. Intentionally backward-compatible
-    2. A known debt (no warning when None is passed)
-    3. The current state of ALL production call-sites
+    These tests verify that None-skip:
+    1. Emits a DeprecationWarning (controlled compat debt)
+    2. Still allows backward-compatible execution
+    3. Documents what tool requires capabilities
     """
 
     @pytest.mark.asyncio
-    async def test_none_skip_no_warning_implicit(self):
+    async def test_none_skip_emits_deprecation_warning(self):
         """
-        When None is passed, no deprecation warning is issued.
+        When None is passed, a DeprecationWarning is issued.
 
-        This is the documented DEBT: should emit warnings.warn()
-        but currently does not.
+        This is Sprint 8SG None-skip containment:
+        - Warning is emitted to signal deprecated usage
+        - Execution still proceeds (backward compatibility)
+        - Tool's required_capabilities are documented in warning
         """
         import warnings as _warnings
 
@@ -522,35 +524,189 @@ class TestNoneSkipWarning:
                 available_capabilities=None,
             )
 
-        # Currently: NO warning is emitted (this is the debt)
-        # In future: should emit DeprecationWarning
+        # Sprint 8SG: DeprecationWarning IS now emitted
         cap_warnings = [
             x for x in w
             if "capability" in str(x.message).lower() or "deprecated" in str(x.message).lower()
         ]
-        assert len(cap_warnings) == 0, "None-skip should warn but currently doesn't (debt)"
+        assert len(cap_warnings) == 1, "None-skip should emit exactly one DeprecationWarning"
+        assert "academic_search" in str(cap_warnings[0].message)
+        assert "reranking" in str(cap_warnings[0].message) or "entity_linking" in str(cap_warnings[0].message)
 
     @pytest.mark.asyncio
-    async def test_none_skip_contains_to_compat_path(self):
+    async def test_none_skip_still_allows_compat_path(self):
         """
         None-skip routes through backward-compatible path.
 
         When available_capabilities=None:
-        1. check_capabilities() is NOT called
+        1. DeprecationWarning is emitted
         2. Execution proceeds without capability verification
         3. This is intentional for backward compatibility
         """
+        import warnings as _warnings
+
         registry = create_default_registry()
 
-        # This should NOT raise (None means skip)
-        result = await registry.execute_with_limits(
-            "academic_search",
-            {"query": "test", "sources": ["arxiv"]},
-            available_capabilities=None,
-        )
+        # Warning is emitted but execution still succeeds
+        with _warnings.catch_warnings(record=True):
+            _warnings.simplefilter("always")
+            result = await registry.execute_with_limits(
+                "academic_search",
+                {"query": "test", "sources": ["arxiv"]},
+                available_capabilities=None,
+            )
 
         # Result returned (or error from actual handler, not capability check)
         assert result is not None or True  # Either way, no capability error
+
+    @pytest.mark.asyncio
+    async def test_none_skip_warning_contains_required_capabilities(self):
+        """
+        None-skip warning message contains the tool's required capabilities.
+
+        This helps developers understand what to pass for proper enforcement.
+        """
+        import warnings as _warnings
+
+        registry = create_default_registry()
+
+        with _warnings.catch_warnings(record=True) as w:
+            _warnings.simplefilter("always")
+            await registry.execute_with_limits(
+                "web_search",
+                {"query": "test", "max_results": 5},
+                available_capabilities=None,
+            )
+
+        cap_warnings = [
+            x for x in w
+            if "capability" in str(x.message).lower()
+        ]
+        assert len(cap_warnings) == 1
+        # web_search requires reranking
+        assert "reranking" in str(cap_warnings[0].message)
+
+
+class TestCallSiteBoundaries:
+    """
+    Sprint 8TD: Call-site boundary verification.
+
+    These tests document WHY no primary call-site was wired:
+    - GhostExecutor is donor/compat, not canonical authority
+    - tool_exec_log is instrumentation, not execution
+    - No safe non-legacy, non-scheduler, non-stealth call-sites exist
+    """
+
+    def test_ghost_executor_execute_is_separate_from_tool_registry(self):
+        """
+        GhostExecutor.execute() is a SEPARATE execution path from ToolRegistry.
+
+        It uses ActionType enum and direct action handlers.
+        It does NOT go through ToolRegistry.execute_with_limits().
+        """
+        from hledac.universal.execution.ghost_executor import GhostExecutor, ActionType
+
+        # GhostExecutor has its own action registry
+        executor = GhostExecutor()
+        assert ActionType.SEARCH.value in executor._actions
+
+        # But those actions are NOT in ToolRegistry
+        registry = create_default_registry()
+        tool_names = [t.name for t in registry.list_tools()]
+
+        # GhostExecutor actions should not appear as ToolRegistry tools
+        ghost_actions = {"scan", "google", "deep_read", "stealth_harvest", "osint_discovery"}
+        assert not any(a in tool_names for a in ghost_actions)
+
+    def test_tool_exec_log_is_instrumentation_not_execution(self):
+        """
+        tool_exec_log is an AUDIT/LOGGING tool, not an execution tool.
+
+        It logs tool execution events but does not execute tools itself.
+        It COULD wrap ToolRegistry calls in the future for correlation.
+        """
+        from hledac.universal.tool_exec_log import ToolExecLog, ToolExecEvent
+        from pathlib import Path
+        import tempfile
+        from dataclasses import fields
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log = ToolExecLog(run_dir=Path(tmpdir), enable_persist=False)
+
+            # Log a fake event
+            log.log(
+                tool_name="test_tool",
+                input_data=b"input",
+                output_data=b"output",
+                status="success",
+            )
+
+            # tool_exec_log has log() method, not execute_with_limits()
+            assert hasattr(log, "log")
+            assert not hasattr(log, "execute_with_limits")
+
+            # ToolExecEvent is a dataclass with event_id and correlation fields
+            event_fields = {f.name for f in fields(ToolExecEvent)}
+            assert "event_id" in event_fields
+            assert "correlation" in event_fields
+
+
+class TestBypassDebtMatrix:
+    """
+    Sprint 8TD: Bypass debt matrix documentation.
+
+    These tests verify that documented bypasses are REAL
+    and that the enforcement hook exists for future wiring.
+    """
+
+    def test_execute_with_limits_hook_exists_for_future_wiring(self):
+        """
+        The enforcement hook (execute_with_limits with available_capabilities)
+        EXISTS and WORKS, but no production call-site passes it yet.
+
+        This is intentional - the hook is ready for scheduler integration.
+        """
+        registry = create_default_registry()
+
+        # The hook exists
+        assert hasattr(registry, "execute_with_limits")
+
+        # academic_search REQUIRES capabilities
+        tool = registry.get_tool("academic_search")
+        assert len(tool.required_capabilities) > 0
+
+        # execute_with_limits CAN enforce when called properly
+        # (proven by TestExecuteWithLimitsCapabilityEnforcement tests)
+
+    @pytest.mark.asyncio
+    async def test_none_skip_still_warns_but_does_not_hard_fail(self):
+        """
+        All known production call-sites use None-skip (backward compat).
+
+        This is the current reality:
+        - DeprecationWarning is emitted (Sprint 8SG)
+        - But execution continues (backward compat preserved)
+        - Hard fail would break production
+        """
+        import warnings as _warnings
+
+        registry = create_default_registry()
+
+        # This is how ALL current production call-sites call it
+        with _warnings.catch_warnings(record=True) as w:
+            _warnings.simplefilter("always")
+            result = await registry.execute_with_limits(
+                "academic_search",
+                {"query": "test", "sources": ["arxiv"]},
+                available_capabilities=None,  # What all production call-sites do
+            )
+
+        # No hard fail - execution continued
+        assert result is not None
+
+        # But warning WAS emitted
+        cap_warnings = [x for x in w if "capability" in str(x.message).lower()]
+        assert len(cap_warnings) >= 1
 
 
 if __name__ == "__main__":

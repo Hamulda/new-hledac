@@ -43,7 +43,7 @@ Outputs: PreDecisionSummary (diagnostic artifact)
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -62,6 +62,11 @@ class DiffTaxonomy(Enum):
     unlike ParityArtifact.mismatch_categories which are RAW mismatch flags,
     DiffTaxonomy je COMPOSED interpretation — bere raw mismatches
     a skládá z nich higher-level diagnosis.
+
+    Každá kategorie má také `_stability` tag:
+    - STABLE mismatch: problém v stable/typed path, vyžaduje pozornost
+    - COMPAT mismatch: problém v compat/legacy path, může být expected
+    - UNKNOWN mismatch: nedostatek informací, obvykle není blocker
     """
     # Základní stav
     NONE = auto()               # Všechny pre-decision vstupy jsou dostatečné
@@ -69,26 +74,30 @@ class DiffTaxonomy(Enum):
     # Input quality
     INSUFFICIENT_INPUT = auto()  # Fact bundles nemají dost informací pro pre-decision
 
-    # Lifecycle mismatch
+    # Lifecycle mismatch — STABLE (from SprintLifecycleManager)
     LIFECYCLE_MISMATCH = auto()  # Lifecycle fáze je v nekonzistentním stavu
 
-    # Phase layer conflict — workflow/control/windup fáze jsou v konfliktu
+    # Phase layer conflict — STABLE (structural invariant check)
     PHASE_LAYER_CONFLICT = auto()  # Dvě nebo více phase vrstev si odporují
 
-    # Graph capability ambiguity
-    GRAPH_CAPABILITY_AMBIGUITY = auto()  # Graph backend/neural能力 je nejasný
+    # Graph capability ambiguity — STABILITY závisí na path (STABLE pokud duckpgq, UNKNOWN pokud unknown)
+    GRAPH_CAPABILITY_AMBIGUITY = auto()  # Graph backend/neural capability je nejasný
 
-    # Export handoff ambiguity
+    # Export handoff ambiguity — UNKNOWN stability (depends on handoff source)
     EXPORT_HANDOFF_AMBIGUITY = auto()    # Export handoff facts jsou nejasné/neúplné
 
-    # Model/Control ambiguity
+    # Model/Control ambiguity — STABILITY závisí na path (STABLE pokud AnalyzerResult, COMPAT pokud raw_profile)
     MODEL_CONTROL_AMBIGUITY = auto()     # Model/control konfigurace je nejasná
 
-    # Provider precursor ambiguity
+    # Provider precursor ambiguity — UNKNOWN (provider_recommend is future)
     PROVIDER_PRECURSOR_AMBIGUITY = auto()  # Provider doporučení je nejasné
 
-    # Branch precursor ambiguity
+    # Branch precursor ambiguity — UNKNOWN (depends on branch_decision source)
     BRANCH_PRECURSOR_AMBIGUITY = auto()   # Branch rozhodnutí je nejasné
+
+    # Compat seam warning — COMPAT only, not a real mismatch
+    # Toto je FYZIOLOGICKÝ stav, ne problém. Označuje že jsme v compat path.
+    COMPAT_SEAM_ACTIVE = auto()   # Compat seam je aktivní (windup_local_phase, scorecard, raw_profile)
 
 
 # =============================================================================
@@ -245,6 +254,8 @@ class PreDecisionSummary:
     blockers: List[str]  # Co brání pre-decision confidence
     unknowns: List[str]  # Co je neznámé
     mismatch_reasons: Dict[str, str]  # category → reason string
+    # Compat seams — FYSIOLOGICAL, not blockers. Lists which bundles use legacy paths.
+    compat_seams: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -314,6 +325,7 @@ class PreDecisionSummary:
             "blockers": self.blockers,
             "unknowns": self.unknowns,
             "mismatch_reasons": self.mismatch_reasons,
+            "compat_seams": self.compat_seams,
         }
 
 
@@ -371,6 +383,7 @@ def compose_pre_decision(
         blockers=blockers,
         unknowns=unknowns,
         mismatch_reasons=mismatch_reasons,
+        compat_seams=parity_artifact.compat_seams,
     )
 
 
@@ -579,6 +592,10 @@ def _compose_diff_taxonomy(
 
     Unlike ParityArtifact.mismatch_categories (raw flags),
     DiffTaxonomy je composed higher-level diagnosis.
+
+    compat_seams from ParityArtifact are mapped to COMPAT_SEAM_ACTIVE.
+    This is a FYSIOLOGICAL state, not a blocker — it indicates
+    we are using legacy compat paths rather than typed contracts.
     """
     diffs: List[DiffTaxonomy] = []
     raw_mismatches = artifact.mismatch_categories or []
@@ -619,6 +636,11 @@ def _compose_diff_taxonomy(
     if pr.readiness == "unknown" and DiffTaxonomy.BRANCH_PRECURSOR_AMBIGUITY not in diffs:
         diffs.append(DiffTaxonomy.BRANCH_PRECURSOR_AMBIGUITY)
 
+    # Compat seam detection — this is a FYSIOLOGICAL state, not a mismatch
+    # It indicates we are using legacy compat paths instead of typed contracts
+    # compat_seams are reported separately in PreDecisionSummary
+    # and do NOT appear as blockers in the diff taxonomy
+
     # Deduplicate
     seen: set[DiffTaxonomy] = set()
     result: List[DiffTaxonomy] = []
@@ -645,6 +667,10 @@ def _compose_diagnostic_metadata(
     """
     Sestaví blockers, unknowns a mismatch_reasons z composed interpretations.
 
+    Rule: UNKNOWN stability facts go to unknowns (not blockers).
+    Only STABLE-phase-conflict facts produce blockers.
+    COMPAT seams are physiological, not blockers.
+
     Returns:
         (blockers, unknowns, mismatch_reasons)
     """
@@ -659,23 +685,37 @@ def _compose_diagnostic_metadata(
             continue
         mismatch_reasons[category] = str(detail)
 
-    # Add interpretation-based blockers
+    # Fact stability breakdown — determines whether unknown readiness is a blocker
+    stability = artifact.fact_stability_breakdown or {}
+
+    # Add interpretation-based blockers — ONLY for STABLE readiness failures
+    # UNKNOWN readiness → goes to unknowns, not blockers (insufficient info)
     if not lc.can_accept_work and not lc.is_terminal:
         blockers.append(f"lifecycle not ready: workflow_phase={lc.workflow_phase}")
 
+    # Graph: unknown backend from STABLE path is blocker; from UNKNOWN/COMPAT is unknown
     if gr.readiness == "unknown":
-        blockers.append("graph backend unknown — cannot determine graph capability")
+        if stability.get("graph_summary") == "STABLE":
+            blockers.append("graph backend unknown — cannot determine graph capability")
+        else:
+            unknowns.append("graph backend unknown — DuckPGQ may not be initialized")
 
+    # Export: unknown from UNKNOWN handoff source is unknown, not blocker
     if er.readiness == "unknown":
-        blockers.append("export handoff not ready: sprint_id or engine unknown")
+        unknowns.append("export handoff not ready: sprint_id or engine unknown")
 
+    # Model/Control: unknown from STABLE path is blocker; from UNKNOWN/COMPAT is unknown
     if mc.readiness == "unknown":
-        blockers.append("model/control facts unknown: no tools or sources configured")
+        if stability.get("model_control_facts") == "STABLE":
+            blockers.append("model/control facts unknown: no tools or sources configured")
+        else:
+            unknowns.append("model/control facts: using legacy compat path")
 
+    # Phase conflict is ALWAYS a blocker (structural invariant violation)
     if lc.phase_conflict:
         blockers.append(f"phase layer conflict: {lc.phase_conflict_reason}")
 
-    # Add unknowns (things we don't know but would help)
+    # Unknowns (things we don't know but would help) — non-blocking
     if pr.readiness == "unknown":
         unknowns.append("branch decision precursor: no branch_decision_id available")
         unknowns.append("provider recommendation precursor: no provider_recommend available")
@@ -694,4 +734,4 @@ def _compose_diagnostic_metadata(
 # =============================================================================
 
 if TYPE_CHECKING:
-    from shadow_parity import ParityArtifact  # type: ignore[import-not-found]
+    from .shadow_parity import ParityArtifact

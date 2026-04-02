@@ -44,7 +44,7 @@
 | Consumer | Co potřebuje | Current Provider | Correct Future Owner | Mismatch / Risk | Blocker |
 |----------|--------------|------------------|---------------------|-----------------|---------|
 | `orchestrator.py` (SprintScheduler) | Context grounding pro LLM | `RAGEngine.hybrid_retrieve()` | `RAGEngine` (už správně) | Žádný — přímá cesta | Žádný |
-| `graph_rag.py` → `_get_embedder()` | Embedding pro path scoring | Vytváří **vlastní** `RAGEngine()` instance na řádku 114 | `MLXEmbeddingManager` (sprint 81) | **DUPLICITNÍ RAGEngine** — grave risk | Sprint 81 embedder singleton |
+| `graph_rag.py` → `_get_embedder()` | Embedding pro path scoring | **`get_embedding_manager()` singleton** (2026-04-02 fix) | `MLXEmbeddingManager` (sprint 81) | **DUPLICITNÍ RAGEngine REMOVED** — ✅ Fixed | ✅ Done |
 | `lancedb_store.py` → `add_entity()` | Identity resolution | `LanceDBIdentityStore` | `LanceDBIdentityStore` (správně) | Žádný | Žádný |
 | `lancedb_store.py` → thermal awareness | Thermal state | `memory_coordinator.py` přes `self._orch` | Závislost na orchestrator | **Coupling risk** — store závisí na orchestrator | Refactor thermal awareness mimo orch |
 | `graph_rag.py` → `multi_hop_search()` | Knowledge graph traversal | `PersistentKnowledgeLayer` (deprecated) | `duckdb_store` (future) | **Legacy coupling** — graph_rag používá deprecated API | duckdb_store graph traversal API |
@@ -151,7 +151,7 @@
 
 **Hidden assumptions**:
 - `knowledge_layer` je instance `PersistentKnowledgeLayer` (deprecated!)
-- Pro embedding volá vlastní `RAGEngine()` na řádku 114 — **DUPLICITNÍ embedder instance**
+- Pro embedding volá `MLXEmbeddingManager` singleton (2026-04-02: **DUPLICITNÍ embedder REMOVED**)
 - Volá `knowledge_layer.search()` pro hop-0 semantic search
 - Volá `knowledge_layer.get_related_sync()` pro graph traversal
 - Volá `knowledge_layer._backend.get_node()` přímo na interní backend
@@ -161,30 +161,77 @@
 
 ## 4. Nejnebezpečnější couplingy
 
-### 🔴 CRITICAL: `graph_rag.py` vytváří vlastní `RAGEngine()` embedder
+### ✅ RESOLVED (2026-04-02): `graph_rag.py` používá sdílený `MLXEmbeddingManager`
 
-**Lokace**: `graph_rag.py:114`
+**Lokace**: `graph_rag.py:105-126` (`_get_embedder()`)
+
+**Před**:
 ```python
 from hledac.universal.knowledge.rag_engine import RAGEngine
-self._embedder = RAGEngine()
+self._embedder = RAGEngine()  # DUPLICITNÍ embedder!
 ```
 
-**Problém**:
-- Vytváří **druhou nezávislou instanci** RAGEngine
-- Každá instance má vlastní embedder (CoreML/MLX)
-- Na M1 8GB RAM to znamená **dvě souběžné embedder allocations**
-- RAGEngine embedder je určen pro **grounding** (krátké chunky), ne pro **path scoring** (celé dokumenty)
+**Po** (2026-04-02):
+```python
+from hledac.universal.core.mlx_embeddings import get_embedding_manager
+self._embedder = get_embedding_manager()  # Sdílený singleton
+```
 
-**Current reality**: Oba embeddery jsou initialized lazily, takže crash nenastane hned. Ale:
-- Memory footprint je 2× v高水平
-- Model weights mohou být loaded 2× (pokud oba používají stejný model)
+**Co bylo opraveno**:
+- `graph_rag` již nevytváří vlastní `RAGEngine()` instanci
+- Používá `MLXEmbeddingManager` singleton z `core/mlx_embeddings.py`
+- `score_path()` nyní volá `embedder.embed_document()` místo neexistujícího `embedder._embed_text()`
+- M1 8GB memory convergence: žádné duplikátní embedder alokace
 
-**Správné řešení** (až Sprint 81):
-- `MLXEmbeddingManager` singleton sdílený mezi `rag_engine` a `graph_rag`
-- `graph_rag` by měl použít `embed_document()` z jednoho sdíleného embedderu
-- NE vytvářet novou RAGEngine instanci
+**Stav**: ✅ Fixed
 
-**Prozatím**: graph_rag embedder zůstává jak je — velký refactor není v scope
+---
+
+### ✅ RESOLVED (2026-04-02): `rag_engine.py` cachuje `TextEmbedding` instanci
+
+**Lokace**: `rag_engine.py:926-969` (`_generate_embeddings()`)
+
+**Před**:
+```python
+async def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+    """Generate embeddings for texts using FastEmbed or fallback."""
+    try:
+        from fastembed import TextEmbedding
+        model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")  # NOVÁ instance pokaždé!
+        embeddings = list(model.embed(texts))
+        return [list(e) for e in embeddings]
+    except ImportError:
+        ...
+```
+
+**Po** (2026-04-02):
+```python
+async def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+    """Generate embeddings using cached FastEmbed or MLXEmbeddingManager singleton."""
+    # Sprint 8TD: Cache FastEmbed instance to avoid repeated model loading
+    if not hasattr(self, '_fastembed_embedder') or self._fastembed_embedder is None:
+        try:
+            from fastembed import TextEmbedding
+            self._fastembed_embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")  # Cached!
+        except ImportError:
+            self._fastembed_embedder = False
+
+    if self._fastembed_embedder:
+        embeddings = list(self._fastembed_embedder.embed(texts))
+        return [list(e) for e in embeddings]
+
+    # Fallback to MLXEmbeddingManager singleton
+    from hledac.universal.core.mlx_embeddings import get_embedding_manager
+    manager = get_embedding_manager()
+    ...
+```
+
+**Co bylo opraveno**:
+- `TextEmbedding` instance se již nevytváří při každém volání `_generate_embeddings()`
+- M1 8GB memory convergence: žádná repeated model loading fragmentation
+- Fallback na `MLXEmbeddingManager` singleton pokud FastEmbed unavailable
+
+**Stav**: ✅ Fixed
 
 ---
 
@@ -305,14 +352,14 @@ from hledac.ultra_context.secure_enclave_manager import SecureEnclaveManager
 - Multi-hop graph traversal nad `PersistentKnowledgeLayer` (deprecated)
 - Novelty detection, contradiction detection, timeline analysis
 - NENÍ backend owner — jen consumer
-- Vytváří vlastní RAGEngine pro embedding (DUPLICITNÍ — future fix: Sprint 81 MLXEmbeddingManager singleton)
+- Používá `MLXEmbeddingManager` singleton pro embedding (✅ **2026-04-02 Fixed**)
 
 ### Které couplingy jsou nejnebezpečnější?
-1. **🔴 graph_rag → own RAGEngine instance** — duplicate embedder allocation (M1 RAM impact)
+1. **✅ RESOLVED (2026-04-02): graph_rag → MLXEmbeddingManager singleton** — duplicate embedder allocation removed
 2. **🟠 lancedb_store → memory_coordinator přes self._orch** — optional coupling, store still functional without it
 3. **🟡 rag_engine → ultra_context imports** — implicit dependency transfer
 
 ### Co zůstává blocker před planner / DeepResearch integrací?
-1. **Sprint 81: MLXEmbeddingManager singleton** — odstraní duplicate embedder mezi rag_engine a graph_rag
+1. **✅ RESOLVED (2026-04-02): MLXEmbeddingManager singleton** — graph_rag nyní používá sdílený singleton
 2. **duckdb_store graph traversal API** — nahradí deprecated persistent_layer v graph_rag
 3. **Thermal-aware policy externalization** — oddělí lancedb_store od přímého volání memory_coordinator

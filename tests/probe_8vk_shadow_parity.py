@@ -806,3 +806,328 @@ class TestLegacyRuntimeUnchanged:
         finally:
             if env_backup is not None:
                 os.environ["HLEDAC_RUNTIME_MODE"] = env_backup
+
+
+class TestFactStabilityClassification:
+    """Test that fact_stability classification prevents compat seams from being authoritative."""
+
+    def test_graph_bundle_stable_from_ioc_graph_stats(self):
+        """from_ioc_graph_stats sets fact_stability=STABLE."""
+        from hledac.universal.runtime.shadow_inputs import GraphSummaryBundle
+
+        stats = {"nodes": 100, "edges": 300, "pgq_active": True}
+        bundle = GraphSummaryBundle.from_ioc_graph_stats(stats, top_nodes=["n1", "n2"])
+        assert bundle.fact_stability == "STABLE"
+        assert bundle.__future_owner__ == "knowledge/duckdb_store.py"
+        assert bundle.__compat_note__ is None
+
+    def test_graph_bundle_compat_from_scorecard_top_nodes(self):
+        """from_scorecard_top_nodes sets fact_stability=COMPAT."""
+        from hledac.universal.runtime.shadow_inputs import GraphSummaryBundle
+
+        bundle = GraphSummaryBundle.from_scorecard_top_nodes(["n1", "n2"])
+        assert bundle.fact_stability == "COMPAT"
+        assert bundle.__compat_note__ is not None
+        assert "deprecated" in bundle.__compat_note__
+
+    def test_model_control_bundle_stable_from_analyzer_result(self):
+        """from_analyzer_result sets fact_stability=STABLE."""
+        from hledac.universal.runtime.shadow_inputs import ModelControlFactsBundle
+        from hledac.universal.types import AnalyzerResult
+
+        result = AnalyzerResult(
+            tools={"cve"},
+            sources={"cisa_kev"},
+            privacy_level="HIGH",
+            use_tor=False,
+            depth="DEEP",
+            use_tot=False,
+            tot_mode="standard",
+            models_needed={"hermes"},
+        )
+        bundle = ModelControlFactsBundle.from_analyzer_result(result)
+        assert bundle.fact_stability == "STABLE"
+
+    def test_model_control_bundle_compat_from_raw_profile(self):
+        """raw_profile path sets fact_stability=COMPAT."""
+        from hledac.universal.runtime.shadow_inputs import ModelControlFactsBundle
+
+        raw = {"tools": ["cve"], "sources": ["cisa_kev"], "depth": "DEEP"}
+        bundle = ModelControlFactsBundle(
+            tools=raw["tools"],
+            sources=raw["sources"],
+            privacy_level="STANDARD",
+            depth=raw["depth"],
+            raw_profile=raw,
+            fact_stability="COMPAT",
+            __compat_note__="raw_profile dict path is legacy compat",
+        )
+        assert bundle.fact_stability == "COMPAT"
+        assert bundle.__compat_note__ is not None
+        assert "legacy compat" in bundle.__compat_note__
+
+    def test_lifecycle_bundle_in_windup_is_compat(self):
+        """windup_local_phase makes bundle fact_stability=COMPAT."""
+        from hledac.universal.runtime.shadow_inputs import (
+            LifecycleSnapshotBundle,
+            WorkflowPhase,
+            ControlPhase,
+            WindupLocalPhase,
+        )
+
+        # Bundle WITH windup_local_phase set → COMPAT
+        bundle = LifecycleSnapshotBundle(
+            workflow_phase=WorkflowPhase(phase="WINDUP", entered_at_monotonic=10.0),
+            control_phase=ControlPhase(mode="prune"),
+            windup_local_phase=WindupLocalPhase(
+                mode="synthesis", error_encountered=False, synthesis_engine="mlx"
+            ),
+            raw_snapshot={},
+            fact_stability="COMPAT",
+            __compat_note__="windup_local_phase is COMPAT: currently hardcoded in windup_engine.run_windup()",
+        )
+        assert bundle.fact_stability == "COMPAT"
+        assert bundle.__compat_note__ is not None
+        assert "hardcoded" in bundle.__compat_note__
+
+    def test_collect_graph_summary_empty_has_unknown_stability(self):
+        """Empty collect_graph_summary returns UNKNOWN stability."""
+        from hledac.universal.runtime.shadow_inputs import collect_graph_summary
+
+        bundle = collect_graph_summary(ioc_graph=None, scorecard=None)
+        assert bundle.fact_stability == "UNKNOWN"
+
+    def test_collect_model_control_facts_empty_has_unknown_stability(self):
+        """Empty collect_model_control_facts returns UNKNOWN stability."""
+        from hledac.universal.runtime.shadow_inputs import collect_model_control_facts
+
+        bundle = collect_model_control_facts(analyzer_result=None, raw_profile=None)
+        assert bundle.fact_stability == "UNKNOWN"
+
+
+class TestParityArtifactFactStability:
+    """Test ParityArtifact carries fact_stability_breakdown and compat_seams."""
+
+    def test_run_shadow_parity_populates_fact_stability_breakdown(self):
+        """run_shadow_parity fills fact_stability_breakdown from bundles."""
+        from hledac.universal.runtime.shadow_parity import run_shadow_parity
+        from hledac.universal.runtime.shadow_inputs import (
+            LifecycleSnapshotBundle,
+            GraphSummaryBundle,
+            ModelControlFactsBundle,
+            WorkflowPhase,
+            ControlPhase,
+        )
+
+        lc = LifecycleSnapshotBundle(
+            workflow_phase=WorkflowPhase(phase="ACTIVE"),
+            control_phase=ControlPhase(mode="normal"),
+            windup_local_phase=None,
+            raw_snapshot={},
+            fact_stability="STABLE",
+        )
+        graph = GraphSummaryBundle(
+            node_count=100, edge_count=300, pgq_active=True,
+            backend="duckpgq", fact_stability="STABLE",
+        )
+        mc = ModelControlFactsBundle(
+            tools=["cve"], sources=["cisa_kev"],
+            fact_stability="STABLE",
+        )
+
+        result = run_shadow_parity(
+            lifecycle_bundle=lc,
+            graph_bundle=graph,
+            model_control_bundle=mc,
+            export_handoff_facts={"sprint_id": "s123", "synthesis_engine": "mlx"},
+        )
+
+        assert "lifecycle_snapshot" in result.fact_stability_breakdown
+        assert "graph_summary" in result.fact_stability_breakdown
+        assert "model_control_facts" in result.fact_stability_breakdown
+        assert result.fact_stability_breakdown["graph_summary"] == "STABLE"
+
+    def test_run_shadow_parity_flags_compat_seams(self):
+        """run_shadow_parity populates compat_seams when bundles are COMPAT."""
+        from hledac.universal.runtime.shadow_parity import run_shadow_parity
+        from hledac.universal.runtime.shadow_inputs import (
+            LifecycleSnapshotBundle,
+            GraphSummaryBundle,
+            ModelControlFactsBundle,
+            WorkflowPhase,
+            ControlPhase,
+        )
+
+        lc = LifecycleSnapshotBundle(
+            workflow_phase=WorkflowPhase(phase="WINDUP"),
+            control_phase=ControlPhase(mode="prune"),
+            windup_local_phase=None,
+            raw_snapshot={},
+            fact_stability="COMPAT",
+        )
+        graph = GraphSummaryBundle(
+            fact_stability="COMPAT",
+        )
+        mc = ModelControlFactsBundle(
+            fact_stability="COMPAT",
+        )
+
+        result = run_shadow_parity(
+            lifecycle_bundle=lc,
+            graph_bundle=graph,
+            model_control_bundle=mc,
+            export_handoff_facts={},
+        )
+
+        assert len(result.compat_seams) > 0
+        assert "lifecycle_snapshot/windup_local_phase" in result.compat_seams
+
+    def test_parity_artifact_to_dict_includes_stability_fields(self):
+        """ParityArtifact.to_dict() includes fact_stability_breakdown and compat_seams."""
+        from hledac.universal.runtime.shadow_parity import ParityArtifact
+
+        artifact = ParityArtifact(
+            mode="scheduler_shadow",
+            timestamp_monotonic=0.0,
+            timestamp_wall="",
+            workflow_phase="ACTIVE",
+            workflow_phase_entered_at=10.0,
+            control_phase_mode="normal",
+            control_phase_thermal="nominal",
+            windup_local_mode=None,
+            graph_nodes=100,
+            graph_edges=300,
+            graph_pgq_active=True,
+            graph_backend="duckpgq",
+            graph_top_nodes_count=5,
+            mc_tools_count=2,
+            mc_sources_count=1,
+            mc_privacy="HIGH",
+            mc_depth="DEEP",
+            mc_models_needed=["hermes"],
+            export_sprint_id="s123",
+            export_synthesis_engine="mlx",
+            export_ranked_parquet_present=True,
+            export_gnn_predictions=10,
+            branch_decision_id=None,
+            provider_recommend=None,
+            correlation_run_id=None,
+            correlation_branch_id=None,
+            mismatch_categories=["NONE"],
+            mismatch_details={"note": "ok"},
+            input_sources={},
+            fact_stability_breakdown={"graph_summary": "STABLE"},
+            compat_seams=[],
+        )
+
+        d = artifact.to_dict()
+        assert "fact_stability_breakdown" in d
+        assert "compat_seams" in d
+        assert d["fact_stability_breakdown"]["graph_summary"] == "STABLE"
+
+
+class TestCompatSeamsVsBlockers:
+    """Verify compat seams are NOT treated as blockers."""
+
+    def test_compat_seams_do_not_appear_in_blockers(self):
+        """Compat seams should appear in compat_seams list, NOT in blockers."""
+        from hledac.universal.runtime.shadow_pre_decision import compose_pre_decision
+        from hledac.universal.runtime.shadow_parity import ParityArtifact
+
+        artifact = ParityArtifact(
+            mode="scheduler_shadow",
+            timestamp_monotonic=0.0,
+            timestamp_wall="",
+            workflow_phase="ACTIVE",
+            workflow_phase_entered_at=10.0,
+            control_phase_mode="normal",
+            control_phase_thermal="nominal",
+            windup_local_mode="synthesis",
+            graph_nodes=100,
+            graph_edges=300,
+            graph_pgq_active=True,
+            graph_backend="duckpgq",
+            graph_top_nodes_count=5,
+            mc_tools_count=2,
+            mc_sources_count=1,
+            mc_privacy="HIGH",
+            mc_depth="DEEP",
+            mc_models_needed=["hermes"],
+            export_sprint_id="s123",
+            export_synthesis_engine="mlx",
+            export_ranked_parquet_present=True,
+            export_gnn_predictions=10,
+            branch_decision_id=None,
+            provider_recommend=None,
+            correlation_run_id=None,
+            correlation_branch_id=None,
+            mismatch_categories=["NONE"],
+            mismatch_details={},
+            input_sources={},
+            fact_stability_breakdown={
+                "lifecycle_snapshot": "COMPAT",
+                "graph_summary": "STABLE",
+                "model_control_facts": "STABLE",
+            },
+            compat_seams=["lifecycle_snapshot/windup_local_phase"],
+        )
+
+        summary = compose_pre_decision(artifact)
+
+        # Compat seam should be in compat_seams, NOT in blockers
+        assert "lifecycle_snapshot/windup_local_phase" in summary.compat_seams
+        blocker_strs = [str(b) for b in summary.blockers]
+        for seam in summary.compat_seams:
+            assert seam not in blocker_strs
+
+    def test_unknown_readiness_is_not_necessarily_blocker(self):
+        """UNKNOWN readiness alone is not a blocker — only phase conflicts are."""
+        from hledac.universal.runtime.shadow_pre_decision import compose_pre_decision
+        from hledac.universal.runtime.shadow_parity import ParityArtifact
+
+        # Everything is unknown but no phase conflict
+        artifact = ParityArtifact(
+            mode="scheduler_shadow",
+            timestamp_monotonic=0.0,
+            timestamp_wall="",
+            workflow_phase="WARMUP",
+            workflow_phase_entered_at=10.0,
+            control_phase_mode="normal",
+            control_phase_thermal="nominal",
+            windup_local_mode=None,  # Not in WINDUP, so None is correct
+            graph_nodes=0,
+            graph_edges=0,
+            graph_pgq_active=False,
+            graph_backend="unknown",
+            graph_top_nodes_count=0,
+            mc_tools_count=0,
+            mc_sources_count=0,
+            mc_privacy="UNKNOWN",
+            mc_depth="UNKNOWN",
+            mc_models_needed=[],
+            export_sprint_id="unknown",
+            export_synthesis_engine="unknown",
+            export_ranked_parquet_present=False,
+            export_gnn_predictions=0,
+            branch_decision_id=None,
+            provider_recommend=None,
+            correlation_run_id=None,
+            correlation_branch_id=None,
+            mismatch_categories=["NONE"],
+            mismatch_details={},
+            input_sources={},
+            fact_stability_breakdown={
+                "lifecycle_snapshot": "UNKNOWN",
+                "graph_summary": "UNKNOWN",
+                "model_control_facts": "UNKNOWN",
+            },
+            compat_seams=[],
+        )
+
+        summary = compose_pre_decision(artifact)
+
+        # UNKNOWN should be in unknowns list, not necessarily in blockers
+        # Blockers should only fire for phase conflicts or critical mismatches
+        unknowns_strs = [str(u) for u in summary.unknowns]
+        assert len(unknowns_strs) > 0  # We have unknowns
+

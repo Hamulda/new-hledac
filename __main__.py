@@ -2467,7 +2467,7 @@ async def _run_sprint_mode(
         from .patterns.pattern_matcher import configure_default_bootstrap_patterns_if_empty
         configure_default_bootstrap_patterns_if_empty()
 
-        while lifecycle._current_phase == SprintPhase.ACTIVE:
+        while lifecycle.current_phase == SprintPhase.ACTIVE:
             await asyncio.sleep(1.0)
 
             # Check windup condition (T-3min remaining)
@@ -2553,7 +2553,7 @@ async def _run_sprint_mode(
             pass
 
         # Drain existing tasks — don't start new ones
-        while lifecycle._current_phase == SprintPhase.WINDUP:
+        while lifecycle.current_phase == SprintPhase.WINDUP:
             await asyncio.sleep(1.0)
             if lifecycle.remaining_time() <= 60.0:
                 lifecycle.request_export()
@@ -2756,3 +2756,79 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# =============================================================================
+# Sprint 8VX §D: run_warmup() — moved from runtime/sprint_lifecycle.py
+# This is WARMUP-phase orchestration, NOT lifecycle state machine.
+# Kept at module level (no SprintScheduler dependency in sprint mode).
+# =============================================================================
+
+import logging
+import time
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .sprint_scheduler import SprintScheduler
+
+_logger = logging.getLogger(__name__)
+
+
+async def run_warmup(scheduler: "SprintScheduler", config: dict) -> dict:
+    """
+    WARMUP fáze — inicializace, preflight, resource check.
+
+    Vrátí: warmup_result dict s preflight výsledky.
+    Nikdy nevyhodí výjimku — graceful degradation.
+    """
+    t_start = time.monotonic()
+
+    # 1. Preflight check
+    preflight: dict[str, Any] = {}
+    try:
+        preflight = await _preflight_check()
+    except Exception as e:
+        _logger.warning(f"[WARMUP] _preflight_check failed: {e}")
+
+    # 2. None soubor guard
+    none_path = __import__("pathlib").Path("None")
+    if none_path.exists():
+        _logger.error("[P0] Soubor 'None' existuje — spusť git rm --cached None")
+
+    # 3. DuckPGQGraph init + merge předchozích dat
+    if not hasattr(scheduler, "_ioc_graph") or scheduler._ioc_graph is None:
+        try:
+            from graph.quantum_pathfinder import DuckPGQGraph
+            from paths import SPRINT_STORE_ROOT
+            import glob
+            scheduler._ioc_graph = DuckPGQGraph()
+            prev_glob = str(SPRINT_STORE_ROOT / "*" / "batch_*.parquet")
+            if glob.glob(prev_glob):
+                count = scheduler._ioc_graph.merge_from_parquet(prev_glob)
+                _logger.info(f"[WARMUP] DuckPGQ merged {count} nodes")
+        except Exception as e:
+            _logger.warning(f"[WARMUP] DuckPGQ init: {e}")
+            scheduler._ioc_graph = None
+
+    # 4. IOCScorer lazy init
+    if not hasattr(scheduler, "_ioc_scorer") or scheduler._ioc_scorer is None:
+        try:
+            from brain.ner_engine import IOCScorer
+            scheduler._ioc_scorer = IOCScorer()
+        except Exception as e:
+            _logger.warning(f"[WARMUP] IOCScorer init: {e}")
+            scheduler._ioc_scorer = None
+
+    # 5. Ring buffer a RL state
+    if not hasattr(scheduler, "_recent_iocs"):
+        scheduler._recent_iocs = []
+    if not hasattr(scheduler, "_pivot_rewards"):
+        scheduler._pivot_rewards = {}
+    if not hasattr(scheduler, "_all_findings"):
+        scheduler._all_findings = []
+
+    return {
+        "preflight": preflight,
+        "t_warmup_start": t_start,
+        "t_warmup_end": time.monotonic(),
+    }

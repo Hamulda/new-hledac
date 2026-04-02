@@ -46,6 +46,7 @@ Future owners:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import ClassVar
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 import os
 
@@ -72,6 +73,11 @@ class RuntimeMode:
         LEGACY_RUNTIME — dnešní runtime path (default)
         SCHEDULER_SHADOW — shadow mode, čte facts, žádné řízení
         SCHEDULER_ACTIVE — plný scheduler-driven režim (budoucí)
+
+    Shrouded ownership — this scaffold module defines the vocabulary
+    but does NOT own any canonical fact contracts. All facts remain
+    owned by their respective canonical modules (sprint_lifecycle.py,
+    types.py, duckdb_store.py, autonomous_analyzer.py, capabilities.py).
     """
     LEGACY_RUNTIME = "legacy_runtime"
     SCHEDULER_SHADOW = "scheduler_shadow"
@@ -107,18 +113,6 @@ class RuntimeMode:
     def is_legacy_mode(cls) -> bool:
         """True if running in legacy runtime mode (default)."""
         return cls.get_current() == cls.LEGACY_RUNTIME
-    """
-    Feature flag vocabulary pro budoucí scheduler režimy.
-
-    Nikdy neaktivováno v tomto scaffoldu — pouze dokumentační.
-    Aktivace půjde přes explicitní flag v config nebo env var.
-    """
-    # Dnešní runtime path — scheduler volá lifecycle, lifecycle řídí fáze
-    LEGACY_RUNTIME = "legacy_runtime"
-    # Shadow mode — scheduler čte facts, žádné řízení
-    SCHEDULER_SHADOW = "scheduler_shadow"
-    # Plný scheduler-driven režim (budoucí)
-    SCHEDULER_ACTIVE = "scheduler_active"
 
 
 # =============================================================================
@@ -210,12 +204,34 @@ class LifecycleSnapshotBundle:
 
     Obsahuje workflow_phase, control_phase, windup_local_phase
     v ODDĚLENÝCH polích — NIKDY neslité do jednoho phase pole.
+
+    Shrouded ownership — this bundle is a DIAGNOSTIC SCAFFOLD.
+    It does NOT become a shared contract. Canonical facts remain
+    owned by SprintLifecycleManager (runtime/sprint_lifecycle.py).
+
+    Fact stability:
+    - workflow_phase: STABLE (from SprintLifecycleManager.snapshot())
+    - control_phase: STABLE (from recommended_tool_mode())
+    - windup_local_phase: COMPAT (from windup_engine hardcoded "synthesis")
+      → future_owner: runtime/windup_engine.py (when it gains structured mode)
+
+    Class-level attributes (NOT instance overrides — these document canonical ownership):
+    - __future_owner__: "runtime/sprint_lifecycle.py" — canonical owner of workflow/control phases
+    - __compat_note__: None for STABLE path; set for COMPAT paths
     """
     workflow_phase: WorkflowPhase
     control_phase: ControlPhase
     windup_local_phase: Optional[WindupLocalPhase] = None
-    # Raw snapshot for compatibility
+    # Raw snapshot for compatibility only
     raw_snapshot: Dict[str, Any] = field(default_factory=dict)
+    # Fact stability classification
+    fact_stability: str = "STABLE"  # STABLE | COMPAT | UNKNOWN
+    # Compat note: set when fact_stability != STABLE
+    __compat_note__: Optional[str] = None
+
+    # future_owner is a class-level attribute documenting canonical ownership.
+    # Instance-level overrides are NOT supported — each bundle class has one canonical owner.
+    __future_owner__: ClassVar[str] = "runtime/sprint_lifecycle.py"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -229,6 +245,10 @@ class LifecycleSnapshotBundle:
             "windup_local_synthesis_engine": (
                 self.windup_local_phase.synthesis_engine if self.windup_local_phase else None
             ),
+            # Fact stability — diagnostic metadata for distinguishing STABLE vs COMPAT vs UNKNOWN
+            "fact_stability": self.fact_stability,
+            "future_owner": self.__future_owner__,
+            "__compat_note__": self.__compat_note__,
         }
 
 
@@ -239,6 +259,17 @@ class GraphSummaryBundle:
 
     source: duckdb_store._ioc_graph.stats() (DuckPGQGraph)
     compat source: scorecard["top_graph_nodes"]
+
+    Shrouded ownership — DIAGNOSTIC SCAFFOLD, NOT a shared contract.
+    Canonical facts owned by knowledge/duckdb_store.py (DuckPGQGraph.stats()).
+
+    Fact stability:
+    - from_ioc_graph_stats: STABLE (from duckdb_store._ioc_graph)
+    - from_scorecard_top_nodes: COMPAT (legacy compat path)
+      → future_owner: eventually duckdb_store only, scorecard path deprecated
+
+    Class-level attributes (NOT instance overrides):
+    - __future_owner__: "knowledge/duckdb_store.py" — canonical owner
     """
     node_count: int = 0
     edge_count: int = 0
@@ -246,10 +277,17 @@ class GraphSummaryBundle:
     top_nodes: List[Any] = field(default_factory=list)  # noqa: A003
     backend: str = "unknown"  # duckpgq | kuzu | none
     raw_stats: Dict[str, Any] = field(default_factory=dict)
+    # Fact stability classification
+    fact_stability: str = "UNKNOWN"  # STABLE | COMPAT | UNKNOWN
+    # Compat note: set when fact_stability != STABLE
+    __compat_note__: Optional[str] = None
+
+    # future_owner is class-level — canonical owner of graph facts
+    __future_owner__: ClassVar[str] = "knowledge/duckdb_store.py"
 
     @classmethod
     def from_ioc_graph_stats(cls, stats: Dict[str, Any], top_nodes: Optional[List[Any]] = None) -> "GraphSummaryBundle":
-        """Build from DuckPGQGraph.stats() dict."""
+        """Build from DuckPGQGraph.stats() dict. STABLE path."""
         return cls(
             node_count=stats.get("nodes", 0),
             edge_count=stats.get("edges", 0),
@@ -257,11 +295,12 @@ class GraphSummaryBundle:
             top_nodes=top_nodes or [],
             backend="duckpgq",
             raw_stats=stats,
+            fact_stability="STABLE",
         )
 
     @classmethod
     def from_scorecard_top_nodes(cls, top_nodes: List[Any]) -> "GraphSummaryBundle":
-        """Build from scorecard top_nodes (compat path)."""
+        """Build from scorecard top_nodes (compat path). COMPAT — deprecated."""
         return cls(
             node_count=0,  # unknown from compat path
             edge_count=0,
@@ -269,6 +308,8 @@ class GraphSummaryBundle:
             top_nodes=top_nodes,
             backend="unknown",
             raw_stats={},
+            fact_stability="COMPAT",
+            __compat_note__="scorecard path is deprecated; use duckdb_store._ioc_graph.stats()",
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -278,6 +319,9 @@ class GraphSummaryBundle:
             "graph_pgq_active": self.pgq_active,
             "graph_backend": self.backend,
             "graph_top_nodes": self.top_nodes,
+            "graph_fact_stability": self.fact_stability,
+            "future_owner": self.__future_owner__,
+            "__compat_note__": self.__compat_note__,
         }
 
 
@@ -288,6 +332,17 @@ class ModelControlFactsBundle:
 
     source: AnalyzerResult (types.py)
     compat source: AutoResearchProfile (autonomous_analyzer.py) via .to_capability_signal()
+
+    Shrouded ownership — DIAGNOSTIC SCAFFOLD, NOT a shared contract.
+    Canonical facts owned by autonomous_analyzer.py / types.py.
+
+    Fact stability:
+    - from_analyzer_result: STABLE (typed path from AnalyzerResult)
+    - from raw_profile dict: COMPAT (legacy compat path)
+      → future_owner: autonomous_analyzer.py / capabilities.py
+
+    Class-level attributes (NOT instance overrides):
+    - __future_owner__: "autonomous_analyzer.py / types.py" — canonical owner
     """
     tools: List[str] = field(default_factory=list)
     sources: List[str] = field(default_factory=list)
@@ -301,10 +356,17 @@ class ModelControlFactsBundle:
     requires_embeddings: bool = False
     requires_ner: bool = False
     raw_profile: Optional[Dict[str, Any]] = None
+    # Fact stability classification
+    fact_stability: str = "UNKNOWN"  # STABLE | COMPAT | UNKNOWN
+    # Compat note: set when fact_stability != STABLE
+    __compat_note__: Optional[str] = None
+
+    # future_owner is class-level — canonical owner of model/control facts
+    __future_owner__: ClassVar[str] = "autonomous_analyzer.py / types.py"
 
     @classmethod
     def from_analyzer_result(cls, result: "AnalyzerResult") -> "ModelControlFactsBundle":
-        """Build from AnalyzerResult (typed path)."""
+        """Build from AnalyzerResult (typed path). STABLE."""
         sig = result.to_capability_signal()
         return cls(
             tools=list(result.tools),
@@ -318,6 +380,7 @@ class ModelControlFactsBundle:
             requires_embeddings=sig.get("requires_embeddings", False),
             requires_ner=sig.get("requires_ner", False),
             raw_profile=sig,
+            fact_stability="STABLE",
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -332,6 +395,9 @@ class ModelControlFactsBundle:
             "mc_models_needed": self.models_needed,
             "mc_requires_embeddings": self.requires_embeddings,
             "mc_requires_ner": self.requires_ner,
+            "mc_fact_stability": self.fact_stability,
+            "future_owner": self.__future_owner__,
+            "__compat_note__": self.__compat_note__,
         }
 
 
@@ -368,18 +434,27 @@ def collect_lifecycle_snapshot(
     ctrl_phase = ControlPhase.from_lifecycle(lifecycle, now_monotonic, thermal_state)
 
     windup_local = None
+    fact_stability = "STABLE"  # workflow and control are always STABLE from canonical sources
+    compat_note: Optional[str] = None
+
     if wf_phase.phase == "WINDUP":
         windup_local = WindupLocalPhase(
             mode=windup_synthesis_mode,
             error_encountered=windup_error,
             synthesis_engine=windup_engine,
         )
+        # windup_local_phase is COMPAT — currently hardcoded in windup_engine.run_windup()
+        # future_owner: runtime/windup_engine.py when it gains structured mode
+        fact_stability = "COMPAT"
+        compat_note = "windup_local_phase is COMPAT: currently hardcoded in windup_engine.run_windup()"
 
     return LifecycleSnapshotBundle(
         workflow_phase=wf_phase,
         control_phase=ctrl_phase,
         windup_local_phase=windup_local,
         raw_snapshot=raw,
+        fact_stability=fact_stability,
+        __compat_note__=compat_note,
     )
 
 
@@ -418,7 +493,11 @@ def collect_graph_summary(
         if top_nodes:
             return GraphSummaryBundle.from_scorecard_top_nodes(top_nodes)
 
-    return GraphSummaryBundle()
+    # Nothing provided — unknown stability
+    return GraphSummaryBundle(
+        fact_stability="UNKNOWN",
+        __compat_note__="no ioc_graph and no scorecard provided",
+    )
 
 
 def collect_model_control_facts(
@@ -451,9 +530,14 @@ def collect_model_control_facts(
             tot_mode=raw_profile.get("tot_mode", "standard"),
             models_needed=raw_profile.get("models_needed", []),
             raw_profile=raw_profile,
+            fact_stability="COMPAT",
+            __compat_note__="raw_profile dict path is legacy compat; use AnalyzerResult (typed path)",
         )
 
-    return ModelControlFactsBundle()
+    return ModelControlFactsBundle(
+        fact_stability="UNKNOWN",
+        __compat_note__="no analyzer_result and no raw_profile provided",
+    )
 
 
 def collect_export_handoff_facts(
