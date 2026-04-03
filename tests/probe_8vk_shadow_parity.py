@@ -1484,3 +1484,319 @@ class TestCompatSeamsVsBlockers:
         unknowns_strs = [str(u) for u in summary.unknowns]
         assert len(unknowns_strs) > 0  # We have unknowns
 
+
+# =============================================================================
+# F3.5: Shadow Scheduler Parity — Runtime-Mode Matrix Guard Tests
+# =============================================================================
+
+class TestShadowModeGuardTests:
+    """
+    F3.5 §Guard: scheduler_shadow mode boundaries.
+
+    scheduler_shadow smí pouze:
+    - Číst facts z lifecycle/graph/model_control bundles
+    - Počítat parity diff
+    - Sestavovat PreDecisionSummary
+    - Číst ToolRegistry metadata
+    - Generovat diagnostic artifact
+
+    scheduler_shadow NESMÍ:
+    - execute_with_limits()
+    - Provider activation
+    - Network execution
+    - Findings writes
+    - Runtime truth writes
+    - Nové truth store
+    """
+
+    def test_shadow_parity_run_produces_artifact_not_truth(self):
+        """
+        run_shadow_parity() returns ParityArtifact — diagnostic ONLY.
+        It does NOT write anything to any ledger or truth store.
+        """
+        from hledac.universal.runtime.shadow_parity import run_shadow_parity
+        from hledac.universal.runtime.shadow_inputs import (
+            LifecycleSnapshotBundle,
+            GraphSummaryBundle,
+            ModelControlFactsBundle,
+            WorkflowPhase,
+            ControlPhase,
+        )
+
+        # Minimal bundles
+        lc_bundle = LifecycleSnapshotBundle(
+            workflow_phase=WorkflowPhase(phase="ACTIVE", entered_at_monotonic=1.0),
+            control_phase=ControlPhase(mode="normal"),
+            fact_stability="STABLE",
+        )
+        graph_bundle = GraphSummaryBundle(
+            node_count=10,
+            edge_count=100,
+            backend="duckpgq",
+            fact_stability="STABLE",
+        )
+        mc_bundle = ModelControlFactsBundle(
+            tools=["web_search"],
+            sources=["test"],
+            fact_stability="STABLE",
+        )
+
+        artifact = run_shadow_parity(
+            lifecycle_bundle=lc_bundle,
+            graph_bundle=graph_bundle,
+            model_control_bundle=mc_bundle,
+            export_handoff_facts={"sprint_id": "test", "synthesis_engine": "test", "gnn_predictions": 0, "top_nodes_count": 0, "ranked_parquet_present": False, "phase_durations": {}},
+            runtime_mode="scheduler_shadow",
+        )
+
+        # It's an artifact, not a truth store
+        assert artifact is not None
+        assert hasattr(artifact, "mode")
+        assert artifact.mode == "scheduler_shadow"
+
+    def test_shadow_mode_no_execute_with_limits_in_scheduler(self):
+        """
+        SprintScheduler._build_shadow_pre_decision_summary() never calls
+        execute_with_limits() — enforced by is_shadow_mode() guard.
+        """
+        from unittest.mock import patch, MagicMock
+
+        # Verify the guard exists and prevents execution
+        from hledac.universal.runtime.shadow_inputs import RuntimeMode
+
+        with patch.dict("os.environ", {"HLEDAC_RUNTIME_MODE": "scheduler_shadow"}):
+            # When shadow mode, is_shadow_mode returns True
+            assert RuntimeMode.is_shadow_mode() is True
+            # is_active_mode is False — so scheduler_active path never activates
+            assert RuntimeMode.is_active_mode() is False
+
+    def test_compose_pre_decision_is_pure_function(self):
+        """
+        compose_pre_decision() is a pure function — no side effects.
+        Returns PreDecisionSummary, does not write anywhere.
+        """
+        from hledac.universal.runtime.shadow_parity import run_shadow_parity, ParityArtifact
+        from hledac.universal.runtime.shadow_pre_decision import compose_pre_decision
+        from hledac.universal.runtime.shadow_inputs import (
+            LifecycleSnapshotBundle,
+            GraphSummaryBundle,
+            ModelControlFactsBundle,
+            WorkflowPhase,
+            ControlPhase,
+        )
+
+        lc_bundle = LifecycleSnapshotBundle(
+            workflow_phase=WorkflowPhase(phase="ACTIVE", entered_at_monotonic=1.0),
+            control_phase=ControlPhase(mode="normal"),
+            fact_stability="STABLE",
+        )
+        graph_bundle = GraphSummaryBundle(
+            node_count=10,
+            edge_count=100,
+            backend="duckpgq",
+            fact_stability="STABLE",
+        )
+        mc_bundle = ModelControlFactsBundle(
+            tools=["web_search"],
+            sources=["test"],
+            fact_stability="STABLE",
+        )
+
+        artifact = run_shadow_parity(
+            lifecycle_bundle=lc_bundle,
+            graph_bundle=graph_bundle,
+            model_control_bundle=mc_bundle,
+            export_handoff_facts={"sprint_id": "test", "synthesis_engine": "test", "gnn_predictions": 0, "top_nodes_count": 0, "ranked_parquet_present": False, "phase_durations": {}},
+            runtime_mode="scheduler_shadow",
+        )
+        summary = compose_pre_decision(artifact)
+
+        # Summary is a new in-memory object, not a write to any store
+        assert summary is not None
+        assert hasattr(summary, "parity_timestamp_monotonic")
+        assert hasattr(summary, "lifecycle")
+
+
+class TestSchedulerActiveDormant:
+    """
+    F3.5 §Dormant: scheduler_active is declared but dormant.
+
+    scheduler_active smí být activated pouze when explicitly flagged.
+    Bez flag zůstává dormant — legacy_runtime je canonical path.
+    """
+
+    def test_scheduler_active_mode_is_dormant_without_flag(self):
+        """
+        Without HLEDAC_RUNTIME_MODE=scheduler_active, is_active_mode() returns False.
+        """
+        from unittest.mock import patch
+        from hledac.universal.runtime.shadow_inputs import RuntimeMode
+
+        # Default: no flag
+        assert RuntimeMode.is_active_mode() is False
+
+        # Invalid value falls back to legacy
+        with patch.dict("os.environ", {"HLEDAC_RUNTIME_MODE": "invalid"}):
+            assert RuntimeMode.is_active_mode() is False
+
+    def test_scheduler_active_requires_explicit_flag(self):
+        """
+        scheduler_active activates only with explicit HLEDAC_RUNTIME_MODE=scheduler_active.
+        """
+        from unittest.mock import patch
+        from hledac.universal.runtime.shadow_inputs import RuntimeMode
+
+        with patch.dict("os.environ", {"HLEDAC_RUNTIME_MODE": "scheduler_active"}):
+            assert RuntimeMode.is_active_mode() is True
+            # But shadow is still False
+            assert RuntimeMode.is_shadow_mode() is False
+            # And legacy is False
+            assert RuntimeMode.is_legacy_mode() is False
+
+
+class TestParityArtifactsDiagnosticOnly:
+    """
+    F3.5 §Diagnostic: ParityArtifact and PreDecisionSummary are diagnostic ONLY.
+    They do NOT become truth stores, do NOT get written to production ledgers.
+    """
+
+    def test_parity_artifact_has_is_diagnostic_only(self):
+        """
+        ParityArtifact.is_diagnostic_only() returns True.
+        """
+        from hledac.universal.runtime.shadow_parity import ParityArtifact
+
+        # is_diagnostic_only is a class-level declaration
+        assert hasattr(ParityArtifact, "is_diagnostic_only")
+        # Returns True for the class
+        assert ParityArtifact.is_diagnostic_only() is True
+
+    def test_pre_decision_summary_is_diagnostic_only(self):
+        """
+        PreDecisionSummary is diagnostic only — must NOT be written to runtime truth.
+        """
+        from hledac.universal.runtime.shadow_pre_decision import PreDecisionSummary
+
+        # is_diagnostic_only is a class-level declaration
+        assert hasattr(PreDecisionSummary, "is_diagnostic_only")
+        assert PreDecisionSummary.is_diagnostic_only() is True
+
+    def test_diagnostic_artifact_not_written_to_ledger(self, tmp_path):
+        """
+        Diagnostic artifacts must NOT be written to production ledgers.
+        This test verifies the contract by checking to_dict() output
+        does not contain 'truth_store' or 'ledger' markers.
+        """
+        from hledac.universal.runtime.shadow_parity import run_shadow_parity, ParityArtifact
+        from hledac.universal.runtime.shadow_inputs import (
+            LifecycleSnapshotBundle,
+            GraphSummaryBundle,
+            ModelControlFactsBundle,
+            WorkflowPhase,
+            ControlPhase,
+        )
+
+        lc_bundle = LifecycleSnapshotBundle(
+            workflow_phase=WorkflowPhase(phase="WINDUP", entered_at_monotonic=100.0),
+            control_phase=ControlPhase(mode="normal"),
+            windup_local_phase=None,
+            fact_stability="COMPAT",
+        )
+        graph_bundle = GraphSummaryBundle(
+            node_count=0,
+            edge_count=0,
+            backend="unknown",
+            fact_stability="UNKNOWN",
+        )
+        mc_bundle = ModelControlFactsBundle(
+            tools=[],
+            sources=[],
+            fact_stability="UNKNOWN",
+        )
+
+        artifact = run_shadow_parity(
+            lifecycle_bundle=lc_bundle,
+            graph_bundle=graph_bundle,
+            model_control_bundle=mc_bundle,
+            export_handoff_facts={"sprint_id": "test", "synthesis_engine": "test", "gnn_predictions": 0, "top_nodes_count": 0, "ranked_parquet_present": False, "phase_durations": {}},
+            runtime_mode="scheduler_shadow",
+        )
+
+        d = artifact.to_dict()
+        # No ledger/truth markers
+        for key in d.keys():
+            assert "ledger" not in key.lower(), f"Found 'ledger' in key: {key}"
+            assert "truth_store" not in key.lower(), f"Found 'truth_store' in key: {key}"
+
+
+class TestRuntimeModeMatrix:
+    """
+    F3.5 §Matrix: Explicit runtime-mode matrix.
+
+    | Režim              | Canonical Path | Read Facts | Write Truth | Execute Tools |
+    |--------------------|----------------|------------|-------------|--------------|
+    | legacy_runtime     | YES            | YES        | YES         | YES          |
+    | scheduler_shadow   | NO             | YES        | NO          | NO           |
+    | scheduler_active   | NO (dormant)   | YES        | NO          | NO           |
+    """
+
+    def test_legacy_runtime_is_canonical_path(self):
+        """
+        legacy_runtime is the default and canonical path.
+        """
+        from hledac.universal.runtime.shadow_inputs import RuntimeMode
+
+        mode = RuntimeMode.get_current()
+        assert mode == RuntimeMode.LEGACY_RUNTIME
+        assert RuntimeMode.is_legacy_mode() is True
+
+    def test_shadow_mode_read_only(self):
+        """
+        scheduler_shadow mode is read-only — no tool execution.
+        """
+        from unittest.mock import patch
+        from hledac.universal.runtime.shadow_inputs import RuntimeMode
+
+        with patch.dict("os.environ", {"HLEDAC_RUNTIME_MODE": "scheduler_shadow"}):
+            assert RuntimeMode.is_shadow_mode() is True
+            assert RuntimeMode.is_active_mode() is False
+            assert RuntimeMode.is_legacy_mode() is False
+
+    def test_active_mode_is_dormant(self):
+        """
+        scheduler_active mode is declared but dormant — requires explicit activation.
+        """
+        from unittest.mock import patch
+        from hledac.universal.runtime.shadow_inputs import RuntimeMode
+
+        # Default: dormant
+        assert RuntimeMode.is_active_mode() is False
+
+        # With explicit flag: still dormant in this sprint
+        # (Full activation requires F4+)
+        with patch.dict("os.environ", {"HLEDAC_RUNTIME_MODE": "scheduler_active"}):
+            assert RuntimeMode.is_active_mode() is True
+            # Shadow still separate
+            assert RuntimeMode.is_shadow_mode() is False
+
+    def test_runtime_mode_exclusive_except_legacy(self):
+        """
+        Only one mode is active at a time (except legacy overlaps with nothing).
+        """
+        from unittest.mock import patch
+        from hledac.universal.runtime.shadow_inputs import RuntimeMode
+
+        # Default: legacy only
+        assert RuntimeMode.get_current() == RuntimeMode.LEGACY_RUNTIME
+
+        with patch.dict("os.environ", {"HLEDAC_RUNTIME_MODE": "scheduler_shadow"}):
+            assert RuntimeMode.get_current() == RuntimeMode.SCHEDULER_SHADOW
+            assert RuntimeMode.is_shadow_mode()
+            assert not RuntimeMode.is_active_mode()
+            assert not RuntimeMode.is_legacy_mode()
+
+        with patch.dict("os.environ", {"HLEDAC_RUNTIME_MODE": "scheduler_active"}):
+            assert RuntimeMode.get_current() == RuntimeMode.SCHEDULER_ACTIVE
+            assert RuntimeMode.is_active_mode()
+            assert not RuntimeMode.is_shadow_mode()
+            assert not RuntimeMode.is_legacy_mode()

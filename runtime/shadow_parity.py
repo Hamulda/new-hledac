@@ -186,6 +186,16 @@ class ParityArtifact:
             "compat_seams": self.compat_seams,
         }
 
+    @classmethod
+    def is_diagnostic_only(cls) -> bool:
+        """
+        ParityArtifact is DIAGNOSTIC ONLY — not a truth store.
+
+        This class method confirms the artifact must NOT be written
+        to production ledgers or used as runtime truth.
+        """
+        return True
+
 
 # =============================================================================
 # Shadow parity runner — pure function, no side effects

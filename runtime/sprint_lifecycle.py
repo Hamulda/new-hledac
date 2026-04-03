@@ -234,12 +234,19 @@ class SprintLifecycleManager:
         return False
 
     # =============================================================================
-    # Sprint 8VX §C: COMPAT ALIASES — bridge to utils/sprint_lifecycle call-sites
+    # Sprint F4: COMPAT ALIASES — sealed with metadata
+    # Each alias carries: future_owner, caller_class, removal_condition, why_still_needed.
     # These forward to the canonical API. Labeled as COMPAT so they are clearly
     # NOT co-equal public API — they exist to make __main__.py cutover safe.
+    # Sprint F4: All alias metadata sealed — no new co-equal authority created.
     # =============================================================================
 
     # ── COMPAT: begin_sprint ─────────────────────────────────────────────────
+    # Sprint F4: Metadata sealed.
+    # future_owner: __main__.py
+    # caller_class: __main__.py (line ~2420), legacy autonomous_orchestrator (line ~11723)
+    # removal_condition: All call-sites migrated to .start() — requires isolated sprint for validation
+    # why_still_needed: 2 active call-sites across 2 production modules; cutover deferred to avoid behavior risk
 
     def begin_sprint(self) -> None:
         """
@@ -247,10 +254,19 @@ class SprintLifecycleManager:
 
         Canonical: use start() directly. This alias exists to support
         __main__.py cutover without rewriting call-sites in this pass.
+
+        F4 metadata:
+          future_owner: __main__.py
+          removal_condition: All call-sites migrated to .start()
         """
         self.start()
 
     # ── COMPAT: mark_warmup_done ────────────────────────────────────────────
+    # Sprint F4: Metadata sealed.
+    # future_owner: __main__.py
+    # caller_class: __main__.py (line ~2904)
+    # removal_condition: __main__.py uses transition_to(ACTIVE) directly — WARMUP→ACTIVE handled by start()
+    # why_still_needed: 1 call-site in __main__.py; start() already transitions to WARMUP, so this is redundant but still wired
 
     def mark_warmup_done(self) -> None:
         """
@@ -259,10 +275,19 @@ class SprintLifecycleManager:
         Canonical: the WARMUP→ACTIVE transition happens via start() + tick()
         or directly via transition_to(ACTIVE). This alias exists for
         __main__.py call-site compatibility.
+
+        F4 metadata:
+          future_owner: __main__.py
+          removal_condition: start() handles WARMUP→ACTIVE; or __main__.py uses transition_to(ACTIVE)
         """
         self.transition_to(SprintPhase.ACTIVE)
 
     # ── COMPAT: request_windup ──────────────────────────────────────────────
+    # Sprint F4: Metadata sealed.
+    # future_owner: __main__.py
+    # caller_class: __main__.py (lines ~2502, ~2526)
+    # removal_condition: All call-sites migrated to transition_to(SprintPhase.WINDUP) — requires isolated sprint
+    # why_still_needed: 2 production call-sites; idempotent behavior is same as transition_to
 
     def request_windup(self) -> None:
         """
@@ -270,6 +295,10 @@ class SprintLifecycleManager:
 
         Canonical: use transition_to(SprintPhase.WINDUP).
         Idempotent: skips if already in WINDUP or beyond (matching utils behavior).
+
+        F4 metadata:
+          future_owner: __main__.py
+          removal_condition: All call-sites use transition_to(WINDUP)
         """
         # Idempotent: don't re-trigger if already winding down
         if self._current_phase in (
@@ -281,6 +310,11 @@ class SprintLifecycleManager:
         self.transition_to(SprintPhase.WINDUP)
 
     # ── COMPAT: request_export ───────────────────────────────────────────────
+    # Sprint F4: Metadata sealed.
+    # future_owner: __main__.py
+    # caller_class: __main__.py (lines ~2604, ~2617), legacy autonomous_orchestrator (line ~12357)
+    # removal_condition: All call-sites migrated to mark_export_started()
+    # why_still_needed: 2 call-sites in __main__.py + 1 in legacy AO; idempotent same as mark_export_started
 
     def request_export(self) -> None:
         """
@@ -288,32 +322,59 @@ class SprintLifecycleManager:
 
         Canonical: use mark_export_started() directly.
         Idempotent: skips if already in EXPORT or TEARDOWN (matching utils behavior).
+
+        F4 metadata:
+          future_owner: __main__.py
+          removal_condition: All call-sites use mark_export_started()
         """
         if self._current_phase in (SprintPhase.EXPORT, SprintPhase.TEARDOWN):
             return
         self.mark_export_started()
 
     # ── COMPAT: request_teardown ─────────────────────────────────────────────
+    # Sprint F4: Metadata sealed.
+    # future_owner: __main__.py
+    # caller_class: __main__.py (none currently — wired but not called), legacy autonomous_orchestrator (line ~12690)
+    # removal_condition: All call-sites migrated to mark_teardown_started()
+    # why_still_needed: 1 call-site in legacy AO; __main__.py wires but does not call this method
 
     def request_teardown(self) -> None:
         """
         COMPAT ALIAS — forwards to mark_teardown_started().
 
         Canonical: use mark_teardown_started() directly.
+
+        F4 metadata:
+          future_owner: __main__.py
+          removal_condition: All call-sites use mark_teardown_started()
         """
         self.mark_teardown_started()
 
     # ── COMPAT: is_windup_phase ─────────────────────────────────────────────
+    # Sprint F4: Metadata sealed.
+    # future_owner: synthesis_runner.py
+    # caller_class: synthesis_runner (Path 3 compat fallback, line ~881)
+    # removal_condition: synthesis_runner fully migrates to runtime path — requires windup gate injection verified
+    # why_still_needed: synthesis_runner Path 3 (compat fallback) is still active; runtime path preferred but compat still reachable
 
     def is_windup_phase(self) -> bool:
         """
         COMPAT ALIAS — forwards to should_enter_windup().
 
         Canonical: use should_enter_windup() directly.
+
+        F4 metadata:
+          future_owner: synthesis_runner.py
+          removal_condition: synthesis_runner uses should_enter_windup() from runtime path
         """
         return self.should_enter_windup()
 
     # ── COMPAT: is_active property ───────────────────────────────────────────
+    # Sprint F4: Metadata sealed.
+    # future_owner: callers (runtime shadow_* modules)
+    # caller_class: runtime shadow_pre_decision (line ~1276), shadow_pre_decision tests
+    # removal_condition: All callers use in_phase(SprintPhase.ACTIVE) — low urgency, used in shadow/readonly paths
+    # why_still_needed: Read-only property used by shadow modules; low risk to keep
 
     @property
     def is_active(self) -> bool:
@@ -321,10 +382,19 @@ class SprintLifecycleManager:
         COMPAT PROPERTY — True when in ACTIVE phase.
 
         Canonical: use _current_phase == SprintPhase.ACTIVE.
+
+        F4 metadata:
+          future_owner: callers (shadow_* modules)
+          removal_condition: Callers use in_phase(SprintPhase.ACTIVE)
         """
         return self._current_phase == SprintPhase.ACTIVE
 
     # ── COMPAT: is_winding_down property ─────────────────────────────────────
+    # Sprint F4: Metadata sealed.
+    # future_owner: callers (runtime shadow_* modules)
+    # caller_class: runtime shadow_pre_decision (line ~1276)
+    # removal_condition: All callers use in_phase() checks — low urgency, used in shadow/readonly paths
+    # why_still_needed: Read-only property used by shadow modules; low risk to keep
 
     @property
     def is_winding_down(self) -> bool:
@@ -332,6 +402,10 @@ class SprintLifecycleManager:
         COMPAT PROPERTY — True when in WINDUP, EXPORT, or TEARDOWN.
 
         Canonical: use _current_phase in (SprintPhase.WINDUP, SprintPhase.EXPORT, SprintPhase.TEARDOWN).
+
+        F4 metadata:
+          future_owner: callers (shadow_* modules)
+          removal_condition: Callers use in_phase() checks
         """
         return self._current_phase in (
             SprintPhase.WINDUP,

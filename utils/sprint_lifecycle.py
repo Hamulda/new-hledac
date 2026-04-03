@@ -18,6 +18,17 @@ This module contains:
 Lifecycle authority: BOOT → WARMUP → ACTIVE → WINDUP → EXPORT → TEARDOWN
 Canonical: hledac.universal.runtime.sprint_lifecycle.SprintPhase enum
 Checkpoint seam: maybe_resume() free function (LMDB)
+
+Sprint F4: Module-level metadata:
+  - status: COMPAT SHIM ONLY
+  - canonical_authority: runtime/sprint_lifecycle.SprintLifecycleManager
+  - active_importers:
+      - legacy/autonomous_orchestrator.py (utils import)
+      - planning/htn_planner.py (TYPE_CHECKING import only)
+      - brain/synthesis_runner.py (Path 3 compat fallback)
+  - future_owner: TBD — requires legacy AO refactor + htn_planner cutover
+  - removal_condition: All active_importers migrated to runtime version
+  - why_still_needed: 2 production modules still import this; cutover deferred to avoid behavior risk
 """
 
 from __future__ import annotations
@@ -192,7 +203,16 @@ class SprintLifecycleManager:
         logger.info(f"[LIFECYCLE] {old.value} → {new_state.value}")
 
     def begin_sprint(self) -> None:
-        """Mark sprint as started, transition to WARMUP."""
+        """
+        Mark sprint as started, transition to WARMUP.
+
+        Sprint F4 metadata:
+          alias_for: runtime.SprintLifecycleManager.start()
+          future_owner: __main__.py, legacy autonomous_orchestrator
+          caller_class: legacy autonomous_orchestrator (line ~11723)
+          removal_condition: All callers migrated to runtime version
+          why_still_needed: legacy AO still imports utils version directly
+        """
         if self._sprint_start is not None:
             return  # Already begun
         self._sprint_start = time.monotonic()
@@ -206,7 +226,16 @@ class SprintLifecycleManager:
         logger.info(f"[LIFECYCLE] Sprint started — duration={self._sprint_duration}s, windup_lead={self._windup_lead}s")
 
     def mark_warmup_done(self) -> None:
-        """Transition from WARMUP to ACTIVE. Idempotent."""
+        """
+        Transition from WARMUP to ACTIVE. Idempotent.
+
+        Sprint F4 metadata:
+          alias_for: runtime.SprintLifecycleManager.transition_to(ACTIVE)
+          future_owner: __main__.py
+          caller_class: legacy autonomous_orchestrator (not currently called per grep)
+          removal_condition: All callers migrated to runtime version
+          why_still_needed: legacy AO imports this module; no active call-sites in legacy AO per current grep
+        """
         if self._state == SprintLifecycleState.WARMUP:
             self.transition_to(SprintLifecycleState.ACTIVE)
             # Start wind-down polling task
@@ -218,6 +247,13 @@ class SprintLifecycleManager:
         """
         Request wind-down. Can be called from timer, SIGINT/SIGTERM, or manual trigger.
         Idempotent — only fires once.
+
+        Sprint F4 metadata:
+          alias_for: runtime.SprintLifecycleManager.transition_to(WINDUP)
+          future_owner: __main__.py
+          caller_class: legacy autonomous_orchestrator (not called per grep)
+          removal_condition: All callers migrated to runtime version
+          why_still_needed: legacy AO has this as available method but no active call-sites
         """
         if self._windup_fired:
             return
@@ -228,7 +264,16 @@ class SprintLifecycleManager:
         logger.info("[LIFECYCLE] Wind-down requested")
 
     def request_export(self) -> None:
-        """Transition from WINDUP to EXPORT. Called after synthesis phase."""
+        """
+        Transition from WINDUP to EXPORT. Called after synthesis phase.
+
+        Sprint F4 metadata:
+          alias_for: runtime.SprintLifecycleManager.mark_export_started()
+          future_owner: __main__.py
+          caller_class: legacy autonomous_orchestrator (line ~12357)
+          removal_condition: All callers migrated to runtime version
+          why_still_needed: legacy AO still calls this; __main__.py uses canonical directly
+        """
         if self._state == SprintLifecycleState.WINDUP:
             self.transition_to(SprintLifecycleState.EXPORT)
             logger.info("[LIFECYCLE] Export phase")
@@ -239,7 +284,16 @@ class SprintLifecycleManager:
                     logger.warning(f"[LIFECYCLE] export hook error: {e}")
 
     def request_teardown(self) -> None:
-        """Transition from any winding-down state to TEARDOWN."""
+        """
+        Transition from any winding-down state to TEARDOWN.
+
+        Sprint F4 metadata:
+          alias_for: runtime.SprintLifecycleManager.mark_teardown_started()
+          future_owner: __main__.py
+          caller_class: legacy autonomous_orchestrator (line ~12690)
+          removal_condition: All callers migrated to runtime version
+          why_still_needed: legacy AO still calls this; __main__.py does not call this method
+        """
         if self._state == SprintLifecycleState.TEARDOWN:
             return
         old_state = self._state

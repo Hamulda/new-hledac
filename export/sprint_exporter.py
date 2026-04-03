@@ -46,8 +46,8 @@ async def export_sprint(
       - Future owner: duckdb_store.get_top_seed_nodes() — already implemented, this
         fallback is the compat bridge pending windup engine producing typed ExportHandoff.
     """
-    from paths import SPRINT_STORE_ROOT
-    from export.COMPAT_HANDOFF import ensure_export_handoff
+    from hledac.universal.paths import SPRINT_STORE_ROOT
+    from hledac.universal.export.COMPAT_HANDOFF import ensure_export_handoff
 
     # Sprint 8VJ §C: Normalize ExportHandoff | dict | None → typed ExportHandoff
     # Maintains backward compat: dict input → from_windup() extraction

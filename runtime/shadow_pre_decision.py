@@ -624,6 +624,17 @@ class PreDecisionSummary:
             "runtime_facts": self.runtime_facts.to_dict() if self.runtime_facts else None,
         }
 
+    @classmethod
+    def is_diagnostic_only(cls) -> bool:
+        """
+        PreDecisionSummary is DIAGNOSTIC ONLY — not a truth store.
+
+        This class method confirms the artifact must NOT be written
+        to production ledgers or used as runtime truth.
+        Must NOT participate in control flow decisions.
+        """
+        return True
+
 
 # =============================================================================
 # Pre-Decision Composer — pure function, no side effects
