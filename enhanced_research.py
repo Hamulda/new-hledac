@@ -46,7 +46,8 @@ ADMISSION BLOCKERS (před F11 připojením):
    ale DeepResearch NENÍ napojen na triad admission seam
 2. Source plane: EXISTS — SourceFamily (line 129) + SourcePlan (line 2348) +
    _build_source_plan() (line 2379) jsou definované
-3. Transport plane (FetchCoordinator): exists, full integration TBD
+3. Transport plane (FetchCoordinator): EXISTS (FetchCoordinator class exists),
+   but NOT wired to DeepResearch runtime path (full integration TBD)
 4. Session seams (BudgetManager, EvidenceLog): TBD
 5. Security gate (SecurityGate, privacy layer): TBD
 6. Minimal grounding seam (ProviderRequest/ProviderResult handoff): TBD
