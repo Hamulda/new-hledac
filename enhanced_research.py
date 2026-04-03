@@ -40,14 +40,16 @@ F10/F9 surfaces: ŽÁDNÉ přímé závislosti
 - UnifiedResearchEngine používá: intelligence.* (lazy), utils.ranking, knowledge.rag_engine, layers.stealth_layer
 - EnhancedResearchOrchestrator používá: types.UniversalResearchOrchestrator, utils.WorkflowEngine
 
-ACTIVATION BLOCKERS (před F11 připojením):
--------------------------------------------
-1. Triáda není plně integrována (analyzer → capability router → tool registry)
-2. Source plane není definována (research sources routing)
-3. Transport plane (FetchCoordinator) není plně propojen
-4. Session seams chybí (BudgetManager, EvidenceLog context)
-5. Security gate (SecurityGate, privacy layer) není integrován
-6. Minimal grounding seam chybí (ProviderRequest/ProviderResult handoff)
+ADMISSION BLOCKERS (před F11 připojením):
+------------------------------------------
+1. Triáda: PARTIAL — analyzer + capability router + tool registry EXISTUJÍ (Sprint F11),
+   ale DeepResearch NENÍ napojen na triad admission seam
+2. Source plane: EXISTS — SourceFamily (line 129) + SourcePlan (line 2348) +
+   _build_source_plan() (line 2379) jsou definované
+3. Transport plane (FetchCoordinator): exists, full integration TBD
+4. Session seams (BudgetManager, EvidenceLog): TBD
+5. Security gate (SecurityGate, privacy layer): TBD
+6. Minimal grounding seam (ProviderRequest/ProviderResult handoff): TBD
 
 M1 8GB Optimized: Lazy loading, chunked processing, aggressive memory management
 """
@@ -71,6 +73,7 @@ from .types import (
     ResearchMode,
     ResearchResult,
     ExecutionContext,
+    RunCorrelation,
 )
 from .utils import WorkflowEngine, Workflow, Task, TaskType, PredictivePlanner, PerformanceMonitor
 
@@ -250,6 +253,11 @@ class UnifiedResearchResult:
     # Results
     findings: List[ResearchFinding] = field(default_factory=list)
     fused_results: List[Dict[str, Any]] = field(default_factory=list)
+
+    # Correlation context (canonical RunCorrelation for cross-component tracing)
+    # This enables F11 activation path: correlation flows through result
+    # so downstream components (EvidenceLog, BudgetManager) can correlate.
+    correlation: Optional["RunCorrelation"] = None
 
     # Analysis
     temporal_analysis: Optional[Dict[str, Any]] = None
@@ -631,7 +639,8 @@ class UnifiedResearchEngine:
         query: str,
         depth: Optional[ResearchDepth] = None,
         query_type: Optional[QueryType] = None,
-        max_results: int = 50
+        max_results: int = 50,
+        correlation: Optional[RunCorrelation] = None,
     ) -> UnifiedResearchResult:
         """
         Execute deep research across all integrated tools.
@@ -643,6 +652,9 @@ class UnifiedResearchEngine:
             depth: Research depth (overrides config)
             query_type: Query type (auto-detected if not provided)
             max_results: Maximum results to return
+            correlation: Optional RunCorrelation for cross-component tracing.
+                When provided, enables F11 activation path by flowing
+                correlation through result to downstream components.
 
         Returns:
             UnifiedResearchResult with all findings and analysis
@@ -658,11 +670,12 @@ class UnifiedResearchEngine:
         logger.info(f"Starting deep research: '{query}'")
         logger.info(f"Depth: {research_depth.name}, Type: {detected_type.value}")
 
-        # Initialize result
+        # Initialize result with correlation context
         result = UnifiedResearchResult(
             query=query,
             depth=research_depth,
-            query_type=detected_type
+            query_type=detected_type,
+            correlation=correlation,
         )
 
         # Select tools
@@ -2523,6 +2536,10 @@ class DeepResearchRequest:
     depth: ResearchDepth = ResearchDepth.ADVANCED
     query_type: Optional[QueryType] = None
     max_results: int = 50
+    # Minimal grounding hints — internal, read-only.
+    # Carries topic/domain hints for future retrieval alignment.
+    # NOT a correlation field; correlation via seam parameter.
+    grounding_hints: Optional[Dict[str, List[str]]] = None
 
     def to_engine_kwargs(self) -> Dict[str, Any]:
         """Convert to UnifiedResearchEngine.deep_research() kwargs."""
@@ -2565,8 +2582,105 @@ class DeepResearchResponse:
         )
 
 
+# =============================================================================
+# INTERNAL HINT TYPES (Sprint F11 Pre-activation)
+# =============================================================================
+# Read-only, optional, no side effects.
+# Not exported — internal to enhanced_research.py seam only.
+# =============================================================================
+
+@dataclass(frozen=True)
+class _BudgetHints:
+    """Internal budget hints for DeepResearch session.
+
+    Not a canonical contract — internal to enhanced_research.py.
+    """
+    stagnation_tolerance: int = 0  # Extra iterations before stagnation triggers
+    confidence_boost: float = 0.0  # Adjust confidence threshold (delta)
+
+
+@dataclass(frozen=True)
+class _EvidenceHints:
+    """Internal evidence/logging hints for DeepResearch session.
+
+    Not a canonical contract — internal to enhanced_research.py.
+    """
+    log_level: str = "INFO"  # DEBUG, INFO, WARNING
+    detail_depth: str = "standard"  # minimal, standard, verbose
+
+
+@dataclass(frozen=True)
+class _PolicyFlags:
+    """Internal execution policy flags for DeepResearch session.
+
+    Not a canonical contract — internal to enhanced_research.py.
+    """
+    skip_stagnation_check: bool = False
+    force_exhaustive: bool = False
+
+
+@dataclass
+class DeepResearchGroundingShim:
+    """
+    Minimal internal grounding adapter for DeepResearch.
+
+    INTERNAL / PROVIDER-OWNED — NOT a public canonical surface.
+
+    Purpose:
+        - Bridges local DeepResearch seam to future F11 activation path
+        - Carries minimal grounding metadata (topic hints, domain tags)
+        - Carries session context hints (budget, evidence, policy)
+        - Does NOT pretend DeepResearch uses LLM-centric ProviderRequest/ProviderResult
+        - Does NOT create new correlation world — reuses RunCorrelation
+
+    Why this exists:
+        - UnifiedResearchEngine.deep_research() has no grounding context
+        - Future activation requires passing grounding hints to retrieval
+        - This shim provides a bounded, typed vessel for that metadata
+        - Full activation will replace this with triada-based grounding
+
+    What this is NOT:
+        - NOT ProviderRequest/ProviderResult replacement
+        - NOT a new correlation mechanism
+        - NOT public API
+
+    Shrink wrap: This is intentionally minimal. Do NOT expand unless
+    activation blockers are resolved.
+    """
+    topic_hints: List[str] = field(default_factory=list)
+    domain_tags: List[str] = field(default_factory=list)
+    correlation: Optional[RunCorrelation] = None
+    # Session context hints (read-only, optional, no side effects)
+    budget_hints: Optional[_BudgetHints] = None
+    evidence_hints: Optional[_EvidenceHints] = None
+    policy_flags: Optional[_PolicyFlags] = None
+
+    def is_empty(self) -> bool:
+        """Returns True if no grounding metadata is set."""
+        return (
+            len(self.topic_hints) == 0
+            and len(self.domain_tags) == 0
+            and self.correlation is None
+            and self.budget_hints is None
+            and self.evidence_hints is None
+            and self.policy_flags is None
+        )
+
+    def merge(self, other: "DeepResearchGroundingShim") -> "DeepResearchGroundingShim":
+        """Merge another shim into this one (deduplicates + concatenates)."""
+        return DeepResearchGroundingShim(
+            topic_hints=list(set(self.topic_hints + other.topic_hints)),
+            domain_tags=list(set(self.domain_tags + other.domain_tags)),
+            correlation=other.correlation or self.correlation,
+            budget_hints=other.budget_hints or self.budget_hints,
+            evidence_hints=other.evidence_hints or self.evidence_hints,
+            policy_flags=other.policy_flags or self.policy_flags,
+        )
+
+
 async def deep_research_provider_seam(
     request: DeepResearchRequest,
+    grounding: Optional[DeepResearchGroundingShim] = None,
 ) -> DeepResearchResponse:
     """
     Úzký provider seam pro deep research.
@@ -2574,16 +2688,18 @@ async def deep_research_provider_seam(
     DORMANT CANONICAL PROVIDER CANDIDATE - Sprint F11.
 
     Toto je jediný OFICIÁLNÍ entrypoint pro připojení na runtime.
-    Používá se pouze po splnění activation blockers:
-    1. Triáda (analyzer → capability router → tool registry)
-    2. Source plane (research sources routing)
-    3. Transport plane (FetchCoordinator)
-    4. Session seams (BudgetManager, EvidenceLog)
-    5. Security gate (SecurityGate, privacy layer)
-    6. Minimal grounding seam (ProviderRequest/ProviderResult handoff)
+    Používá se pouze po splnění admission blockers:
+    1. Triáda: PARTIAL — analyzer + router + registry EXISTUJÍ, DeepResearch NE napojen
+    2. Source plane: EXISTS — SourceFamily + SourcePlan + _build_source_plan()
+    3. Transport plane (FetchCoordinator): TBD
+    4. Session seams (BudgetManager, EvidenceLog): TBD
+    5. Security gate (SecurityGate, privacy layer): TBD
+    6. Minimal grounding seam (ProviderRequest/ProviderResult handoff): TBD
 
     Args:
         request: DeepResearchRequest s query a config
+        grounding: Optional DeepResearchGroundingShim s minimal grounding metadata.
+            When provided, its correlation is passed to engine.deep_research().
 
     Returns:
         DeepResearchResponse s výsledky
@@ -2593,17 +2709,104 @@ async def deep_research_provider_seam(
         ...     query="quantum computing breakthroughs",
         ...     depth=ResearchDepth.EXHAUSTIVE
         ... )
-        >>> resp = await deep_research_provider_seam(req)
+        >>> shim = DeepResearchGroundingShim(topic_hints=["physics", "quantum"])
+        >>> resp = await deep_research_provider_seam(req, shim)
         >>> print(f"Found {len(resp.findings)} findings")
     """
     engine = UnifiedResearchEngine(
         config=UnifiedResearchConfig(depth=request.depth)
     )
     try:
-        result = await engine.deep_research(**request.to_engine_kwargs())
+        # Extract correlation from grounding shim if provided
+        correlation = grounding.correlation if grounding else None
+        kwargs = request.to_engine_kwargs()
+        kwargs['correlation'] = correlation
+        result = await engine.deep_research(**kwargs)
         return DeepResearchResponse.from_unified_result(result)
     finally:
         await engine.cleanup()
+
+
+# =============================================================================
+# TRIAD ADMISSION SEAM (Sprint F11 - Read-Only Descriptor)
+# =============================================================================
+# Dormant admission metadata for DeepResearch provider candidate.
+# This is READ-ONLY admission truth — NOT runtime activation.
+#
+# WHAT THIS IS:
+#   - Provider-owned admission descriptor (identity, owner, blockers)
+#   - Explicit statement that DeepResearch is NOT canonical triad authority
+#   - Blocker-driven readiness map
+#
+# WHAT THIS IS NOT:
+#   - NO runtime activation of DeepResearch
+#   - NO eager initialization
+#   - NO new registry world
+#   - NO background worker
+#   - NO new public provider framework
+# =============================================================================
+
+@dataclass(frozen=True)
+class TriadAdmissionDescriptor:
+    """
+    Read-only admission metadata for DeepResearch provider candidate.
+
+    PROVIDER-OWNED DORMANT ADMISSION SEAM — NOT runtime authority.
+
+    This descriptor lives in the provider-owned space (enhanced_research.py)
+    and explicitly states:
+    1. Who owns this admission (provider candidate identity)
+    2. What the triad expects (capability expectations)
+    3. What blocks admission (blockers/preconditions)
+    4. That this is NOT runtime activation
+
+    The triad remains the canonical authority. This descriptor is a
+    declaration of intent and readiness, not execution permission.
+    """
+    # Identity
+    provider_candidate: str = "UnifiedResearchEngine"
+    owning_module: str = "enhanced_research"
+
+    # Triad integration state
+    triad_authority_exists: bool = True  # AnalyzerResult, CapabilityRouter, ToolRegistry exist
+    deepresearch_napojen: bool = False   # DeepResearch NOT wired to triad
+
+    # Capability expectations (what DeepResearch expects from triad)
+    expects_analyzer: bool = True   # Expects AnalyzerResult from AutonomousAnalyzer
+    expects_router: bool = True     # Expects CapabilityRouter routing
+    expects_registry: bool = True  # Expects ToolRegistry.execute_with_limits()
+
+    # Admission blockers (what must be resolved before F11 activation)
+    blockers: Tuple[str, ...] = (
+        "Session seams (BudgetManager, EvidenceLog): TBD",
+        "Security gate (SecurityGate, privacy layer): TBD",
+        "Minimal grounding seam (ProviderRequest/ProviderResult): TBD",
+        "Transport plane (FetchCoordinator): TBD",
+    )
+
+    # Explicit boundary statement
+    is_dormant: bool = True
+    is_not_runtime_authority: bool = True
+    is_not_activation: bool = True
+
+    @property
+    def admission_summary(self) -> str:
+        """Human-readable admission status."""
+        lines = [
+            f"Provider Candidate: {self.provider_candidate}",
+            f"Triad Authority Exists: {self.triad_authority_exists}",
+            f"DeepResearch Napojen: {self.deepresearch_napojen}",
+            f"Dormant: {self.is_dormant}",
+            "",
+            "Blockers:",
+        ]
+        for b in self.blockers:
+            lines.append(f"  - {b}")
+        return "\n".join(lines)
+
+
+# Canonical singleton for read-only admission queries
+DEEP_RESEARCH_ADMISSION = TriadAdmissionDescriptor()
 
 
 # =============================================================================
@@ -2615,13 +2818,13 @@ __all__ = [
     # PROVIDER CANDIDATE - UnifiedResearchEngine (DORMANT, F11 target)
     # ========================================================================
     # UnifiedResearchEngine is the dormant canonical provider candidate.
-    # It is NOT in the hot path. Activation requires F11 integration:
-    #   1. Triad (analyzer → capability router → tool registry)
-    #   2. Source plane (research sources routing)
-    #   3. Transport plane (FetchCoordinator)
-    #   4. Session seams (BudgetManager, EvidenceLog)
-    #   5. Security gate (SecurityGate, privacy layer)
-    #   6. Minimal grounding seam (ProviderRequest/ProviderResult handoff)
+    # It is NOT in the hot path. Admission requires F11 integration:
+    #   1. Triáda: PARTIAL — analyzer + router + registry EXISTUJÍ, DeepResearch NE napojen
+    #   2. Source plane: EXISTS — SourceFamily + SourcePlan + _build_source_plan()
+    #   3. Transport plane (FetchCoordinator): TBD
+    #   4. Session seams (BudgetManager, EvidenceLog): TBD
+    #   5. Security gate (SecurityGate, privacy layer): TBD
+    #   6. Minimal grounding seam (ProviderRequest/ProviderResult handoff): TBD
     #
     # USAGE: Only via deep_research_provider_seam() after F11 activation.
     #        Direct instantiation is NON-CANONICAL.
@@ -2661,6 +2864,7 @@ __all__ = [
     # NOTE: These are internal seams, NOT public API.
     'DeepResearchRequest',
     'DeepResearchResponse',
+    'DeepResearchGroundingShim',
     'deep_research_provider_seam',
 
     # ========================================================================
@@ -2679,4 +2883,12 @@ __all__ = [
     'ResearchDepth',
     'QueryType',
     'ResearchFinding',
+
+    # ========================================================================
+    # TRIAD ADMISSION SEAM (Sprint F11 - Read-Only Descriptor)
+    # ========================================================================
+    # Read-only admission metadata for DeepResearch provider candidate.
+    # NOT runtime activation — this is a declaration of intent + readiness.
+    'TriadAdmissionDescriptor',
+    'DEEP_RESEARCH_ADMISSION',
 ]
