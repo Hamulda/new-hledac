@@ -62,12 +62,38 @@ async def export_sprint(
         logger.warning(f"[EXPORT] Could not create report_dir: {e}")
         report_dir = SPRINT_STORE_ROOT  # fallback
 
-    # 1. JSON report — use handoff.scorecard (preserves full scorecard)
+    # Sprint 8VZ §C: F10 runtime boundary wiring
+    # sanitize_outbound() na JSON report boundary — content opouští systém
+    boundary_content = _make_serializable(eh.scorecard)
+    boundary_text = json.dumps(boundary_content, indent=2, default=str)
+
+    # Pass through early privacy gate (outbound boundary)
+    # Using security_coordinator sanitize_outbound seam
+    try:
+        from hledac.universal.coordinators.security_coordinator import UniversalSecurityCoordinator
+        sec_coordinator = UniversalSecurityCoordinator(max_concurrent=2)
+        await sec_coordinator._do_initialize()
+        gate_result = await sec_coordinator.sanitize_outbound(boundary_text, force_fallback=True)
+        sanitized_scorecard_raw = gate_result.get("sanitized", boundary_text)
+        # Log audit metadata (non-blocking)
+        if gate_result.get("pii_count"):
+            logger.info("[EXPORT] sanitize_outbound: pii_count=%s, risk=%s",
+                        gate_result.get("pii_count"), gate_result.get("risk_level", "unknown"))
+    except Exception as e:
+        # Fail-soft: fall back to unsanitized content, log warning
+        logger.warning("[EXPORT] sanitize_outbound failed (non-fatal): %s", e)
+        sanitized_scorecard_raw = boundary_text
+
+    # 1. JSON report — use sanitized scorecard (F10 boundary applied)
     report_path = report_dir / f"{_sprint_id}_report.json"
     try:
-        serializable_scorecard = _make_serializable(eh.scorecard)
+        # Re-parse sanitized text back to JSON for writing
+        try:
+            sanitized_obj = json.loads(sanitized_scorecard_raw)
+        except (json.JSONDecodeError, TypeError):
+            sanitized_obj = boundary_content  # Fallback to original
         with open(report_path, "w", encoding="utf-8") as f:
-            json.dump(serializable_scorecard, f, indent=2, default=str)
+            json.dump(sanitized_obj, f, indent=2, default=str)
         logger.info(f"[EXPORT] JSON report → {report_path}")
     except Exception as e:
         logger.warning(f"[EXPORT] JSON write failed: {e}")

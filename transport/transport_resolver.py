@@ -14,7 +14,17 @@ logger = logging.getLogger(__name__)
 
 
 class Transport(Enum):
-    """Transport type enum — used by SourceTransportMap."""
+    """
+    Transport type enum — used by SourceTransportMap.
+
+    SPRINT 8VX: Transport World Classification:
+      DIRECT    — plain TCP world (aiohttp TCPConnector)
+      TOR       — proxy-aware SOCKS5 world (ProxyConnector)
+      I2P       — proxy-aware SOCKS5 world (ProxyConnector)
+      INMEMORY  — test/internal only
+
+    curl_cffi is a SEPARATE world (JA3 fingerprint spoofing) — not in this enum.
+    """
     DIRECT = auto()
     TOR = auto()
     I2P = auto()
@@ -62,6 +72,10 @@ class TransportResolver:
     - context.requires_anonymity (derived from runtime signals)
     - context.risk_level
     - autodetection of Tor/Nym availability
+
+    SPRINT 8VX — TRANSPORT WORLD CLASSIFICATION:
+      This class manages the PLAIN TCP + PROXY-AWARE SOCKS world.
+      curl_cffi world is SEPARATE — managed by StealthCrawler.
 
     AUTHORITY NOTE (audit/8SF):
       This class is a POLICY CANDIDATE, not the current production authority.

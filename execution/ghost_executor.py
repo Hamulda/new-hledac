@@ -35,7 +35,7 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..types import ExecutionRequest, ExecutionResult, RunCorrelation
@@ -111,31 +111,119 @@ class ActionResult:
 # Neprodukuje side effects, nevolá ToolRegistry.execute_with_limits()
 # =============================================================================
 
-# Sprint 8VF: Read-only action → canonical tool name mapping
-# DIAGNOSTIC ONLY — používá se v bridge adaptéru pro typovou konverzi
-# Nenahrazuje get_task_handler() v runtime dispatch
+# =============================================================================
+# Sprint 8VF: Delegation Matrix — Ghost Action → Canonical Tool
+# =============================================================================
+# STRICT CLASSIFICATION — nepřekládat vyšší coverage než repo skutečně má
+#
+# 3 kategorie:
+#   canonical_ready       = plná sémantická shoda, lze delegovat
+#   mapped_but_lossy      = mapping exists, ale sémantika ≠ (viz blokery)
+#   runtime_only_compat   = žádný canonical ekvivalent, zůstává v Ghost path
+#
+# Audit pravidla:
+#   - canonical_ready pouze když Ghost action a Tool handler dělajÍ TOTÉŽ
+#   - mapped_but_lossy když mapping existuje ale sémantika se liší
+#   - runtime_only_compat když není canonical ekvivalent
+# =============================================================================
+
+# === CANONICAL-READY SLICE ===
+# Kritérium: Ghost action a ToolRegistry tool DĚLAJÍ TOTÉŽ (ne jen podobně)
+# Aktuální stav: ŽÁDNÁ akce nesplňuje toto kritérium.
+# Důvod: Ghost akce mají vlastní implementace (byť placeholder),
+#        ToolRegistry handlery jsou placeholder/univerzální.
+# SPRINT 8VF: Delegation seam existuje, ale canonical-ready slice je PRÁZDNÁ.
+_CANONICAL_READY_ACTIONS: Set[str] = set()  # prázdná — audit viz níže
+
+# === MAPPED-BUT-LOSSY SLICE ===
+# Kritérium: Ghost action má mapping na ToolRegistry tool,
+#            ale sémantika provádění se ZÁSADNĚ liší.
+#
+# Blokery pro canonical-ready:
+#   SEARCH/GOOGLE/SMART_SEARCH → web_search:
+#     Ghost: harvestuje URL přes network driver + stealth + Bloom dedup
+#     TR: placeholder handler (vrací prázdné výsledky)
+#     Sémantika ≠ → MAPPED-BUT-LOSSY, ne canonical-ready
+#
+#   RESEARCH_PAPER → academic_search:
+#     Ghost: placeholder (vrací prázdné)
+#     TR: placeholder (vrací prázdné)
+#     Žádný skutečný obsah → MAPPED-BUT-LOSSY
+#
+#   DEEP_READ → file_read:
+#     Ghost: URL harvest + BloomFilter dedup + context update + 8KB chunking + 5MB limit
+#     TR: local file read (žádný network, žádný Bloom, žádný context)
+#     Sémantika ≠ → MAPPED-BUT-LOSSY
+#
+_MAPPED_BUT_LOSSY_ACTIONS: Set[str] = {
+    ActionType.SEARCH.value,
+    ActionType.GOOGLE.value,
+    ActionType.SMART_SEARCH.value,
+    ActionType.RESEARCH_PAPER.value,
+    ActionType.DEEP_READ.value,
+}
+
+# === RUNTIME-ONLY-COMPAT SLICE ===
+# Kritérium: žádný canonical ekvivalent v ToolRegistry
+_RUNTIME_ONLY_COMPAT_ACTIONS: Set[str] = {
+    ActionType.SCAN.value,
+    ActionType.DOWNLOAD.value,
+    ActionType.MEMORIZE.value,
+    ActionType.PROBE.value,
+    ActionType.TRACK.value,
+    ActionType.DEEP_RESEARCH.value,
+    ActionType.ANSWER.value,
+    ActionType.CRACK.value,
+    ActionType.ERROR.value,
+    ActionType.ARCHIVE_FALLBACK.value,
+    ActionType.FACT_CHECK.value,
+    ActionType.STEALTH_HARVEST.value,
+    ActionType.OSINT_DISCOVERY.value,
+}
+
+# === UNIFIED MAPPING pro diagnostiku a delegation seam ===
+# Současný stav: pouze diagnostický — obsahuje i mapped-but-lossy položky
+# Future: po F9 cutover bude obsahovat pouze canonical-ready
 _ACTION_TO_CANONICAL_TOOL: Dict[str, str] = {
-    # Ghost akce → ToolRegistry tool name (pokud existuje ekvivalent)
+    # Mapped (ale lossy) akce
     ActionType.SEARCH.value: "web_search",
     ActionType.GOOGLE.value: "web_search",
     ActionType.SMART_SEARCH.value: "web_search",
     ActionType.RESEARCH_PAPER.value: "academic_search",
-    ActionType.DEEP_READ.value: "file_read",  # Částečná shoda — file_read čte obsah
-    # Akce bez ToolRegistry ekvivalentu — zůstávají jako runtime_only_compat
-    ActionType.SCAN.value: "",  # runtime_only_compat
-    ActionType.DOWNLOAD.value: "",  # runtime_only_compat
-    ActionType.MEMORIZE.value: "",  # runtime_only_compat
-    ActionType.PROBE.value: "",  # runtime_only_compat
-    ActionType.TRACK.value: "",  # runtime_only_compat
-    ActionType.DEEP_RESEARCH.value: "",  # runtime_only_compat
-    ActionType.ANSWER.value: "",  # runtime_only_compat
-    ActionType.CRACK.value: "",  # runtime_only_compat
-    ActionType.ERROR.value: "",  # runtime_only_compat
-    ActionType.ARCHIVE_FALLBACK.value: "",  # runtime_only_compat
-    ActionType.FACT_CHECK.value: "",  # runtime_only_compat
-    ActionType.STEALTH_HARVEST.value: "",  # runtime_only_compat
-    ActionType.OSINT_DISCOVERY.value: "",  # runtime_only_compat
+    ActionType.DEEP_READ.value: "file_read",
+    # Runtime-only akce — žádný canonical ekvivalent
+    ActionType.SCAN.value: "",
+    ActionType.DOWNLOAD.value: "",
+    ActionType.MEMORIZE.value: "",
+    ActionType.PROBE.value: "",
+    ActionType.TRACK.value: "",
+    ActionType.DEEP_RESEARCH.value: "",
+    ActionType.ANSWER.value: "",
+    ActionType.CRACK.value: "",
+    ActionType.ERROR.value: "",
+    ActionType.ARCHIVE_FALLBACK.value: "",
+    ActionType.FACT_CHECK.value: "",
+    ActionType.STEALTH_HARVEST.value: "",
+    ActionType.OSINT_DISCOVERY.value: "",
 }
+
+
+def _get_action_classification(action: str) -> str:
+    """
+    Vrátí klasifikaci Ghost akce.
+
+    Returns:
+        "canonical_ready"      — lze delegovat na ToolRegistry path
+        "mapped_but_lossy"     — má mapping, ale sémantika ≠
+        "runtime_only_compat" — žádný canonical ekvivalent
+    """
+    if action in _CANONICAL_READY_ACTIONS:
+        return "canonical_ready"
+    elif action in _MAPPED_BUT_LOSSY_ACTIONS:
+        return "mapped_but_lossy"
+    elif action in _RUNTIME_ONLY_COMPAT_ACTIONS:
+        return "runtime_only_compat"
+    return "unknown"
 
 
 class GhostBridge:
@@ -245,6 +333,104 @@ class GhostBridge:
             error=ghost_result.error,
             correlation=correlation,
         )
+
+    @staticmethod
+    def get_action_classification(action: str) -> str:
+        """
+        Vrátí klasifikaci Ghost akce.
+
+        Returns:
+            "canonical_ready"      — lze delegovat na ToolRegistry path
+            "mapped_but_lossy"     — má mapping, ale sémantika ≠
+            "runtime_only_compat"  — žádný canonical ekvivalent
+        """
+        return _get_action_classification(action)
+
+    @staticmethod
+    def is_delegation_allowed(action: str) -> bool:
+        """
+        Vrátí True pokud lze akci delegovat na ToolRegistry path.
+
+        Delegation je povolena POUZE pro canonical-ready akce.
+        mapped_but_lossy akce mají mapping, ale sémantika ≠ —
+        delegace by ztratila funkčnost.
+
+        Returns:
+            True pouze pro canonical-ready akce
+        """
+        return _get_action_classification(action) == "canonical_ready"
+
+    @staticmethod
+    def to_delegation_request(
+        action: str,
+        params: Dict[str, Any],
+        priority: int = 5,
+        correlation: Optional["RunCorrelation"] = None,
+    ) -> Optional["ExecutionRequest"]:
+        """
+        Konvertuje Ghost akci na canonical ExecutionRequest PRO CANONICAL-READY AKCE.
+
+        Používá _ACTION_TO_CANONICAL_TOOL mapping a překládá Ghost action
+        na canonical tool name v action_type poli.
+
+        Args:
+            action: Ghost ActionType string (např. "google", "deep_read")
+            params: Parametry akce
+            priority: Execution priority (1-10, lower = higher priority)
+            correlation: Optional run correlation context
+
+        Returns:
+            ExecutionRequest s canonical tool name v action_type,
+            NEBO None pokud akce není canonical-ready.
+
+        Delegation rules:
+            canonical_ready   → vrací ExecutionRequest s canonical tool name
+            mapped_but_lossy  → vrací None (sémantika ≠, nelze beztrastně delegovat)
+            runtime_only_compat → vrací None (žádný canonical ekvivalent)
+        """
+        if not GhostBridge.is_delegation_allowed(action):
+            return None
+
+        canonical_tool = _ACTION_TO_CANONICAL_TOOL.get(action, "")
+        if not canonical_tool:
+            return None
+
+        from ..types import ExecutionRequest as _ExecReq
+        return _ExecReq(
+            action_type=canonical_tool,
+            parameters=params,
+            priority=priority,
+            correlation=correlation,
+        )
+
+    @staticmethod
+    def get_delegation_matrix() -> Dict[str, str]:
+        """
+        Vrátí kompletní klasifikační matici Ghost akcí.
+
+        Returns:
+            Dict mapping action → classification pro všechny Ghost akce.
+            Použitelné pro audit a dispatch parity preview.
+        """
+        matrix = {}
+        for action in _ACTION_TO_CANONICAL_TOOL:
+            matrix[action] = _get_action_classification(action)
+        return matrix
+
+    @staticmethod
+    def get_canonical_ready_actions() -> Set[str]:
+        """Vrátí set canonical-ready akcí (prázdná množina v current repo)."""
+        return set(_CANONICAL_READY_ACTIONS)
+
+    @staticmethod
+    def get_mapped_but_lossy_actions() -> Set[str]:
+        """Vrátí set mapped-but-lossy akcí."""
+        return set(_MAPPED_BUT_LOSSY_ACTIONS)
+
+    @staticmethod
+    def get_runtime_only_compat_actions() -> Set[str]:
+        """Vrátí set runtime-only-compat akcí."""
+        return set(_RUNTIME_ONLY_COMPAT_ACTIONS)
 
     @staticmethod
     def get_action_canonical_tool_mapping() -> Dict[str, str]:

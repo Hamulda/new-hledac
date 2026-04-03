@@ -110,12 +110,21 @@ resilient_fetch()             ──► circuit_breaker.py fallback chain
 
 ## 6. MIGRATION LEDGER
 
-### Phase A: Shared Surface Adoption (LOW RISK, HIGH VALUE)
+### Phase A: Shared Surface Adoption
+
+⚠️ **MA-2 is BLOCKED by proxy design. MA-1 is DEFERRED (not blocked).**
+
+The shared `async_get_aiohttp_session()` surface uses plain `aiohttp.TCPConnector` with no proxy support.
+- `DarknetConnector` requires `aiohttp_socks.ProxyConnector` (SOCKS5) — **BLOCKED** (MA-2)
+- `PaywallBypass` uses plain `aiohttp.TCPConnector` — same type as shared surface, **DEFERRED** (MA-1)
+
+MA-1 is deferred because redesign cost exceeds benefit (different pool limits, own lifecycle).
+MA-2 is blocked because ProxyConnector (SOCKS5) is fundamentally incompatible with plain TCPConnector.
 
 | ID | Action | Risk | Precondition | Status |
 |----|--------|------|---------------|--------|
-| MA-1 | Redirect `PaywallBypass._get_session()` to `async_get_aiohttp_session()` | LOW | None | **TODO** — PaywallBypass has own pool, not using shared surface |
-| MA-2 | Redirect `DarknetConnector.fetch_via_tor/i2p()` to shared surface or Tor pool | LOW | After MA-1 | **TODO** — creates per-request sessions |
+| MA-1 | Redirect `PaywallBypass._get_session()` to `async_get_aiohttp_session()` | LOW | Plain TCPConnector (no SOCKS5) — same type as shared surface, different limits | **DEFERRED** — not blocked, redesign cost exceeds benefit |
+| MA-2 | Redirect `DarknetConnector.fetch_via_tor/i2p()` to shared surface or Tor pool | LOW | ProxyConnector (SOCKS5) — incompatible with plain TCPConnector | **BLOCKED** — proxy design gap |
 | MA-3 | Remove `resilient_fetch()` test-seam after `resolve()` wired | LOW | After MB-1 | **TODO** |
 
 ### Phase B: TransportResolver Wiring (HIGH RISK — OUT OF SCOPE)
@@ -137,6 +146,28 @@ resilient_fetch()             ──► circuit_breaker.py fallback chain
 
 ---
 
+## 6b. PROXY BLOCKER (Sprint 8SH / 8VX update)
+
+### Why MA-2 Is BLOCKED (DarknetConnector)
+
+`async_get_aiohttp_session()` creates a plain `aiohttp.TCPConnector`. `DarknetConnector` requires `ProxyConnector.from_url('socks5://127.0.0.1:9050')` (SOCKS5). **Incompatible patterns** — cannot share surface without connector-per-proxy redesign.
+
+### Why MA-1 Is DEFERRED (PaywallBypass)
+
+`PaywallBypass._get_session()` uses plain `aiohttp.TCPConnector(limit=10, limit_per_host=3)` — **same connector type** as shared surface. Not blocked by proxy design. Just deferred: redesign cost exceeds benefit for current usage pattern.
+
+### curl_cffi World (StealthCrawler)
+
+`StealthCrawler` uses curl_cffi — a **separate TLS/JA3 fingerprint world**, NOT a session variant. Must NOT be unified with aiohttp session world.
+
+### Resolution
+
+- MA-2 (DarknetConnector): **BLOCKED** — proxy design gap (SOCKS5 incompatibility)
+- MA-1 (PaywallBypass): **DEFERRED** — not blocked, redesign cost exceeds benefit
+- curl_cffi: **SEPARATE WORLD** — not a candidate for unification
+
+---
+
 ## 7. WHAT WAS EXPLICITLY NOT TOUCHED
 
 | File/Pattern | Reason |
@@ -150,19 +181,27 @@ resilient_fetch()             ──► circuit_breaker.py fallback chain
 
 ---
 
-## 8. SMALL SEAM EXTRACTIONS (This Sprint)
+## 8. SMALL SEAM EXTRACTIONS
 
-Only small seam comments and documentation updates, consistent with guardrails:
+### Sprint 8SF / 8SH — Phase 2 Audit
+
+1. **`session_runtime.py` authority comment (Sprint 8SH)** — updated PROXY BLOCKER note:
+   - Named `PaywallBypass` and `DarknetConnector` as PROXY BLOCKER for MA-1/MA-2
+   - Clarified that `async_get_aiohttp_session()` uses plain TCPConnector (no SOCKS5)
+   - Both consumers use `aiohttp_socks.ProxyConnector` — incompatible without redesign
+   - Marked MA-1 and MA-2 as **BLOCKED** (not deferred) in §6 and §6b
+
+2. **`AUDIT_SOURCE_TRANSPORT_SESSION.md` §6 / §6b (Sprint 8SH)**:
+   - Added §6b PROXY BLOCKER with code evidence
+   - Updated MA-1/MA-2 status from **TODO** to **BLOCKED — proxy design gap**
+   - Resolution: current split is correct design, no further action required
+
+### Sprint 8SF — Phase 1 Seam Notes (preserved)
 
 1. **`_url_priority()` comment** — explicit authority note in FetchCoordinator clarifying that `.onion` URL priority handling is the canonical production path, not via TransportResolver.
 2. **`session_runtime.py` authority comment (Sprint 8VG)** — updated to name `public_fetcher.py` as the ACTUAL active consumer of shared surface (previously unnamed in the comment).
 
 No behavior changes. No new APIs. No refactors.
-
-**Sprint 8VG additions:**
-- `public_fetcher.py` confirmed as runtime-usable consumer of `async_get_aiohttp_session()`
-- `live_feed_pipeline._fetch_article_text()` article fallback seam confirmed as second consumer
-- Migration path MA-1 (PaywallBypass → shared surface) remains TODO — low risk, no preconditions
 
 ---
 
@@ -199,6 +238,6 @@ test_sf_12: All existing probes still pass
 | LE-8SF-6 | Wire `TransportResolver.resolve()` into `_fetch_url()` | HIGH | `fetch_coordinator.py` | After LE-8SF-5 | **DEFERRED** |
 | LE-8SF-7 | Redirect `circuit_breaker` fallback to `session_runtime` | MEDIUM | `circuit_breaker.py` | After LE-8SF-6 | **DEFERRED** |
 | LE-8SF-8 | Remove `resilient_fetch()` test-seam after wiring | LOW | `circuit_breaker.py` | After LE-8SF-6 | **DEFERRED** |
-| LE-8SF-9 | Redirect PaywallBypass to shared surface | LOW | `paywall.py` | None | **TODO** |
-| LE-8SF-10 | Redirect DarknetConnector to shared surface | LOW | `darknet.py` | After LE-8SF-9 | **TODO** |
+| LE-8SF-9 | Redirect PaywallBypass to shared surface | LOW | `paywall.py` | Plain TCPConnector — same type, different limits; redesign cost exceeds benefit | **DEFERRED** — not blocked |
+| LE-8SF-10 | Redirect DarknetConnector to shared surface | LOW | `darknet.py` | ProxyConnector (SOCKS5) incompatible with plain TCPConnector | **BLOCKED** — proxy design gap |
 | LE-8SF-11 | Consolidate FC domain CB to `get_breaker()` | LOW | `fetch_coordinator.py` | None | **TODO** |

@@ -53,36 +53,33 @@ TOR_READ_TIMEOUT_S: float = 75.0
 
 # =============================================================================
 # =============================================================================
-# Shared Lazy aiohttp Session Surface
+# Shared Lazy aiohttp Session Surface — PLAIN TCP WORLD
 # =============================================================================
 #
-# AUTHORITY SPLIT (Sprint 8UX / 8VG / 8SH):
-#   This module provides the SHARED async HTTP session surface.
+# AUTHORITY SPLIT (Sprint 8VX):
+#   This module provides the PLAIN TCP async HTTP session surface only.
 #   It is NOT the source-ingress owner — that is FetchCoordinator.
 #   It is NOT the persisted session authority — that is SessionManager.
+#   It is NOT the curl world — that is StealthCrawler/curl_cffi.
 #
-#   ACTUAL CONSUMERS (runtime-usable, passive/passive+public path):
-#     - fetching/public_fetcher.py — passive text/HTML fetcher (active consumer)
+#   PLAIN TCP SURFACE consumers (runtime-usable):
+#     - fetching/public_fetcher.py — passive text/HTML fetcher
 #     - pipeline/live_feed_pipeline.py:_fetch_article_text() — article fallback seam
 #
-#   PROXY BLOCKER: DarknetConnector CANNOT migrate to shared surface
-#   without ProxyConnector support (SOCKS5). MA-2 is BLOCKED by design.
-#   DarknetConnector uses aiohttp_socks ProxyConnector for Tor SOCKS5 (9050)
-#   and I2P SOCKS5 (4444) — incompatible with plain TCPConnector.
+#   PROXY BLOCKER: DarknetConnector uses aiohttp_socks.ProxyConnector (SOCKS5).
+#   MA-2 is BLOCKED — ProxyConnector is incompatible with plain TCPConnector.
 #
-#   PaywallBypass is DEFERRED (not BLOCKED): it uses plain aiohttp.TCPConnector
-#   (no SOCKS5) — same connector type as shared surface, but own pool with
-#   different limits (limit=10, limit_per_host=3) and own session lifecycle.
-#   Could theoretically share surface after redesign, but not worth the cost.
-#   See AUDIT_SOURCE_TRANSPORT_SESSION.md §PROXY_BLOCKER.
+#   PaywallBypass: DEFERRED (not BLOCKED). Uses plain aiohttp.TCPConnector
+#   (same connector type as shared surface) but own pool with different limits
+#   (limit=10, limit_per_host=3). Redesign cost exceeds benefit. See MA-1.
 #
-#   NOT redirected to shared surface:
-#     - FetchCoordinator._fetch_url() — own curl_cffi transport layer
+#   curl_cffi WORLD (StealthCrawler): SEPARATE transport world — NOT a session
+#   variant. Uses curl_cffi with JA3 fingerprint spoofing. Completely separate
+#   TLS/fingerprint plane. Must NOT be unified with aiohttp session world.
 #
-#   AsyncSessionFactory in __main__.py is a LEGACY/RUNTIME-SHELL artifact.
-#   It is NOT the same as async_get_aiohttp_session() — separate singleton,
-#   different connector limits, different lifecycle owner.
-#   They must NOT be unified without a full migration plan.
+#   AsyncSessionFactory in __main__.py: LEGACY/RUNTIME-SHELL artifact.
+#   Separate singleton from async_get_aiohttp_session(). Different limits/lifecycle.
+#   Must NOT be unified without full migration plan.
 # =============================================================================
 
 _session_instance: Optional[aiohttp.ClientSession] = None
