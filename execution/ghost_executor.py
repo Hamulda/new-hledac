@@ -523,14 +523,16 @@ class GhostExecutor:
         logger.info("✓ GhostExecutor initialized")
     
     async def _init_bloom_filter(self) -> None:
-        """Inicializovat Bloom Filter"""
+        """Inicializovat Bloom Filter — bounded RotatingBloomFilter."""
         try:
-            from hledac.utils.bloom_filter import ScalableBloomFilter
-            self._bloom_filter = ScalableBloomFilter(
-                initial_capacity=10000,
-                error_rate=0.01
+            # Sprint F1: Use canonical RotatingBloomFilter from url_dedup (bounded)
+            # instead of ScalableBloomFilter (unbounded growth)
+            from ..tools.url_dedup import create_rotating_bloom_filter
+            self._bloom_filter = create_rotating_bloom_filter(
+                est_elements=10000,
+                false_positive_rate=0.01
             )
-            logger.info("✓ Bloom Filter initialized (10K URLs capacity)")
+            logger.info("✓ Bloom Filter initialized (RotatingBloomFilter, 10K URLs, bounded)")
         except Exception as e:
             logger.warning(f"Bloom Filter not available: {e}")
     
