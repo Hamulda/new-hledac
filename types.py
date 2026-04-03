@@ -1552,6 +1552,34 @@ class BranchDecision:
 
 
 # =============================================================================
+# SCHEDULER-SHADOW / HANDOFF TYPED NOTES — Sprint F0.45
+# =============================================================================
+# Typed fact bundles for scheduler-shadow and handoff world.
+# These are COMPATIBILITY scaffolds — canonical types already defined above.
+#
+# LifecycleSnapshot: FUTURE canonical owner = runtime/sprint_lifecycle.py
+#   Replacement: WorkflowPhase + ControlPhase + WindupLocalPhase bundles
+#   Removal condition: promoted to canonical in sprint_lifecycle.py
+#
+# ProviderRecommendation: FUTURE canonical owner = capabilities.py
+#   Replacement: typed recommendation with readiness tiers
+#   Removal condition: capabilities.py provides typed provider_recommend
+#
+# NOTE: This section does NOT introduce new DTOs. It documents the typed
+# fact contracts that already exist in runtime/shadow_inputs.py and
+# capabilities.py. The goal is to prevent new competing DTO worlds from
+# forming outside types.py canonical scaffold.
+# =============================================================================
+
+# Naming convention note:
+# - Sprint spec used ActionRequest/ActionResult naming.
+# - Canonical types use ExecutionRequest/ExecutionResult naming.
+# - Ghost layer has its own ActionResult (line ~531) — DIFFERENT contract.
+# - DO NOT create ActionRequest/ActionResult aliases — would conflict with Ghost ActionResult.
+# - Call-sites should use ExecutionRequest/ExecutionResult directly.
+
+
+# =============================================================================
 # EXPORT HANDOFF — Sprint 8WA: Windup → Export Phase Contract
 # =============================================================================
 # Phase 1 scaffold. Data passed from windup_engine to sprint_exporter.
