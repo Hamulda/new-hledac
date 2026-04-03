@@ -436,6 +436,9 @@ class FetchCoordinator(UniversalCoordinator):
         # Sprint 80: Token bucket concurrency (still kept for compatibility)
         self._concurrency = TokenBucketController(rate=5, capacity=10)
 
+        # Sprint F3/F8/F9: Local corpus ingester seam (lazy, fail-soft)
+        self._corpus_ingester = None
+
         # Sprint 4B: AIMD Adaptive Concurrency Controller
         self._aimd_concurrency: float = float(CONCURRENCY_CLEARNET)  # current window
         self._aimd_successes: int = 0  # successes since last increase
@@ -723,12 +726,25 @@ class FetchCoordinator(UniversalCoordinator):
 
     async def _fetch_with_curl(self, url: str, proxy: str = None) -> Dict[str, Any]:
         """Fetch URL with curl_cffi (fallback)."""
-        # Import here to avoid circular imports
-        from ..intelligence.stealth_crawler import StealthCrawler
+        # Sprint F3/F8/F9: also populates status_code/content_type/headers for corpus ingest
         try:
-            crawler = StealthCrawler()
-            result = await crawler.fetch(url)
-            return {'url': url, 'content': result.content, 'js_rendered': False}
+            from ..intelligence.stealth_crawler import StealthWebScraper
+            scraper = StealthWebScraper()
+            if not await scraper.initialize():
+                return {'url': url, 'content': b'', 'error': 'scraper_init_failed'}
+            result = await scraper.scrape(url)
+            if result.success:
+                return {
+                    'url': url,
+                    'final_url': url,
+                    'content': (result.content or '').encode('utf-8', errors='replace'),
+                    'status_code': result.status_code or 200,
+                    'content_type': (result.headers or {}).get('content-type', 'text/html'),
+                    'headers': result.headers or {},
+                    'js_rendered': False,
+                    'success': True,
+                }
+            return {'url': url, 'content': b'', 'error': f'scrape_failed status={result.status_code}'}
         except asyncio.TimeoutError:
             logger.debug(f"[CURL] Timeout for {url}")
             self._aimd_release_failure()
@@ -777,6 +793,15 @@ class FetchCoordinator(UniversalCoordinator):
         # Load frontier if provided
         if 'frontier' in ctx:
             self._frontier = deque(ctx['frontier'], maxlen=1000)
+
+        # Sprint F3/F8/F9: lazy-init corpus ingester on first start
+        if self._corpus_ingester is None:
+            try:
+                from ..knowledge.corpus_ingester import get_corpus_ingester
+                self._corpus_ingester = get_corpus_ingester()
+            except Exception as e:
+                logger.warning(f"CorpusIngester: lazy init failed: {e}")
+                self._corpus_ingester = None
 
         logger.info(f"FetchCoordinator started with {len(self._frontier)} URLs in frontier")
 
@@ -870,6 +895,13 @@ class FetchCoordinator(UniversalCoordinator):
             if result and result.get('success'):
                 self._processed_urls.add(url)
                 self._urls_fetched_count += 1
+
+                # Sprint F3/F8/F9: ingest successful fetch into local corpus
+                if self._corpus_ingester is not None:
+                    try:
+                        self._corpus_ingester.ingest(result)
+                    except Exception as e:
+                        logger.debug(f"[INGEST] corpus ingest failed for {url}: {e}")
 
                 # Extract evidence ID
                 evidence_id = result.get('evidence_id')
@@ -985,6 +1017,12 @@ class FetchCoordinator(UniversalCoordinator):
                     trace_fetch_start(url, "tor", {"attempt": attempt, "timeout": TIMEOUT_TOR})
                     result = await self._fetch_with_tor(url)
                     if result:
+                        # Sprint F3/F8/F9: normalize Tor result to common ingest shape
+                        result['success'] = True
+                        result['status_code'] = result.pop('status', 0)
+                        result['url'] = url
+                        result['final_url'] = url
+                        result.setdefault('content_type', 'text/html')
                         trace_fetch_end(url, "tor", "ok", 0.0)
                         break
                     trace_fetch_end(url, "tor", "failed", 0.0)
@@ -992,12 +1030,20 @@ class FetchCoordinator(UniversalCoordinator):
                     if self._darknet_connector:
                         result = await self._darknet_connector.fetch_onion(url)
                         if result:
+                            result['success'] = True
+                            result['status_code'] = result.get('status_code', 0)
+                            result['url'] = url
+                            result['final_url'] = url
                             trace_fetch_end(url, "darknet_fallback", "ok", 0.0)
                             break
                 elif url_transport is Transport.I2P and self._darknet_connector:
                     trace_fetch_start(url, "i2p", {"attempt": attempt, "timeout": TIMEOUT_I2P})
                     result = await self._darknet_connector.fetch_i2p(url)
                     if result:
+                        result['success'] = True
+                        result['status_code'] = result.get('status_code', 0)
+                        result['url'] = url
+                        result['final_url'] = url
                         trace_fetch_end(url, "i2p", "ok", 0.0)
                         break
 
@@ -1041,6 +1087,12 @@ class FetchCoordinator(UniversalCoordinator):
                     trace_fetch_start(url, "lightpanda", {"attempt": attempt})
                     lightpanda_result = await self._fetch_with_lightpanda(url, proxy)
                     if lightpanda_result and lightpanda_result.get('content'):
+                        # Sprint F3/F8/F9: normalize to common ingest shape
+                        lightpanda_result.setdefault('success', True)
+                        lightpanda_result.setdefault('status_code', 200)
+                        lightpanda_result.setdefault('content_type', 'text/html')
+                        lightpanda_result.setdefault('final_url', url)
+                        lightpanda_result.setdefault('headers', {})
                         result = lightpanda_result
                         trace_fetch_end(url, "lightpanda", "ok", 0.0)
                     else:
@@ -1070,6 +1122,8 @@ class FetchCoordinator(UniversalCoordinator):
 
             # Sprint 4B: AIMD success - record after full fetch cycle
             if result and not result.get('error'):
+                # Sprint F3/F8/F9: ensure success flag is set for corpus ingest
+                result.setdefault('success', True)
                 self._aimd_release_success()
             elif result is None or result.get('error'):
                 # Failure path already handled by _aimd_release_failure in fetch methods
@@ -1184,6 +1238,13 @@ class FetchCoordinator(UniversalCoordinator):
         self._frontier.clear()
         # Recreate bloom filter instead of clear() (not available in RotatingBloomFilter)
         self._processed_urls = create_rotating_bloom_filter()
+
+        # Sprint F3/F8/F9: persist local corpus manifest at windup
+        if self._corpus_ingester is not None:
+            try:
+                self._corpus_ingester.close()
+            except Exception as e:
+                logger.debug(f"CorpusIngester close failed: {e}")
 
         # Sprint 76: Cleanup Tor sessions with drain
         for session in self._tor_sessions.values():
