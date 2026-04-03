@@ -72,7 +72,7 @@ async def export_sprint(
     try:
         from hledac.universal.coordinators.security_coordinator import UniversalSecurityCoordinator
         sec_coordinator = UniversalSecurityCoordinator(max_concurrent=2)
-        await sec_coordinator._do_initialize()
+        await sec_coordinator.initialize()
         gate_result = await sec_coordinator.sanitize_outbound(boundary_text, force_fallback=True)
         sanitized_scorecard_raw = gate_result.get("sanitized", boundary_text)
         # Log audit metadata (non-blocking)

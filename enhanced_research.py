@@ -2462,8 +2462,9 @@ __all__ = [
     # LOCAL TYPED SEAM (Sprint F11 - Pre-activation bridge)
     # ========================================================================
     # DeepResearchRequest/Response are LOCAL typed seams - NOT canonical.
-    # They exist because types.py ProviderRequest/ProviderResult are
-    # LLM-centric DTOs that don't semantically fit OSINT search provider.
+    # NON-CANONICAL LOCAL SEAM: pre-activation bridge for F11.
+    # types.py ProviderRequest/ProviderResult are LLM-centric DTOs that
+    # don't semantically fit OSINT search provider output structures.
     #
     # Migration: Replace with canonical ProviderRequest/ProviderResult
     #            from types.py AFTER F11 activation when triad is ready.
@@ -2478,6 +2479,7 @@ __all__ = [
     # ========================================================================
     # These are backward-compat helpers, NOT canonical runtime entrypoints.
     # For new code, use deep_research_provider_seam() after F11 activation.
+    # These surfaces have authority confusion risk - prefer seam usage.
     'enhanced_research',
     'deep_research',
     'create_unified_research_engine',
