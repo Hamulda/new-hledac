@@ -23,6 +23,7 @@ import logging
 import os
 import secrets
 import sqlite3
+import threading
 import time
 import uuid
 from collections import deque
@@ -273,6 +274,7 @@ class EvidenceLog:
         self._db_path: Optional[Path] = None
         self._db: Optional[sqlite3.Connection] = None
         self._initialized = False
+        self._closing = False  # Flag: aclose in progress, block queue access
 
     def __del__(self):
         """Cleanup - zavři persist file."""
@@ -292,8 +294,10 @@ class EvidenceLog:
         if self._initialized:
             return
 
-        await asyncio.to_thread(self._init_db)
-        await asyncio.to_thread(self._migrate_from_file)
+        # Run in event loop thread — sqlite3.connect is I/O-bound, not CPU-bound,
+        # and _db must be created in the same thread where it's used (event loop).
+        self._init_db()
+        self._migrate_from_file()
         self._flush_task = asyncio.create_task(self._flush_worker())
         self._initialized = True
 
@@ -378,7 +382,9 @@ class EvidenceLog:
                 if len(batch) >= self._SQLITE_BATCH_SIZE or \
                    (batch and (datetime.now() - last_flush).total_seconds() >= self._SQLITE_FLUSH_INTERVAL):
                     flush_start = time.perf_counter()
-                    await asyncio.to_thread(self._flush_batch, batch)
+                    # Run directly — _db was created in the event loop thread,
+                    # and _flush_batch is a sync I/O call, not CPU-bound.
+                    self._flush_batch(batch)
                     flush_latency_ms = (time.perf_counter() - flush_start) * 1000
                     trace_evidence_flush(len(batch), flush_latency_ms, "ok", len(batch))
                     batch = []
@@ -393,7 +399,8 @@ class EvidenceLog:
         # Final flush
         if batch:
             flush_start = time.perf_counter()
-            await asyncio.to_thread(self._flush_batch, batch)
+            # Run directly — same thread as the worker, _db was created in event loop thread
+            self._flush_batch(batch)
             flush_latency_ms = (time.perf_counter() - flush_start) * 1000
             trace_evidence_flush(len(batch), flush_latency_ms, "ok", len(batch))
 
@@ -528,7 +535,7 @@ class EvidenceLog:
         queue_size = self._queue.qsize() if self._queue else 0
         trace_evidence_append(event.event_type, queue_size, "queued")
 
-        if self._initialized and self._queue:
+        if self._initialized and self._queue and not self._closing:
             try:
                 self._queue.put_nowait(event.to_dict())
             except asyncio.QueueFull:
@@ -1131,24 +1138,110 @@ class EvidenceLog:
             logger.error(f"Failed to write manifest: {e}")
             return None
 
+    async def aclose(self) -> None:
+        """
+        Async cleanup: shutdown flush worker, close SQLite, close persist file.
+
+        This is the canonical async cleanup path. All resources are closed
+        in order with proper shutdown signaling.
+
+        Idempotent: safe to call multiple times.
+        """
+        # 1. Shutdown flush worker — drain queue, flush remaining, then send None
+        self._closing = True  # Block append() queue access during shutdown
+
+        # Drain pending items (keep them in a list for flush)
+        drained = []
+        while True:
+            try:
+                item = self._queue.get_nowait()
+                if item is None:
+                    break
+                drained.append(item)
+            except asyncio.QueueEmpty:
+                break
+
+        # Flush drained items via call_soon_threadsafe (SQLite is thread-bound)
+        if drained:
+            loop = asyncio.get_running_loop()
+            evt = threading.Event()
+
+            def _do_flush():
+                self._flush_batch(drained)
+                evt.set()
+
+            loop.call_soon_threadsafe(_do_flush)
+            evt.wait(timeout=5.0)
+
+        if self._flush_task and not self._flush_task.done():
+            try:
+                self._queue.put_nowait(None)  # Shutdown signal
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning(f"Flush worker shutdown error: {e}")
+        self._flush_task = None
+
+        # 2. Close SQLite connection via event loop (sqlite3.Connection is not thread-safe)
+        if self._db is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.call_soon_threadsafe(self._db.close)
+            except Exception as e:
+                logger.warning(f"Failed to schedule SQLite close: {e}")
+            self._db = None
+
+        # 3. Close persist file (synchronous — runs in thread via close())
+        self._close_persist_file()
+
+        logger.debug(f"[EVIDENCE] aclose complete: run_id={self._run_id}")
+
+    def _close_persist_file(self) -> None:
+        """Close persist file with idempotency guard (runs in thread)."""
+        if self._persist_file and not self._persist_file.closed:
+            try:
+                self._persist_file.flush()
+                os.fsync(self._persist_file.fileno())
+                self._persist_file.close()
+            except Exception as e:
+                logger.warning(f"Failed to close persist file: {e}")
+            finally:
+                self._persist_file = None
+        elif self._persist_file is not None:
+            # Already closed, just reset reference
+            self._persist_file = None
+
+    def close(self) -> None:
+        """
+        Sync cleanup: run aclose in a dedicated thread with its own event loop.
+
+        Idempotent: safe to call multiple times.
+        Works from both sync and async (pytest-asyncio) contexts.
+        """
+        import concurrent.futures
+
+        def _run_aclose():
+            asyncio.run(self.aclose())
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_run_aclose)
+            future.result()
+
     def finalize(self) -> None:
         """
         Finalize the log: flush, write manifest, and close handles.
 
         This should be called at the end of a run (no user toggle).
         Always flushes and fsyncs to preserve crash-safety.
-        """
-        # Flush file handles
-        if self._persist_file and not self._persist_file.closed:
-            try:
-                self._persist_file.flush()
-                os.fsync(self._persist_file.fileno())
-                self._fsync_counter = 0  # Reset counter after final fsync
-            except Exception as e:
-                logger.warning(f"Failed to flush persist file: {e}")
 
-        # Write manifest
+        Backward-compatible entry point — delegates to close() for full cleanup.
+        """
+        # Write manifest before closing (requires file still open)
         self.write_manifest()
+
+        # Close all resources via canonical close path
+        self.close()
 
         # Freeze to prevent further modifications
         self.freeze()
