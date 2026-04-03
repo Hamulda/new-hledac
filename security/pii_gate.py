@@ -319,7 +319,9 @@ def quick_sanitize(text: str, mask_char: str = "*") -> str:
     """
     global _DEFAULT_GATE
     try:
-        if _DEFAULT_GATE is None:
+        # Recreate gate if mask_char differs from singleton's mask_char
+        # This ensures deterministic behavior wrt mask_char parameter
+        if _DEFAULT_GATE is None or _DEFAULT_GATE.mask_char != mask_char:
             _DEFAULT_GATE = create_security_gate(mask_char=mask_char)
         result = _DEFAULT_GATE.sanitize(text, mask_pii=True, return_matches=False)
         return result.sanitized_text

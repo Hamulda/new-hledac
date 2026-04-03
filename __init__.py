@@ -214,12 +214,8 @@ __all__ = [
     # NEW: Autonomous Orchestrator
     "AutonomousOrchestrator",
     "create_autonomous_orchestrator",
-    "HermesCommander",
     "DiscoveryDepth",
     "ResearchPhase",
-    "ToolSelection",
-    "ResearchContext",
-    "AutonomousResearchResult",
 
     # NEW: Research Context & Evidence Log
     "ResearchContext",
