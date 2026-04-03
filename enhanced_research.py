@@ -1,23 +1,53 @@
 """
-EnhancedResearch - Rozšířený výzkum s workflow a prediktivním plánováním
+EnhancedResearch - Dormant Canonical Provider Candidate
+=====================================================
 
-Integruje:
-- WorkflowEngine pro DAG-based research workflows
-- PredictivePlanner pro spekulativní vykonávání
-- PerformanceMonitor pro sledování výkonu
-- QualityValidator pro validaci kvality
-- QueryExpansion pro rozšíření dotazů
-- ResultFusion pro fúzi výsledků z více zdrojů
-- HybridRAG pro kontextové vyhledávání
-- BehaviorSimulator pro stealth režim
+CLASSIFICATION (Sprint F11 Containment):
+----------------------------------------
+Tento modul obsahuje DVA odlišné surface:
 
-UnifiedResearchEngine - Kompletní integrace všech výzkumných nástrojů:
-- Academic Search (ArXiv, CrossRef, Semantic Scholar)
-- Archive Discovery (Wayback, IPFS, GitHub history)
-- Stealth Crawler (anti-detection crawling)
-- Web Intelligence (deep web scanning, OSINT)
-- Data Leak Hunter (breach detection)
-- Temporal Analysis (time-series analysis)
+1. UnifiedResearchEngine (PROVIDER CANDIDATE):
+   - Dormant canonical provider candidate pro deep research
+   - Úzký, typed, lazy provider seam: deep_research()
+   - M1-friendly: lazy loading, bounded concurrency, chunked processing
+   - Aktivace: PO triádě, source plane, transport plane, session seams,
+     security gate, minimal grounding seam
+   - Stav: DORMANT - není v hot path, čeká na F11 připojení
+
+2. EnhancedResearchOrchestrator (ORCHESTRATOR RESIDUE):
+   - NON-CANONICAL - rozšiřuje UniversalResearchOrchestrator
+   - Obsahuje workflow engine, predictive planner, performance monitoring
+   - Public methods jsou helper/non-canonical surfaces
+   - Stav: DEPRECATED pro nový runtime - pouze backward compat
+
+PUBLIC ENTRYPOINTS CLASSIFICATION:
+----------------------------------
+Provider Candidate Seam (canonical):
+  - UnifiedResearchEngine.deep_research(query, depth, query_type, max_results)
+  - UnifiedResearchEngine.__init__() s UnifiedResearchConfig
+
+Non-Canonical Helpers (NEPOUŽÍVAT pro nový runtime):
+  - enhanced_research() - convenience wrapper
+  - deep_research() - convenience function
+  - create_unified_research_engine() - factory
+
+Orchestrator Residue (non-canonical, backward compat only):
+  - EnhancedResearchOrchestrator (plně orchestrátor, ne provider)
+
+DEPENDENCY MATRIX:
+------------------
+F10/F9 surfaces: ŽÁDNÉ přímé závislosti
+- UnifiedResearchEngine používá: intelligence.* (lazy), utils.ranking, knowledge.rag_engine, layers.stealth_layer
+- EnhancedResearchOrchestrator používá: types.UniversalResearchOrchestrator, utils.WorkflowEngine
+
+ACTIVATION BLOCKERS (před F11 připojením):
+-------------------------------------------
+1. Triáda není plně integrována (analyzer → capability router → tool registry)
+2. Source plane není definována (research sources routing)
+3. Transport plane (FetchCoordinator) není plně propojen
+4. Session seams chybí (BudgetManager, EvidenceLog context)
+5. Security gate (SecurityGate, privacy layer) není integrován
+6. Minimal grounding seam chybí (ProviderRequest/ProviderResult handoff)
 
 M1 8GB Optimized: Lazy loading, chunked processing, aggressive memory management
 """
@@ -1325,8 +1355,8 @@ class EnhancedResearchOrchestrator(UniversalResearchOrchestrator):
         
         # Hybrid RAG for context retrieval
         if cfg.enable_rag:
-            from .knowledge.rag_engine import RAGEngine
-            self.rag = RAGEngine(RAGConfig(top_k=cfg.rag_top_k))
+            from .knowledge.rag_engine import RAGEngine, RAGConfig
+            self.rag = RAGEngine(RAGConfig())
         else:
             self.rag = None
         
@@ -2279,28 +2309,183 @@ def create_unified_research_engine(
 
 
 # =============================================================================
+# DEEP RESEARCH PROVIDER SEAM (Sprint F11 - Dormant Canonical)
+# =============================================================================
+# Úzký, typed, lazy provider seam pro UnifiedResearchEngine.
+# Aktivace: PO triádě, source plane, transport plane, session seams,
+# security gate, minimal grounding seam.
+#
+# STATE: DORMANT - není v hot path runtime
+# USAGE: Pouze přes explicitní ProviderRequest/ProviderResult handoff
+# =============================================================================
+
+@dataclass
+class DeepResearchRequest:
+    """
+    Request wrapper for deep research provider seam.
+
+    NON-CANONICAL: Toto NENÍ ProviderRequest z types.py.
+    Používá se pouze jako interní seam před F11 připojením.
+
+    Canonical ProviderRequest/ProviderResult z types.py bude použito
+    AŽ PO napojení na triádu a session seams.
+    """
+    query: str
+    depth: ResearchDepth = ResearchDepth.ADVANCED
+    query_type: Optional[QueryType] = None
+    max_results: int = 50
+
+    def to_engine_kwargs(self) -> Dict[str, Any]:
+        """Convert to UnifiedResearchEngine.deep_research() kwargs."""
+        return {
+            'query': self.query,
+            'depth': self.depth,
+            'query_type': self.query_type,
+            'max_results': self.max_results,
+        }
+
+
+@dataclass
+class DeepResearchResponse:
+    """
+    Response wrapper for deep research provider seam.
+
+    NON-CANONICAL: Toto NENÍ ProviderResult z types.py.
+    Používá se pouze jako interní seam před F11 připojením.
+
+    Canonical ProviderRequest/ProviderResult z types.py bude použito
+    AŽ PO napojení na triádu a session seams.
+    """
+    findings: List[ResearchFinding]
+    fused_results: List[Dict[str, Any]]
+    confidence_score: float
+    execution_time_seconds: float
+    sources_used: List[str]
+    tools_executed: List[str]
+
+    @classmethod
+    def from_unified_result(cls, result: UnifiedResearchResult) -> "DeepResearchResponse":
+        """Create from UnifiedResearchResult."""
+        return cls(
+            findings=result.findings,
+            fused_results=result.fused_results,
+            confidence_score=result.confidence_score,
+            execution_time_seconds=result.execution_time_seconds,
+            sources_used=result.sources_used,
+            tools_executed=result.tools_executed,
+        )
+
+
+async def deep_research_provider_seam(
+    request: DeepResearchRequest,
+) -> DeepResearchResponse:
+    """
+    Úzký provider seam pro deep research.
+
+    DORMANT CANONICAL PROVIDER CANDIDATE - Sprint F11.
+
+    Toto je jediný OFICIÁLNÍ entrypoint pro připojení na runtime.
+    Používá se pouze po splnění activation blockers:
+    1. Triáda (analyzer → capability router → tool registry)
+    2. Source plane (research sources routing)
+    3. Transport plane (FetchCoordinator)
+    4. Session seams (BudgetManager, EvidenceLog)
+    5. Security gate (SecurityGate, privacy layer)
+    6. Minimal grounding seam (ProviderRequest/ProviderResult handoff)
+
+    Args:
+        request: DeepResearchRequest s query a config
+
+    Returns:
+        DeepResearchResponse s výsledky
+
+    Example:
+        >>> req = DeepResearchRequest(
+        ...     query="quantum computing breakthroughs",
+        ...     depth=ResearchDepth.EXHAUSTIVE
+        ... )
+        >>> resp = await deep_research_provider_seam(req)
+        >>> print(f"Found {len(resp.findings)} findings")
+    """
+    engine = UnifiedResearchEngine(
+        config=UnifiedResearchConfig(depth=request.depth)
+    )
+    try:
+        result = await engine.deep_research(**request.to_engine_kwargs())
+        return DeepResearchResponse.from_unified_result(result)
+    finally:
+        await engine.cleanup()
+
+
+# =============================================================================
 # EXPORTS
 # =============================================================================
 
 __all__ = [
-    # Configuration classes
-    'EnhancedResearchConfig',
-    'UnifiedResearchConfig',
-
-    # Enums
-    'ResearchDepth',
-    'QueryType',
-
-    # Result classes
-    'ResearchFinding',
-    'UnifiedResearchResult',
-
-    # Main classes
-    'EnhancedResearchOrchestrator',
+    # ========================================================================
+    # PROVIDER CANDIDATE - UnifiedResearchEngine (DORMANT, F11 target)
+    # ========================================================================
+    # UnifiedResearchEngine is the dormant canonical provider candidate.
+    # It is NOT in the hot path. Activation requires F11 integration:
+    #   1. Triad (analyzer → capability router → tool registry)
+    #   2. Source plane (research sources routing)
+    #   3. Transport plane (FetchCoordinator)
+    #   4. Session seams (BudgetManager, EvidenceLog)
+    #   5. Security gate (SecurityGate, privacy layer)
+    #   6. Minimal grounding seam (ProviderRequest/ProviderResult handoff)
+    #
+    # USAGE: Only via deep_research_provider_seam() after F11 activation.
+    #        Direct instantiation is NON-CANONICAL.
     'UnifiedResearchEngine',
 
-    # Convenience functions
+    # Result class for provider candidate
+    'UnifiedResearchResult',
+
+    # ========================================================================
+    # ORCHESTRATOR RESIDUE - EnhancedResearchOrchestrator (DEPRECATED)
+    # ========================================================================
+    # EnhancedResearchOrchestrator is a workflow orchestrator, NOT a provider.
+    # It extends UniversalResearchOrchestrator with:
+    #   - DAG-based workflow execution
+    #   - Speculative execution
+    #   - Performance monitoring
+    #   - Query expansion, RRF fusion, RAG, stealth simulation
+    #
+    # This is backward-compat ONLY. Do NOT use for new runtime.
+    # All public methods are helper/non-canonical surfaces.
+    'EnhancedResearchOrchestrator',
+
+    # Configuration for orchestrator residue
+    'EnhancedResearchConfig',
+
+    # ========================================================================
+    # LOCAL TYPED SEAM (Sprint F11 - Pre-activation bridge)
+    # ========================================================================
+    # DeepResearchRequest/Response are LOCAL typed seams - NOT canonical.
+    # They exist because types.py ProviderRequest/ProviderResult are
+    # LLM-centric DTOs that don't semantically fit OSINT search provider.
+    #
+    # Migration: Replace with canonical ProviderRequest/ProviderResult
+    #            from types.py AFTER F11 activation when triad is ready.
+    #
+    # NOTE: These are internal seams, NOT public API.
+    'DeepResearchRequest',
+    'DeepResearchResponse',
+    'deep_research_provider_seam',
+
+    # ========================================================================
+    # CONVENIENCE FUNCTIONS (NON-CANONICAL HELPERS)
+    # ========================================================================
+    # These are backward-compat helpers, NOT canonical runtime entrypoints.
+    # For new code, use deep_research_provider_seam() after F11 activation.
     'enhanced_research',
     'deep_research',
     'create_unified_research_engine',
+
+    # ========================================================================
+    # ENUMS AND DATA CLASSES
+    # ========================================================================
+    'ResearchDepth',
+    'QueryType',
+    'ResearchFinding',
 ]

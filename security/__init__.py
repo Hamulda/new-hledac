@@ -14,7 +14,8 @@ from .pii_gate import (
     quick_sanitize
 )
 from .vault_manager import (
-    LootManager
+    LootManager,
+    VaultManager,  # Alias: canonical name for secure export authority
 )
 from .ram_vault import (
     RamDiskVault
@@ -65,6 +66,7 @@ __all__ = [
     'quick_sanitize',
     # Vault
     'LootManager',
+    'VaultManager',  # Alias: canonical name for secure export authority
     'RamDiskVault',
     # Encryption & Key Management
     'encrypt_aes_gcm',
