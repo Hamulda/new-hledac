@@ -125,6 +125,21 @@ class QueryType(Enum):
     GENERAL = "general"             # Broad information gathering
 
 
+class SourceFamily(Enum):
+    """Source families for research — defines which engines/tools are used.
+
+    PROVIDER-OWNED INTERNAL SEAM: This enum is an internal planning artifact,
+    NOT a public authority surface. It is used by _build_source_plan() to
+    determine which lazy-loaded engines to route to.
+    """
+    WEB = "web"                       # StealthCrawler, UnifiedWebIntelligence
+    ACADEMIC = "academic"             # AcademicSearchEngine (ArXiv, CrossRef, Semantic)
+    ARCHIVE = "archive"               # ArchiveDiscovery, ArchiveResurrector
+    SECURITY = "security"             # DataLeakHunter, StealthWebScraper
+    TEMPORAL = "temporal"             # TemporalAnalyzer (EXHAUSTIVE only)
+    OSINT = "osint"                   # DataLeakHunter + cross-reference (EXHAUSTIVE)
+
+
 @dataclass
 class UnifiedResearchConfig:
     """Configuration for unified research engine.
@@ -2258,9 +2273,11 @@ async def deep_research(
     max_results: int = 50
 ) -> UnifiedResearchResult:
     """
-    Quick deep research using UnifiedResearchEngine.
+    Convenience helper — NON-CANONICAL.
 
-    This is the recommended entry point for comprehensive OSINT research.
+    This is a backward-compat convenience wrapper, NOT a canonical runtime
+    entrypoint. For new code, prefer deep_research_provider_seam() after
+    F11 activation.
 
     Args:
         query: Research query
@@ -2306,6 +2323,178 @@ def create_unified_research_engine(
     """
     config = UnifiedResearchConfig(depth=depth, **kwargs)
     return UnifiedResearchEngine(config=config)
+
+
+# =============================================================================
+# SOURCE PLANE SEAM (Sprint F11 - Internal Provider-Owned)
+# =============================================================================
+# Malý, deterministic, read-only source planning seam.
+# Provider-owned internal artifact — NOT a public authority surface.
+#
+# PURPOSE: Explicitně říká, které source families a enginy se použijí
+#          pro danou query_type + depth combination.
+#
+# INTEGRATION: Voláno z deep_research() workflow před tool selection.
+#              Reuseuje _classify_query() a _select_tools_for_query().
+# =============================================================================
+
+@dataclass(frozen=True)
+class SourcePlan:
+    """Immutable source plan — which families, engines, why, and conditions.
+
+    PROVIDER-OWNED INTERNAL SEAM: Toto je read-only planning artifact,
+    NOT a public DTO. Používá se interně v UnifiedResearchEngine
+    pro transparentní rozhodování o source routing.
+
+    Fields:
+        families: List of SourceFamily values to activate
+        engines: Concrete engine names that will be lazy-loaded
+        reasoning: Why these families were selected (query_type + depth)
+        conditions: Runtime conditions that trigger inclusion
+        excluded: SourceFamily values explicitly excluded and why
+    """
+    families: Tuple[SourceFamily, ...]
+    engines: Tuple[str, ...]
+    reasoning: str
+    conditions: Tuple[str, ...]
+    excluded: Tuple[SourceFamily, ...] = field(default_factory=())
+
+    def to_display_dict(self) -> Dict[str, Any]:
+        """Human-readable dict for debugging/logging."""
+        return {
+            'families': [f.value for f in self.families],
+            'engines': list(self.engines),
+            'reasoning': self.reasoning,
+            'conditions': list(self.conditions),
+            'excluded': [f.value for f in self.excluded],
+        }
+
+
+def _build_source_plan(
+    query_type: QueryType,
+    depth: ResearchDepth,
+    config: Optional[UnifiedResearchConfig] = None,
+) -> SourcePlan:
+    """
+    Build deterministic source plan for query_type + depth combination.
+
+    PROVIDER-OWNED INTERNAL SEAM — read-only, no side effects, no eager init.
+
+    Tato funkce je internal seam pro UnifiedResearchEngine.
+    Pro veřejné použití po F11 activation použij deep_research_provider_seam().
+
+    Args:
+        query_type: Detected or provided query type
+        depth: Research depth level
+        config: Optional config (uses defaults if not provided)
+
+    Returns:
+        Immutable SourcePlan s explicitním source routing
+
+    Source Matrix:
+        BASIC:     WEB + ACADEMIC (minimum viable coverage)
+        ADVANCED:  + ARCHIVE (Wayback, archive resurrection)
+        EXHAUSTIVE: + SECURITY + TEMPORAL + OSINT (full surface)
+
+    Query-Type Routing:
+        ACADEMIC:   always includes ACADEMIC family
+        HISTORICAL: always includes ARCHIVE family
+        SECURITY:   includes SECURITY family at ADVANCED+
+        GENERAL:    minimal family set per depth
+    """
+    cfg = config or UnifiedResearchConfig(depth=depth)
+
+    # Determine base families by depth
+    if depth == ResearchDepth.BASIC:
+        base_families = [SourceFamily.WEB, SourceFamily.ACADEMIC]
+        base_engines = ('stealth_crawler', 'academic')
+
+    elif depth == ResearchDepth.ADVANCED:
+        base_families = [SourceFamily.WEB, SourceFamily.ACADEMIC, SourceFamily.ARCHIVE]
+        base_engines = ('stealth_crawler', 'academic', 'archives')
+
+    else:  # EXHAUSTIVE
+        base_families = [
+            SourceFamily.WEB,
+            SourceFamily.ACADEMIC,
+            SourceFamily.ARCHIVE,
+            SourceFamily.SECURITY,
+            SourceFamily.TEMPORAL,
+            SourceFamily.OSINT,
+        ]
+        base_engines = (
+            'stealth_crawler', 'academic', 'archives',
+            'data_leak', 'temporal', 'osint'
+        )
+
+    families = list(base_families)
+    engines = list(base_engines)
+    excluded: List[SourceFamily] = []
+    conditions: List[str] = [f'depth={depth.name}']
+
+    # Query-type specific routing
+    if query_type == QueryType.ACADEMIC:
+        if SourceFamily.ACADEMIC not in families:
+            families.insert(0, SourceFamily.ACADEMIC)
+            engines = ['academic'] + list(engines)
+        conditions.append('query_type=ACADEMIC')
+
+    elif query_type == QueryType.HISTORICAL:
+        if SourceFamily.ARCHIVE not in families:
+            families.insert(0, SourceFamily.ARCHIVE)
+            engines = ['archives'] + list(engines)
+        conditions.append('query_type=HISTORICAL')
+
+    elif query_type == QueryType.SECURITY:
+        if depth.value >= ResearchDepth.ADVANCED.value:
+            if SourceFamily.SECURITY not in families:
+                families.append(SourceFamily.SECURITY)
+                engines = list(engines) + ['data_leak']
+        conditions.append('query_type=SECURITY')
+
+    elif query_type == QueryType.PERSON:
+        # PERSON benefits from OSINT family at EXHAUSTIVE
+        if depth == ResearchDepth.EXHAUSTIVE and SourceFamily.OSINT not in families:
+            families.append(SourceFamily.OSINT)
+            engines = list(engines) + ['osint']
+        conditions.append('query_type=PERSON')
+
+    elif query_type == QueryType.ORGANIZATION:
+        # ORGANIZATION benefits from ARCHIVE at ADVANCED+
+        if depth.value >= ResearchDepth.ADVANCED.value:
+            if SourceFamily.ARCHIVE not in families:
+                families.append(SourceFamily.ARCHIVE)
+                engines = list(engines) + ['archives']
+        conditions.append('query_type=ORGANIZATION')
+
+    else:  # GENERAL, TECHNICAL, NEWS
+        conditions.append(f'query_type={query_type.value}')
+
+    # Apply config-level tool exclusions
+    if config:
+        if not cfg.should_use_tool('academic') and SourceFamily.ACADEMIC in families:
+            families.remove(SourceFamily.ACADEMIC)
+            engines = [e for e in engines if e != 'academic']
+            excluded.append(SourceFamily.ACADEMIC)
+
+        if not cfg.should_use_tool('archives') and SourceFamily.ARCHIVE in families:
+            families.remove(SourceFamily.ARCHIVE)
+            engines = [e for e in engines if e != 'archives']
+            excluded.append(SourceFamily.ARCHIVE)
+
+    # Build reasoning string
+    reasoning = (
+        f"depth={depth.name}, query_type={query_type.value}, "
+        f"families={len(families)}, engines={len(engines)}"
+    )
+
+    return SourcePlan(
+        families=tuple(families),
+        engines=tuple(engines),
+        reasoning=reasoning,
+        conditions=tuple(conditions),
+        excluded=tuple(excluded),
+    )
 
 
 # =============================================================================

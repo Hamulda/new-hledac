@@ -1276,12 +1276,25 @@ class SNNEncryptedContainer:
 #   2. Carries execution state or correlation context
 #   3. Would break F9/F11 activation if its shape drifted
 #
+# KNOWN EXCEPTIONS — sanctioned local seam (see F011_DEEP_RESEARCH_PROVIDER_CONTAINMENT.md)
+#   DeepResearchRequest / DeepResearchResponse (enhanced_research.py):
+#     Owner: autonomous_orchestrator pipeline (F11 integration)
+#     Removal condition: replaced by canonical ProviderRequest/ProviderResult
+#       AFTER triáda + session seams + BudgetManager/EvidenceLog integration
+#     Migration blocker: UnifiedResearchEngine.deep_research() seam is dormant;
+#       full activation requires triáda (analyzer→capability_router→tool_registry),
+#       source plane routing, FetchCoordinator transport, session context, security gate
+#     Runtime impact if removed: deep_research_provider_seam() becomes untyped wrapper;
+#       F11 provider candidate loses typed seam — activation blockers documented in F011 doc
+#
 # RULES:
 #   [1] NEW activation-relevant handoffs MUST be added here, not elsewhere
 #   [2] Existing local scaffolds (ghost_executor, execution_coordinator) are
 #       marked with non-canonical notes — they are DONOR/COMPAT, not canonical
 #   [3] Domain-specific types (FetchResult) live in their domain modules
 #   [4] Legacy local scaffolds without explicit NOTE are technical debt
+#   [5] New local scaffolds require owner + removal_condition + migration_blocker
+#       documented HERE (not only in the donor module)
 #
 # See: CONTRACT_MATRIX.md for full taxonomy
 # =============================================================================
