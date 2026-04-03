@@ -73,6 +73,239 @@ class Capability(Enum):
     GLINER = "gliner"
 
 
+# =============================================================================
+# F6: Capability Truth Normalization Seam
+# =============================================================================
+# PURPOSE: Explicitly separate capability truth layers that were previously
+# conflated in CapabilityRegistry.is_available() and CapabilityStatus.available.
+#
+# Before F6:
+#   - CapabilityStatus.available mixed registry_declared and runtime_loaded
+#   - is_available() returned True if loaded OR available (no distinction)
+#   - No way to ask "declared but not yet effective for tool contract"
+#
+# After F6:
+#   Four explicit layers with clear semantics:
+#
+#   declared_by_tool_contract:
+#     - What tool contracts (Tool.required_capabilities) declare they need
+#     - Source: tool_registry.py Tool definitions
+#     - Questions answered: "Does web_search declare reranking?"
+#
+#   registry_declared_available:
+#     - What CapabilityRegistry.register() sets as available=True
+#     - Source: create_default_registry() or explicit register() calls
+#     - Questions answered: "Did we register reranking as available?"
+#     - DOES NOT answer: "Is the module actually importable?"
+#
+#   runtime_loaded:
+#     - What CapabilityRegistry.load() successfully loaded into _loaded set
+#     - Source: actual async loader invocation
+#     - Questions answered: "Did we successfully call the loader?"
+#
+#   effective_for_tool_contract:
+#     - What is both declared AND registry_available AND runtime_loaded
+#     - Questions answered: "Can web_search actually use reranking right now?"
+#     - This is the SOUND answer for tool execution decisions
+#
+# WHY THIS IS A SEAM, NOT A FRAMEWORK:
+#   - No new global manager
+#   - No new heavy backend
+#   - No broad runtime rewiring
+#   - Only a descriptor/helper API for truthful capability introspection
+#   - Lazy: only probes module existence when explicitly asked
+#
+# RATIONALE FOR FOUR LAYERS (not three):
+#   - declared != available is important for scaffold vs ready distinction
+#   - available != loaded is important for on-demand vs eager distinction
+#   - loaded != effective is important for tool contract decisions
+#   Example: RERANKING is declared_by_tool_contract and
+#   registry_declared_available (module path registered), but
+#   runtime_loaded=False until first use. This is normal scaffold state.
+# =============================================================================
+
+
+class CapabilityTruthLayer(Enum):
+    """
+    Explicit truth layers for capability introspection.
+
+    These layers form a partial order: declared <= available <= loaded <= effective.
+    Not all capabilities reach effective status - this is normal for scaffold state.
+    """
+    # What tool contracts declare they require (source of truth: tool_registry.py)
+    DECLARED_BY_TOOL_CONTRACT = "declared"
+
+    # What registry.register() set as available=True (source: create_default_registry)
+    REGISTRY_DECLARED_AVAILABLE = "available"
+
+    # What load() successfully materialized into _loaded set
+    RUNTIME_LOADED = "loaded"
+
+    # What is declared AND available AND loaded (sound for tool execution)
+    EFFECTIVE_FOR_TOOL_CONTRACT = "effective"
+
+
+@dataclass
+class CapabilityTruthStatus:
+    """
+    F6: Truthful capability status across all four layers.
+
+    This dataclass replaces the conflated CapabilityStatus.available field
+    with explicit per-layer booleans. Use probe_capability_truth() to
+    populate this for a given capability.
+    """
+    capability: Capability
+
+    # Layer 1: What tool contracts declare
+    declared_by_tool_contract: bool = False
+
+    # Layer 2: What registry.register() set as available
+    registry_declared_available: bool = False
+
+    # Layer 3: What load() successfully materialized
+    runtime_loaded: bool = False
+
+    @property
+    def effective_for_tool_contract(self) -> bool:
+        """
+        All three conditions must be true for effective status.
+
+        A capability is effective_for_tool_contract when:
+        1. Some tool contract declares it (declared_by_tool_contract)
+        2. Registry marked it available (registry_declared_available)
+        3. Runtime successfully loaded it (runtime_loaded)
+
+        This is the SOUND answer for "can this capability be used for
+        tool execution right now?"
+        """
+        return (
+            self.declared_by_tool_contract
+            and self.registry_declared_available
+            and self.runtime_loaded
+        )
+
+    def is_scaffold_only(self) -> bool:
+        """
+        Returns True when capability is declared/available but NOT effective.
+
+        Scaffold-only means: registered as available but not yet loaded.
+        This is normal for lazy/on-demand capabilities that haven't been
+        needed yet. NOT an error state.
+        """
+        return (
+            self.declared_by_tool_contract
+            and self.registry_declared_available
+            and not self.runtime_loaded
+        )
+
+    def layer_summary(self) -> dict[str, bool]:
+        """Return all layers as dict for logging/inspection."""
+        return {
+            "declared": self.declared_by_tool_contract,
+            "available": self.registry_declared_available,
+            "loaded": self.runtime_loaded,
+            "effective": self.effective_for_tool_contract,
+        }
+
+
+def probe_capability_truth(
+    capability: Capability,
+    registry: "CapabilityRegistry",
+    tool_contract_declarations: Optional[dict[str, set[str]]] = None,
+) -> CapabilityTruthStatus:
+    """
+    F6: Probe all four truth layers for a capability.
+
+    This is the canonical way to get a truthful picture of a capability's
+    status across all layers. Lazy: only imports module if needed.
+
+    Args:
+        capability: The capability to probe
+        registry: CapabilityRegistry instance to check
+        tool_contract_declarations: Optional dict of tool_name -> required_caps
+            If not provided, reads from Tool.required_capabilities via
+            tool_registry module (read-only, no side effects).
+
+    Returns:
+        CapabilityTruthStatus with all layers populated
+    """
+    status = CapabilityTruthStatus(capability=capability)
+
+    # Layer 1: declared_by_tool_contract
+    # Check if any tool contract declares this capability as required
+    if tool_contract_declarations is None:
+        tool_contract_declarations = _get_tool_capability_declarations()
+
+    for tool_caps in tool_contract_declarations.values():
+        if capability.value in tool_caps:
+            status.declared_by_tool_contract = True
+            break
+
+    # Layer 2: registry_declared_available
+    reg_status = registry._status.get(capability)
+    if reg_status:
+        status.registry_declared_available = reg_status.available
+
+    # Layer 3: runtime_loaded
+    status.runtime_loaded = capability in registry._loaded
+
+    return status
+
+
+def _get_tool_capability_declarations() -> dict[str, set[str]]:
+    """
+    Read Tool.required_capabilities from tool_registry (read-only, lazy import).
+
+    Returns:
+        Dict of tool_name -> set of required capability string names.
+        Empty dict if tool_registry not available.
+    """
+    declarations: dict[str, set[str]] = {}
+    try:
+        from . import tool_registry as tr_module
+
+        # Access the module-level create_default_registry to get tools
+        # This is read-only introspection, no side effects
+        try:
+            registry = tr_module.create_default_registry()
+            for tool in registry.list_tools():
+                if tool.required_capabilities:
+                    declarations[tool.name] = set(tool.required_capabilities)
+        except Exception:
+            # If create_default_registry fails (e.g., circular import in tests),
+            # fall back to empty - this is diagnostic, not authoritative
+            pass
+
+    except ImportError:
+        # tool_registry not available - return empty
+        pass
+
+    return declarations
+
+
+def get_capability_truth_matrix(
+    capabilities: list[Capability],
+    registry: "CapabilityRegistry",
+) -> dict[Capability, CapabilityTruthStatus]:
+    """
+    F6: Get truth matrix for multiple capabilities.
+
+    Convenience wrapper around probe_capability_truth for bulk inspection.
+
+    Args:
+        capabilities: List of capabilities to probe
+        registry: CapabilityRegistry instance
+
+    Returns:
+        Dict mapping each capability to its truth status
+    """
+    declarations = _get_tool_capability_declarations()
+    return {
+        cap: probe_capability_truth(cap, registry, declarations)
+        for cap in capabilities
+    }
+
+
 @dataclass
 class CapabilityStatus:
     """Status of a capability."""

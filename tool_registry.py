@@ -831,9 +831,23 @@ class WebSearchArgs(BaseModel):
 class WebSearchResult(BaseModel):
     """Return type for web search tool."""
 
-    results: list[dict[str, Any]] = Field(description="Search results")
-    total_found: int = Field(description="Total results found")
-    query: str = Field(description="Executed query")
+    # Staged gap: truthful response when backend not ready
+    staged: bool = Field(default=False, description="True when web_search is staged gap")
+    backend_ready: bool = Field(default=False, description="Whether backend is operational")
+    query_ready: bool = Field(default=True, description="Whether query interface is ready")
+    contract_ready: bool = Field(default=False, description="Whether tool contract is satisfied")
+    capability_blockers: list[str] = Field(
+        default_factory=list,
+        description="List of missing capabilities blocking activation"
+    )
+    staged_reason: str = Field(
+        default="",
+        description="Human-readable reason for staged state"
+    )
+    # Actual results (empty when staged)
+    results: list[dict[str, Any]] = Field(default_factory=list, description="Search results")
+    total_found: int = Field(default=0, description="Total results found")
+    query: str = Field(default="", description="Executed query")
 
 
 class EntityExtractionArgs(BaseModel):
@@ -954,12 +968,33 @@ class DNSTunnelCheckResult(BaseModel):
 async def _web_search_handler(
     query: str, max_results: int = 10, recency_days: int | None = None
 ) -> dict[str, Any]:
-    """Handler for web search - placeholder implementation."""
-    # Placeholder - actual implementation would use search API
+    """
+    Handler for web search - STAGED GAP (Sprint F6).
+
+    Returns truthful staged response when backend not ready:
+    - backend_ready: False (no web search engine exists)
+    - query_ready: True (interface accepts queries)
+    - contract_ready: False (reranking capability missing)
+    - capability_blockers: ["reranking"]
+    - results: [] (empty, not fake)
+
+    This is NOT fake activation — it's explicit contract stating
+    why web_search cannot execute and what is needed to unblock it.
+    """
     return {
-        "results": [{"title": f"Result {i}", "url": f"https://example.com/{i}"}
-                   for i in range(min(max_results, 3))],
-        "total_found": min(max_results, 3),
+        "staged": True,
+        "backend_ready": False,
+        "query_ready": True,
+        "contract_ready": False,
+        "capability_blockers": ["reranking"],
+        "staged_reason": (
+            "web_search backend not implemented: no search engine found in "
+            "intelligence/ module. Required capability 'reranking' is not "
+            "defined in capability system. Backend must exist before tool "
+            "contract can be satisfied."
+        ),
+        "results": [],
+        "total_found": 0,
         "query": query,
     }
 
