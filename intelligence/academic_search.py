@@ -814,12 +814,14 @@ class AcademicSearchEngine:
             strategies=self.expansion_strategies,
             max_total_variations=15
         )
-        
+
+        self.logger = logging.getLogger("academic.engine")
+
         # Initialize source adapters
         self.source_adapters: Dict[str, BaseSourceAdapter] = {}
         self.source_performance: Dict[str, SourcePerformance] = {}
         self._init_sources()
-        
+
         # Initialize deduplication engine
         self.dedup_engine: Optional[DeduplicationEngine] = None
         if enable_deduplication:
@@ -829,9 +831,7 @@ class AcademicSearchEngine:
                 metadata_threshold=0.95
             )
             self.dedup_engine = DeduplicationEngine(dedup_config)
-        
-        self.logger = logging.getLogger("academic.engine")
-    
+
     def _init_sources(self):
         """Initialize source adapters."""
         source_configs = {
@@ -854,21 +854,21 @@ class AcademicSearchEngine:
                 rate_limit_per_minute=100
             ),
         }
-        
+
         source_mapping = {
             "arxiv": ArxivAdapter,
             "crossref": CrossrefAdapter,
             "semantic_scholar": SemanticScholarAdapter,
         }
-        
+
         for name, source_config in source_configs.items():
             if name in source_mapping:
                 adapter_class = source_mapping[name]
                 self.source_adapters[name] = adapter_class(source_config)
                 self.source_performance[name] = SourcePerformance(source_name=name)
-        
+
         self.logger.info(f"Initialized {len(self.source_adapters)} source adapters")
-    
+
     async def search(
         self,
         query: str,

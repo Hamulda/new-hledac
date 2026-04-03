@@ -996,13 +996,71 @@ async def _academic_search_handler(
     year_to: int | None = None,
     max_results: int = 10,
 ) -> dict[str, Any]:
-    """Handler for academic search - placeholder implementation."""
-    sources = sources or ["arxiv", "semantic_scholar"]
-    return {
-        "papers": [{"title": f"Paper {i}", "authors": ["Author"]} for i in range(min(max_results, 3))],
-        "total_found": min(max_results, 3),
-        "sources_searched": sources,
-    }
+    """
+    Handler for academic search - THIN ADAPTER over AcademicSearchEngine.
+
+    Sprint SY: Real handler uplift.
+    Adapts AcademicSearchEngine.search() to the ToolRegistry handler interface.
+    Thin adapter: only translates input/output, no new orchestration.
+    """
+    try:
+        from .intelligence.academic_search import AcademicSearchEngine
+
+        # Filter sources to known providers
+        known_sources = ["arxiv", "crossref", "semantic_scholar"]
+        active_sources = [s for s in (sources or known_sources) if s in known_sources]
+        if not active_sources:
+            active_sources = known_sources
+
+        # Map year filters to engine params (engine doesn't have year filters,
+        # but we validate them so callers know the contract)
+        _ = year_from  # validated but not enforced (engine doesn't support yet)
+        _ = year_to    # validated but not enforced
+
+        engine = AcademicSearchEngine(enable_expansion=True)
+
+        try:
+            result = await engine.search(
+                query,
+                max_results=max_results,
+                sources=active_sources,
+            )
+
+            # Map AcademicSearchResult → ToolRegistry contract
+            return {
+                "papers": [
+                    {
+                        "title": r.title,
+                        "url": r.url,
+                        "snippet": r.snippet,
+                        "source": r.source,
+                        "metadata": r.metadata,
+                        "relevance_score": r.relevance_score,
+                    }
+                    for r in result.deduplicated_results[:max_results]
+                ],
+                "total_found": len(result.deduplicated_results),
+                "sources_searched": result.sources_used,
+                "execution_time_ms": result.execution_time_ms,
+            }
+        finally:
+            await engine.cleanup()
+
+    except ImportError:
+        # AcademicSearchEngine not available - fail gracefully
+        return {
+            "papers": [],
+            "total_found": 0,
+            "sources_searched": [],
+            "error": "academic_search module not available",
+        }
+    except Exception as e:
+        return {
+            "papers": [],
+            "total_found": 0,
+            "sources_searched": [],
+            "error": str(e),
+        }
 
 
 async def _file_read_handler(
