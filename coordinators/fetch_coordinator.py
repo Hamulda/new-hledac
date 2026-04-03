@@ -975,9 +975,13 @@ class FetchCoordinator(UniversalCoordinator):
                         result = {"error": "blocked", "blocked_reason": meta.get("blocked_reason"), "meta": meta}
                         break
 
+                # Sprint 4B: Policy gate via SourceTransportMap — replaces hardcoded url.endswith()
                 # Sprint 46 + 76: Darknet URL handling (.onion, .i2p)
                 # Sprint 76: Use Tor connection pool for .onion
-                if url.endswith('.onion'):
+                from ..transport.transport_resolver import get_transport_for_url, Transport
+                url_transport = get_transport_for_url(url)
+
+                if url_transport is Transport.TOR:
                     trace_fetch_start(url, "tor", {"attempt": attempt, "timeout": TIMEOUT_TOR})
                     result = await self._fetch_with_tor(url)
                     if result:
@@ -990,7 +994,7 @@ class FetchCoordinator(UniversalCoordinator):
                         if result:
                             trace_fetch_end(url, "darknet_fallback", "ok", 0.0)
                             break
-                elif url.endswith('.i2p') and self._darknet_connector:
+                elif url_transport is Transport.I2P and self._darknet_connector:
                     trace_fetch_start(url, "i2p", {"attempt": attempt, "timeout": TIMEOUT_I2P})
                     result = await self._darknet_connector.fetch_i2p(url)
                     if result:

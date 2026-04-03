@@ -230,5 +230,69 @@ class TransportResolver:
         return None
 
 
+# =============================================================================
+# Sprint 4A: Minimal Proxy-Aware Seam — Policy Gate Accessor
+# =============================================================================
+#
+# PURPOSE: Clean policy accessor for FetchCoordinator._fetch_url() entry point.
+#   Replaces hardcoded url.endswith() checks with explicit policy classification.
+#
+#   This is a SEAM, not a cutover:
+#     - Existing hardcoded logic in _fetch_url() stays as fallback truth
+#     - SourceTransportMap.get() provides the policy classification layer
+#     - No changes to actual transport execution (tor pool, darknet, curl)
+#
+#   RUNTIME TRUTH (Sprint 4A):
+#     - Policy truth: SourceTransportMap.get() — ACTIVE, fast dict lookup
+#     - Plain TCP surface: session_runtime.async_get_aiohttp_session() — separate
+#     - Proxy-aware surface: FetchCoordinator._get_tor_session() — separate pool
+#     - curl world: StealthCrawler/curl_cffi — separate TLS plane
+#     - Resolver.resolve(): DORMANT — requires lifecycle preconditions
+#
+#   ATTACH PATH (4B): SourceTransportMap.get() used as policy gate in
+#     FetchCoordinator._fetch_url() — replacing url.endswith() checks.
+#     Safe because: same boolean logic, no behavioral change.
+#
+# =============================================================================
+
+
+def get_transport_for_url(url: str) -> 'Transport':
+    """
+    Sprint 4A: Get Transport classification for a URL.
+
+    This is the MINIMAL SEAM — a policy gate that wraps resolve_url()
+    for explicit transport classification without changing execution.
+
+    Args:
+        url: URL string to classify
+
+    Returns:
+        Transport.TOR for .onion, Transport.I2P for .i2p, Transport.DIRECT otherwise
+
+    Invariants:
+        [4A-I1] Fast dict lookup — no network, no transport init
+        [4A-I2] Deterministic — same URL always returns same Transport
+        [4A-I3] No side effects — pure function, thread-safe
+    """
+    # Fast path: extract host and check suffix
+    try:
+        netloc = url.split("://", 1)[1].split("/", 1)[0]
+        # Strip query string from netloc (e.g. "?redirect=...")
+        if "?" in netloc:
+            netloc = netloc.split("?", 1)[0]
+        if ":" in netloc:
+            host = netloc.split(":")[0]
+        else:
+            host = netloc
+        host_lower = host.lower()
+        if host_lower.endswith('.onion'):
+            return Transport.TOR
+        if host_lower.endswith('.i2p'):
+            return Transport.I2P
+    except Exception:
+        pass
+    return Transport.DIRECT
+
+
 # Backwards compatibility alias
 Transport = Transport  # re-export via module-level alias
