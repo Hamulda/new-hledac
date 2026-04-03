@@ -134,6 +134,10 @@ class SourceFamily(Enum):
     PROVIDER-OWNED INTERNAL SEAM: This enum is an internal planning artifact,
     NOT a public authority surface. It is used by _build_source_plan() to
     determine which lazy-loaded engines to route to.
+
+    LOCAL_CORPUS is a CONSUMER SEAM — DeepResearch does NOT own the search plane.
+    It merely declares that it WOULD consume local corpus results if the plane
+    existed. This is NOT a new retrieval authority (per F8 invariant).
     """
     WEB = "web"                       # StealthCrawler, UnifiedWebIntelligence
     ACADEMIC = "academic"             # AcademicSearchEngine (ArXiv, CrossRef, Semantic)
@@ -141,6 +145,7 @@ class SourceFamily(Enum):
     SECURITY = "security"             # DataLeakHunter, StealthWebScraper
     TEMPORAL = "temporal"             # TemporalAnalyzer (EXHAUSTIVE only)
     OSINT = "osint"                   # DataLeakHunter + cross-reference (EXHAUSTIVE)
+    LOCAL_CORPUS = "local_corpus"     # LOCAL CONSUMER SEAM — search plane consumer, NOT owner
 
 
 @dataclass
@@ -2396,6 +2401,10 @@ def _build_source_plan(
     Tato funkce je internal seam pro UnifiedResearchEngine.
     Pro veřejné použití po F11 activation použij deep_research_provider_seam().
 
+    LOCAL_CORPUS is a CONSUMER SEAM — declared here as a possible source
+    but NOT wired at runtime. It would be consumed if the local corpus
+    search plane existed and was populated. This is NOT an authority claim.
+
     Args:
         query_type: Detected or provided query type
         depth: Research depth level
@@ -2408,12 +2417,15 @@ def _build_source_plan(
         BASIC:     WEB + ACADEMIC (minimum viable coverage)
         ADVANCED:  + ARCHIVE (Wayback, archive resurrection)
         EXHAUSTIVE: + SECURITY + TEMPORAL + OSINT (full surface)
+        LOCAL_CORPUS: CONSUMER SEAM (dormant, declared but not wired)
 
     Query-Type Routing:
         ACADEMIC:   always includes ACADEMIC family
         HISTORICAL: always includes ARCHIVE family
         SECURITY:   includes SECURITY family at ADVANCED+
         GENERAL:    minimal family set per depth
+        PERSON:     may include LOCAL_CORPUS at EXHAUSTIVE (dormant)
+        ORGANIZATION: may include LOCAL_CORPUS at ADVANCED+ (dormant)
     """
     cfg = config or UnifiedResearchConfig(depth=depth)
 
@@ -2810,6 +2822,130 @@ DEEP_RESEARCH_ADMISSION = TriadAdmissionDescriptor()
 
 
 # =============================================================================
+# LOCAL CORPUS CONSUMER SEAM — Sprint F8/F11
+# =============================================================================
+# Read-only consumer declaration: DeepResearch WOULD consume local corpus search
+# plane if it existed. This is NOT a new retrieval authority (per F8 invariant).
+# This is NOT activation — runtime path remains dormant.
+#
+# Consumer matrix:
+#   DeepResearch provider  → consumer of: local_corpus search plane
+#   RAGEngine             → owner of: RAG grounding authority
+#   LocalSearchSeam       → owner of: local corpus search plane (dormant)
+#
+# The seam is PLANNING ONLY — it declares intent and conditions, not execution.
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class LocalCorpusConsumerDescriptor:
+    """
+    Read-only consumer seam for local corpus search plane.
+
+    PROVIDER-OWNED DORMANT CONSUMER SEAM — NOT runtime authority.
+
+    This descriptor lives in the provider-owned space (enhanced_research.py)
+    and explicitly declares:
+    1. That DeepResearch is a CONSUMER (not owner) of local corpus search
+    2. Under what conditions it would consume (depth, query type, state)
+    3. What remains dormant (no runtime path, no eager init)
+    4. What blocks actual wiring (ingestion plane, corpus readiness)
+
+    RELATIONSHIP TO RAGEngine:
+    - RAGEngine = RAG grounding authority (context augmentation, embeddings, HNSW)
+    - LocalSearchSeam = local corpus search plane owner (BM25, metadata, read-only)
+    - DeepResearch consumer = potential consumer of LocalSearchSeam output
+    - These are THREE SEPARATE surfaces — no authority confusion (per F8)
+
+    WHY THIS IS NOT A NEW RETRIEVAL AUTHORITY:
+    - LocalSearchSeam already owns the search plane (search_index.py, Sprint 8F6)
+    - DeepResearch merely declares it WOULD query that plane if it existed
+    - No new provider framework, no new execution path, no eager init
+    - Consumer declaration is read-only planning metadata
+    """
+    # Identity
+    consumer_name: str = "UnifiedResearchEngine"
+    owning_module: str = "enhanced_research"
+
+    # Consumer role (explicit, not an authority claim)
+    is_consumer: bool = True
+    is_not_search_plane_owner: bool = True
+
+    # What the consumer wants from local corpus
+    would_query_for_depths: Tuple[str, ...] = (
+        "BASIC",    # Light corpus touch for factual queries
+        "ADVANCED", # Deeper corpus for investigative queries
+        "EXHAUSTIVE",  # Full corpus sweep for exhaustive research
+    )
+
+    would_query_for_query_types: Tuple[str, ...] = (
+        "GENERAL",      # Factual lookup with local grounding
+        "ACADEMIC",     # Literature comparison with corpus
+        "PERSON",       # Entity-centric with local context
+        "ORGANIZATION", # Org-centric with local documents
+    )
+
+    # What conditions trigger consumer interest
+    conditions_for_consumption: Tuple[str, ...] = (
+        "local_corpus_plane_exists=True",       # Search plane is initialized
+        "corpus_populated=True",                # At least one document ingested
+        "query_has_local_context=True",         # Query benefits from local grounding
+        "no_better_external_source_available",  # External source would be overkill
+        "budget_allows_local_only=True",        # BudgetManager allows corpus-only path
+    )
+
+    # What blocks wiring (pre-F11 activation)
+    blockers: Tuple[str, ...] = (
+        "LocalSearchSeam ingestion plane: not yet connected",
+        "Corpus population: documents need to be ingested first",
+        "BudgetManager seam: no consumer-side budget tracking for corpus queries",
+        "DeepResearch runtime path: no activation call site exists",
+        "ProviderRequest/ProviderResult handoff: minimal grounding seam TBD",
+    )
+
+    # Explicit boundary
+    is_dormant: bool = True
+    is_not_runtime_path: bool = True
+    is_not_activation: bool = True
+
+    # RAGEngine separation (per F8 invariant)
+    rag_engine_authority: str = "RAGEngine = RAG grounding authority (hybrid_retrieve, context)"
+    local_corpus_authority: str = "LocalSearchSeam = search plane owner (BM25, metadata)"
+    consumer_declaration: str = "DeepResearch = consumer of LocalSearchSeam output (NOT authority)"
+
+    @property
+    def consumer_summary(self) -> str:
+        """Human-readable consumer declaration."""
+        lines = [
+            f"Consumer: {self.consumer_name}",
+            f"Module: {self.owning_module}",
+            f"Is Consumer (not owner): {self.is_consumer}",
+            f"Dormant: {self.is_dormant}",
+            "",
+            "Would query for depths:",
+        ]
+        for d in self.would_query_for_depths:
+            lines.append(f"  - {d}")
+        lines.append("Would query for query types:")
+        for qt in self.would_query_for_query_types:
+            lines.append(f"  - {qt}")
+        lines.append("")
+        lines.append("Authority separation:")
+        lines.append(f"  RAGEngine: {self.rag_engine_authority}")
+        lines.append(f"  LocalSearchSeam: {self.local_corpus_authority}")
+        lines.append(f"  DeepResearch consumer: {self.consumer_declaration}")
+        lines.append("")
+        lines.append("Blockers:")
+        for b in self.blockers:
+            lines.append(f"  - {b}")
+        return "\n".join(lines)
+
+
+# Canonical singleton for read-only consumer queries
+LOCAL_CORPUS_CONSUMER = LocalCorpusConsumerDescriptor()
+
+
+# =============================================================================
 # EXPORTS
 # =============================================================================
 
@@ -2891,4 +3027,14 @@ __all__ = [
     # NOT runtime activation — this is a declaration of intent + readiness.
     'TriadAdmissionDescriptor',
     'DEEP_RESEARCH_ADMISSION',
+
+    # ========================================================================
+    # LOCAL CORPUS CONSUMER SEAM (Sprint F8/F11 - Read-Only Descriptor)
+    # ========================================================================
+    # Read-only consumer declaration: DeepResearch WOULD consume local corpus
+    # search plane if it existed. NOT runtime activation, NOT retrieval authority.
+    # RAGEngine = RAG grounding authority; LocalSearchSeam = search plane owner.
+    # DeepResearch = consumer of LocalSearchSeam output (F8 invariant).
+    'LocalCorpusConsumerDescriptor',
+    'LOCAL_CORPUS_CONSUMER',
 ]
