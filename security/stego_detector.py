@@ -522,7 +522,6 @@ class StatisticalStegoDetector:
 
         except Exception as e:
             logger.error(f"Chi-square test failed: {e}")
-            result.details = {"error": str(e)}
 
         return result
 
