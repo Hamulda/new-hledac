@@ -1675,6 +1675,98 @@ class ExportHandoff:
 
 
 # =============================================================================
+# CANONICAL GROUNDING HINTS — Sprint F11b: Minimal Grounding Bridge
+# =============================================================================
+# Minimal canonical surface for deep research grounding metadata.
+# Future canonical target for DeepResearchGroundingShim (enhanced_research.py).
+# This is NOT a replacement for ProviderRequest/ProviderResult.
+# This is NOT a new correlation mechanism — reuses RunCorrelation.
+#
+# KNOWN NON-CANONICAL SEAMS (sanctioned local seams):
+#   DeepResearchGroundingShim (enhanced_research.py:2636):
+#     Owner: enhanced_research local seam
+#     Non-canonical because: internal/provider-owned, not public surface
+#     Removal condition: replaced by CanonicalGroundingHints after F11 activation
+#   grounding_hints Dict (enhanced_research.py:2555):
+#     Owner: DeepResearchRequest local seam
+#     Non-canonical because: raw Dict, not typed
+#     Removal condition: replaced by typed CanonicalGroundingHints after migration
+#
+# RULES:
+#   [1] This is a FUTURE canonical target, not immediate migration
+#   [2] Local seam remains non-canonical until activation conditions are met
+#   [3] from_shim() is COMPAT ONLY — not for use in hot path
+# =============================================================================
+
+@dataclass(frozen=True)
+class CanonicalGroundingHints:
+    """
+    Canonical minimal grounding hints for deep research handoff.
+
+    This is the FUTURE canonical target for the local seam in enhanced_research.py.
+    The local seam (DeepResearchGroundingShim, grounding_hints dict) remains
+    non-canonical until migration conditions are met per F011 activation plan.
+
+    Fields:
+        topic_hints:    Topic keywords for retrieval alignment (immutable tuple)
+        domain_tags:    Domain classification tags (immutable tuple)
+        correlation:    Run correlation context (reuses RunCorrelation)
+        budget_hint:    Optional budget tier hint (read-only string)
+        evidence_hint:  Optional evidence requirement hint (read-only string)
+
+    Shrink wrap: Keep minimal. Only add fields with explicit migration trigger.
+    """
+    topic_hints: Tuple[str, ...] = field(default_factory=lambda: ())
+    domain_tags: Tuple[str, ...] = field(default_factory=lambda: ())
+    correlation: Optional[RunCorrelation] = None
+    budget_hint: Optional[str] = None
+    evidence_hint: Optional[str] = None
+
+    @classmethod
+    def from_shim(cls, shim: Any = None, topic_hints: Tuple[str, ...] = (), domain_tags: Tuple[str, ...] = (), correlation: Optional[RunCorrelation] = None) -> "CanonicalGroundingHints":
+        """
+        Create from local seam Shim for forward-compatibility.
+
+        COMPAT ONLY: This method bridges the non-canonical local seam
+        to the canonical surface. Do NOT call this in hot path.
+
+        Supports two calling conventions:
+        - from_shim(shim) — extract from DeepResearchGroundingShim
+        - from_shim(topic_hints=..., domain_tags=..., correlation=...) — direct construction
+        """
+        if shim is not None:
+            # Extract from Shim
+            budget_hint = None
+            evidence_hint = None
+            if hasattr(shim, 'budget_hints') and shim.budget_hints is not None:
+                budget_hint = getattr(shim.budget_hints, 'budget_tier', None)
+            if hasattr(shim, 'evidence_hints') and shim.evidence_hints is not None:
+                evidence_hint = getattr(shim.evidence_hints, 'evidence_required', None)
+            return cls(
+                topic_hints=tuple(getattr(shim, 'topic_hints', [])),
+                domain_tags=tuple(getattr(shim, 'domain_tags', [])),
+                correlation=getattr(shim, 'correlation', None),
+                budget_hint=budget_hint,
+                evidence_hint=evidence_hint,
+            )
+        return cls(
+            topic_hints=topic_hints,
+            domain_tags=domain_tags,
+            correlation=correlation,
+        )
+
+    def is_empty(self) -> bool:
+        """Returns True if no grounding hints are set."""
+        return (
+            len(self.topic_hints) == 0
+            and len(self.domain_tags) == 0
+            and self.correlation is None
+            and self.budget_hint is None
+            and self.evidence_hint is None
+        )
+
+
+# =============================================================================
 # FUTURE: WINDUP HANDOFF & WARMUP HANDOFF (Phase 2+)
 # =============================================================================
 # Placeholder scaffolds for future phases. Not implemented in Phase 1.

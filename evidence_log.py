@@ -33,6 +33,33 @@ from typing import Any, Dict, List, Literal, Optional, Set
 
 from pydantic import BaseModel, Field, field_validator
 
+# =============================================================================
+# CONTEXT/EVIDENCE HANDOFF — Sprint F11C: Canonical Ledger Seams
+# =============================================================================
+# This module implements the EVIDENCE LEDGER boundary for the F11C sprint.
+#
+# HANDOFF CONTRACT:
+#   ResearchContext (carrier) --handoff metadata--> EvidenceLog (ledger writer)
+#
+# The handoff flows through:
+#   1. ResearchContext.context_metadata carries ContextHandoffMetadata descriptor
+#   2. EvidenceLog.create_event(correlation=) receives RunCorrelation dict
+#   3. Shadow analytics_hook receives correlation via payload["_correlation"]
+#
+# BOUNDARY RULES:
+#   [1] EvidenceLog remains ledger WRITER — no orchestrator authority
+#   [2] ResearchContext remains context CARRIER — no writer authority
+#   [3] Correlation is the ONLY cross-boundary handoff mechanism
+#   [4] context_metadata is carrier-internal (EvidenceLog never reads it directly)
+#   [5] No new session manager or persistence redesign
+#
+# RELATED COMPONENTS:
+#   - ResearchContext: canonical context carrier (research_context.py)
+#   - RunCorrelation: canonical correlation carrier (types.py:1310-1356)
+#   - ContextHandoffMetadata: typed handoff descriptor (research_context.py)
+#   - analytics_hook: shadow consumer of correlation (knowledge/analytics_hook.py)
+# =============================================================================
+
 # Sprint 8C1: Flow trace
 try:
     from .utils.flow_trace import (

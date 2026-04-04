@@ -5,6 +5,63 @@ autonomous_orchestrator — RE-EXPORT FACADE (8VC)
 .. deprecated::
     This module has been migrated to ``legacy/autonomous_orchestrator.py``.
     This file is kept for backward compatibility only.
+
+CONTAINMENT METADATA (Sprint F13)
+=================================
+runtime_status: ACTIVE_BACKWARD_COMPAT
+    Facade slouží jako import surface pro __init__.py, orchestrator/, smoke_runner.py a testy.
+    NENÍ v production pipeline (__main__.py → SprintScheduler).
+
+authority_status: NON_CANONICAL_FACADE
+    Tento modul NENÍ canonical owner. Veškerá implementace žije v legacy/.
+    False-authority risk: modul vypadá jako primary orchestrator, ale není.
+
+replacement_owner:
+    - legacy.autonomous_orchestrator (implementace, 13k+ řádků)
+    - runtime.sprint_scheduler (production orchestrace, 30min sprint cycle)
+
+migration_blocker:
+    - __init__.py re-export chain (řádky 53-71): 15+ names
+    - orchestrator/__init__.py: re-export FullyAutonomousOrchestrator
+    - smoke_runner.py: import FullyAutonomousOrchestrator
+    - Testy: probe_3c, probe_3b, probe_5a a další přímo importují zde
+
+removal_precondition:
+    1. Všichni consumeri přesměrováni na legacy.autonomous_orchestrator nebo přímé importy
+    2. __init__.py updated: import z legacy/ místo .
+    3. orchestrator/__init__.py updated
+    4. smoke_runner.py updated
+    5. Všechny testy prošly bez facade
+
+runtime_impact_if_removed:
+    VYSOKÝ — okamžitý break:
+    - __init__.py: "from .autonomous_orchestrator import ..." selže
+    - orchestrator/: "from ..autonomous_orchestrator import FullyAutonomousOrchestrator" selže
+    - smoke_runner.py: import selže
+    - Všechny probe testy (probe_3c, probe_3b, probe_5a, ...) fail
+
+donor_capability_list:
+    Hlavní třídy/funkce (COMPAT EXPORTS):
+    - FullyAutonomousOrchestrator
+    - autonomous_research / create_autonomous_orchestrator
+    - deep_research
+    - UnifiedToolRegistry, ToolCategory, ToolCapability
+    - AutonomousWorkflowEngine, WorkflowState
+    - ResilientExecutionManager
+    - AdmissionResult, BacklogCandidate, TokenBucket
+    - WelfordStats, ReservoirSampler, ThermalState
+    - IterationTrace, NetworkReconRunTrace, CapabilityHealth
+    - SynthesisCompression, SimHash
+
+    Internal managery (pro orchestrator/ submoduly):
+    - _SecurityManager, _ResearchManager, _ToolRegistryManager
+    - _StateManager, _BrainManager, _ForensicsManager
+    - _IntelligenceManager, _SynthesisManager
+
+    Enumy:
+    - DiscoveryDepth, ResearchPhase, SourceType
+    - AutonomousStrategy, ResearchSource, ResearchFinding
+    - ComprehensiveResearchResult
 """
 
 import sys

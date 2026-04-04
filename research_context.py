@@ -27,6 +27,62 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 
 from pydantic import BaseModel, Field, field_validator, ConfigDict, field_serializer
+from dataclasses import dataclass as pydantic_dataclass
+
+
+# =============================================================================
+# CONTEXT HANDOFF METADATA — Sprint F11C: Bounded Handoff Surface
+# =============================================================================
+# Typed descriptor for context/evidence handoff between ResearchContext (carrier)
+# and EvidenceLog (ledger). Replaces implicit Dict[str, Any] with explicit schema.
+#
+# RULES:
+#   [1] ResearchContext.context_metadata carries this descriptor
+#   [2] EvidenceLog.create_event(correlation=) receives the handoff
+#   [3] No new writer/orchestrator authority — only metadata transport
+#   [4] Frozen + bounded — no side effects, no eager init
+# =============================================================================
+
+
+@pydantic_dataclass(frozen=True)
+class ContextHandoffMetadata:
+    """
+    Bounded metadata for context → evidence ledger handoff.
+
+    This descriptor:
+    - Documents the explicit handoff contract between carrier and ledger
+    - Provides type safety for context_metadata field
+    - Remains backward-compatible with existing Dict[str, Any] usage
+    - Carries NO independent authority
+
+    Fields (all optional for backward compat):
+        phase: Current research phase (planning/execution/synthesis)
+        branch_id: Parallel branch identifier (for correlation)
+        parent_run_id: Parent run if this is a sub-run
+        iteration_snapshot: Iteration number at handoff time
+        source_component: Which component created the handoff
+        target_components: Which components should receive this
+        ttl_seconds: Time-to-live for this handoff (0 = no expiry)
+
+    NOTE: This is a typed descriptor, NOT a new authority surface.
+          It does NOT govern, sample, or budget resources.
+    """
+    phase: Optional[str] = None
+    branch_id: Optional[str] = None
+    parent_run_id: Optional[str] = None
+    iteration_snapshot: Optional[int] = None
+    source_component: Optional[str] = None
+    target_components: Optional[List[str]] = None
+    ttl_seconds: int = 0
+
+    def to_correlation_dict(self) -> Dict[str, Optional[str]]:
+        """Convert to RunCorrelation-compatible dict for EvidenceLog injection."""
+        return {
+            "run_id": self.parent_run_id,
+            "branch_id": self.branch_id,
+            "provider_id": None,
+            "action_id": None,
+        }
 
 
 class EntityType(str, Enum):
