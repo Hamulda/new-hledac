@@ -38,6 +38,50 @@ BOUNDED_ERROR_CLASSES = frozenset([
 ])
 
 
+# =============================================================================
+# CORRELATION GRAMMAR — SHARED BOUNDARY (Sprint F2B)
+# =============================================================================
+# All planes (ToolExecLog, MetricsRegistry, EvidenceLog) share the same
+# correlation key names: run_id, branch_id, provider_id, action_id.
+# Key names are the grammar contract. Scope semantics (per-event vs per-registry)
+# are plane-specific by design — see docstrings below.
+# =============================================================================
+
+SHARED_CORRELATION_KEYS = frozenset(["run_id", "branch_id", "provider_id", "action_id"])
+"""
+Shared correlation key grammar.
+
+All ledger planes MUST use these key names for cross-component correlation.
+Deviation = silent correlation loss in cross-plane queries.
+
+SCOPE SEMANTICS (intentional, NOT drift):
+- ToolExecLog:        per-event  — each log() call carries its own correlation dict
+- MetricsRegistry:    per-registry — set at __init__, batched on flush
+- EvidenceLog:        per-event  — each create_event carries correlation
+
+These are efficiency trade-offs, not inconsistency. Tool audit events are
+discrete; metrics are aggregated. Unifying scope would sacrifice one plane's
+design for the other's convenience.
+"""
+
+
+def normalize_correlation(corr: Optional[Dict[str, Optional[str]]]) -> Optional[Dict[str, Optional[str]]]:
+    """
+    Normalize correlation dict to shared grammar.
+
+    Returns canonical form:
+    - Only keys in SHARED_CORRELATION_KEYS are present
+    - Values are either str or None
+    - Keys not in grammar are silently dropped (fail-soft hardening)
+
+    This is a grammar seam for cross-plane correlation queries,
+    NOT a general validator.
+    """
+    if corr is None:
+        return None
+    return {k: corr.get(k) for k in SHARED_CORRELATION_KEYS if k in corr}
+
+
 @dataclass
 class ToolExecEvent:
     """

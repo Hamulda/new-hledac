@@ -4,6 +4,19 @@ SecurityGate - PII Detection and Sanitization
 Memory-efficient PII detection using regex patterns.
 Optimized for M1 8GB RAM - no large ML models.
 
+EARLY PRIVACY GATE AUTHORITY (this module):
+- PII detection via regex patterns (email, phone, SSN, etc.)
+- Text sanitization with optional masking
+- Risk scoring based on PII density
+- Always-on fallback sanitizer for fail-safe operation
+
+THIS MODULE IS NOT AUTHORITY FOR:
+- Vault/export operations (see vault_manager.py)
+- Steganography detection (see stego_detector.py)
+- Content blocking/rejection (early gate = detection only)
+- Runtime budget/memory management
+- Media processing or augmentation
+
 Note: Piiranha MLX model was removed (deprecated).
 Uses regex patterns for fast, lightweight PII detection.
 """
@@ -61,10 +74,22 @@ class SanitizationResult:
 
 class SecurityGate:
     """
-    Security gate for PII detection and sanitization.
+    Early privacy gate for PII detection and sanitization.
 
-    Uses regex patterns for fast, lightweight PII detection.
-    No ML models required - optimized for M1 8GB RAM.
+    ROLE (authority):
+        - sanitize(): detect PII and optionally mask with mask_char
+        - analyze_risk(): compute risk score based on PII density
+        - fallback_sanitize(): always-on fail-safe redaction
+
+    NOT AUTHORITY (non-authority):
+        - NO ML models / Piiranha / transformers / torch
+        - NO vault/export/encryption
+        - NO content blocking or rejection
+        - NO runtime memory/budget management
+        - NO steganography or media processing
+
+    Lightweight regex-based, bounded scanning (MAX_FALLBACK_LENGTH=10000).
+    Optimized for M1 8GB RAM.
     """
 
     def __init__(
