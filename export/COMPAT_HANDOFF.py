@@ -50,7 +50,8 @@ Canonical producer-side handoff truth (Sprint 8VZ):
 #   B. None → empty ExportHandoff: for defensive None handling
 #      REMOVAL: when __main__ always passes typed ExportHandoff (never None)
 #
-# Producer side: __main__._print_scorecard_report() → ExportHandoff.from_windup(sprint_id, scorecard_data)
+# Producer side: __main__._print_scorecard_report() → ExportHandoff(...) direct constructor
+#                 top_nodes sourced from store.get_top_seed_nodes() (no from_windup in __main__)
 # Consumer side: export_sprint() — receives typed ExportHandoff
 # =============================================================================
 
