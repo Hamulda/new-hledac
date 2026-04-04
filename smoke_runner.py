@@ -1,11 +1,44 @@
 """
-Smoke Runner - Lightweight network harness for testing
+Smoke Runner - Lightweight bounded smoke-test harness
 =====================================================
 
 A minimal smoke test runner that uses the orchestrator (thin spine) + coordinators.
 Strict budgets, produces bounded JSON summary, never logs raw text.
 
 This module does nothing unless explicitly called.
+
+CONTAINMENT METADATA (Sprint F13)
+=================================
+role: NON_PRODUCTION_SMOKE_HARNESS
+    Test-only harness. NOT a production entrypoint.
+    NOT called from __main__.py or SprintScheduler.
+
+dependency_chain:
+    This module imports through the facade chain:
+    smoke_runner.py:138
+      → autonomous_orchestrator.py (98-line facade, DEPRECATED)
+        → legacy/autonomous_orchestrator.py (31k+ lines, actual implementation)
+
+production_separation:
+    Production path: __main__.py → SprintScheduler → runtime lifecycle
+    Smoke path: smoke_runner.py → FullyAutonomousOrchestrator (facade chain only)
+    These two paths are COMPLETELY SEPARATE. smoke_runner is NEVER in production.
+
+authority_boundary:
+    This harness has NO production authority. It cannot:
+    - Influence SprintScheduler decisions
+    - Modify production state
+    - Execute in the 30-minute sprint cycle
+    - Access production entrypoint code paths
+
+bounded_nature:
+    All budgets are hardcoded constants (NOT configurable):
+    - MAX_URLS = 3
+    - MAX_DEEP_READS = 1
+    - MAX_SNAPSHOTS = 1
+    - MAX_RUNTIME_SECS = 20
+
+    This harness exists solely to verify the facade dependency chain works.
 """
 
 from __future__ import annotations
