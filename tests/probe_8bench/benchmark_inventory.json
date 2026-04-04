@@ -1,17 +1,19 @@
 {
   "metadata": {
     "generated": "2026-03-24",
+    "updated": "2026-04-04",
     "project": "Hledac v12 Benchmark Suite Analysis",
     "scope": "/hledac/universal",
     "total_files_scanned": 203,
     "benchmark_files_found": 47
   },
   "summary": {
-    "orphaned_scripts": 18,
-    "integrated_benchmark_modules": 3,
-    "test_benchmark_files": 26,
-    "actively_used_in_ci": 4,
-    "fully_automated": 2
+    "orphaned_scripts": 6,
+    "integrated_benchmark_modules": 4,
+    "test_benchmark_files": 4,
+    "actively_used_in_ci": 6,
+    "fully_automated": 2,
+    "orphan_scripts_total_files": 17
   },
   "files": [
     {
@@ -60,6 +62,21 @@
       "notes": "SystemMonitor for M1 - ThermalState + MemoryPressure"
     },
     {
+      "path": "benchmarks/bench_8c0/common_stats.py",
+      "type": "integrated_module",
+      "loc": 150,
+      "status": "active",
+      "ci_usage": "imported_by_bench_8c0",
+      "measures": ["mean_ns","p50_ns","p95_ns","p99_ns","min_ns","max_ns"],
+      "scope": "statistical",
+      "warmup": "none",
+      "baseline_defined": true,
+      "deterministic": true,
+      "offline_runnable": true,
+      "network_required": false,
+      "notes": "Shared statistics utilities for M1 probe benchmarks"
+    },
+    {
       "path": "benchmarks/run_sprint82j_benchmark.py",
       "type": "standalone_script",
       "loc": 1200,
@@ -79,7 +96,7 @@
       "type": "test_benchmark",
       "loc": 950,
       "status": "active",
-      "ci_usage": "pytest - runs in CI",
+      "ci_usage": "pytest - 64 tests run in CI",
       "measures": ["benchmark_config_defaults","memory_metrics_tracking","gating_metrics_extraction"],
       "scope": "unit_integration",
       "warmup": "none",
@@ -144,7 +161,7 @@
       "deterministic": true,
       "offline_runnable": true,
       "network_required": false,
-      "notes": "3x60s repeatability series"
+      "notes": "3x60s repeatability series - standalone manual"
     },
     {
       "path": "tests/run_sprint_5a_r3_benchmark.py",
@@ -159,7 +176,7 @@
       "deterministic": true,
       "offline_runnable": true,
       "network_required": false,
-      "notes": "60s x 3 repeatability for Sprint 5A"
+      "notes": "60s x 3 repeatability for Sprint 5A - standalone manual"
     },
     {
       "path": "tests/diagnose_p95_*.py",
@@ -193,9 +210,9 @@
     {
       "path": "tests/test_sprint7a.py",
       "type": "test_benchmark",
-      "loc": 400,
+      "loc": 149,
       "status": "active",
-      "ci_usage": "pytest",
+      "ci_usage": "pytest - 11 tests",
       "measures": ["fps_truth","token_bucket_async","m1_thread_pools"],
       "scope": "unit_integration",
       "warmup": "none",
@@ -208,7 +225,7 @@
     {
       "path": "tests/test_sprint7e.py",
       "type": "test_benchmark",
-      "loc": 300,
+      "loc": 481,
       "status": "active",
       "ci_usage": "pytest",
       "measures": ["fps_calculation","findings_fps","sources_fps"],
@@ -223,7 +240,7 @@
     {
       "path": "tests/test_sprint7g.py",
       "type": "test_benchmark",
-      "loc": 350,
+      "loc": 180,
       "status": "active",
       "ci_usage": "pytest",
       "measures": ["hot_path_metrics"],
@@ -234,6 +251,36 @@
       "offline_runnable": true,
       "network_required": false,
       "notes": "Sprint 7G hot path"
+    },
+    {
+      "path": "tests/probe_bench_a/run_m1_import_rss_baseline.py",
+      "type": "m1_probe_baseline",
+      "loc": 300,
+      "status": "active",
+      "ci_usage": "pytest tests/probe_bench_a/ - CI-appropriate",
+      "measures": ["import_time_ms","rss_start_mb","rss_peak_mb","rss_delta_mb"],
+      "scope": "system",
+      "warmup": "none",
+      "baseline_defined": true,
+      "deterministic": true,
+      "offline_runnable": true,
+      "network_required": false,
+      "notes": "M1 import RSS baseline - lightweight"
+    },
+    {
+      "path": "tests/probe_bench_b/run_m1_control_data_plane_baseline.py",
+      "type": "m1_probe_baseline",
+      "loc": 300,
+      "status": "active",
+      "ci_usage": "pytest tests/probe_bench_b/ - CI-appropriate",
+      "measures": ["normalize_correlation_ns","ToolExecLog_ns","sanitize_ns","get_sprint_report_path_ns"],
+      "scope": "control_plane",
+      "warmup": "none",
+      "baseline_defined": true,
+      "deterministic": true,
+      "offline_runnable": true,
+      "network_required": false,
+      "notes": "M1 control-plane + data-plane baseline - probe_bench_b"
     }
   ],
   "ci_status": {
@@ -241,11 +288,35 @@
       "tests/test_sprint82j_benchmark.py (64 tests)",
       "tests/test_sprint7a.py (11 tests)",
       "tests/test_sprint7e.py",
-      "tests/test_sprint7g.py"
+      "tests/test_sprint7g.py",
+      "tests/probe_bench_a/ (pytest probe_bench_a)",
+      "tests/probe_bench_b/ (pytest probe_bench_b)"
     ],
     "available_but_not_ci": [
-      "benchmarks/run_sprint82j_benchmark.py (manual)",
-      "tests/run_3x60s_series.py (manual)"
+      "benchmarks/run_sprint82j_benchmark.py (manual run)"
     ]
+  },
+  "orphan_scripts_detail": {
+    "count": 17,
+    "files": [
+      "tests/sprint5r_20s.py",
+      "tests/sprint5r_quick_diag.py",
+      "tests/sprint5r_shadow_baseline.py",
+      "tests/sprint5r_ts_active.py",
+      "tests/sprint4c_before_benchmark.py",
+      "tests/sprint4c_after_benchmark.py",
+      "tests/sprint6a_10s_smoke.py",
+      "tests/sprint6a_300s_calibration.py",
+      "tests/sprint6c_300s.py",
+      "tests/sprint6c_preflight.py",
+      "tests/sprint6c_profile.py",
+      "tests/sprint6d_diagnostics.py",
+      "tests/sprint6d_smoke.py",
+      "tests/sprint6e_300s.py",
+      "tests/run_3x60s_series.py",
+      "tests/run_sprint_5a_r3_benchmark.py",
+      "tests/run_sprint_5d_benchmark.py"
+    ],
+    "reason": "Ad-hoc timing scripts from earlier sprints, no CI integration, manual execution required"
   }
 }

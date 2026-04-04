@@ -1,16 +1,18 @@
 {
   "metadata": {
     "generated": "2026-03-24",
-    "scope": "v12 sprint benchmark requirements"
+    "updated": "2026-04-04",
+    "scope": "v12 sprint benchmark requirements",
+    "truth_note": "Counts corrected against actual category statuses. PARSING/OPSEC=MISSING, rest=PARTIAL. EXISTS=0."
   },
   "categories": {
     "INFERENCE_MLX": {
       "status": "PARTIAL",
-      "description": "MLX inference metrics partially covered",
+      "description": "MLX inference metrics partially covered via integrated modules",
       "existing_file": "utils/performance_monitor.py",
       "missing_metrics": [
         "hermes_3b_tokens_per_second_at_batch_size_1",
-        "hermes_3b_tokens_per_second_at_batch_size_8", 
+        "hermes_3b_tokens_per_second_at_batch_size_8",
         "hermes_3b_ttft_first_token_latency_ms",
         "kv_cache_hit_rate_percent",
         "speculative_decoding_acceptance_rate_percent",
@@ -24,7 +26,7 @@
     },
     "ASYNC_IO_CRAWLING": {
       "status": "PARTIAL",
-      "description": "Async I/O covered but not granular",
+      "description": "Async I/O covered via benchmark_coordinator but not granular",
       "existing_file": "coordinators/benchmark_coordinator.py",
       "missing_metrics": [
         "http_request_throughput_req_per_second_httpx",
@@ -32,7 +34,7 @@
         "http_request_throughput_req_per_second_aiohttp",
         "tor_circuit_latency_ms_per_request",
         "event_loop_lag_ms_at_100_coroutines",
-        "event_loop_lag_ms_at_500_coroutines", 
+        "event_loop_lag_ms_at_500_coroutines",
         "event_loop_lag_ms_at_1000_coroutines",
         "asyncio_queue_throughput_items_per_second",
         "uvloop_speedup_percent_vs_default_loop",
@@ -43,7 +45,7 @@
     },
     "PARSING_PATTERN_MATCHING": {
       "status": "MISSING",
-      "description": "No dedicated parsing benchmark",
+      "description": "No dedicated parsing benchmark - critical gap",
       "existing_file": null,
       "missing_metrics": [
         "selectolax_throughput_pages_per_second_vs_bs4",
@@ -56,8 +58,8 @@
     },
     "STORAGE_DATABASE": {
       "status": "PARTIAL",
-      "description": "Storage partially covered via E2E",
-      "existing_file": "tests/test_sprint8ay_mlx_memory.py",
+      "description": "Storage partially covered via E2E benchmark",
+      "existing_file": "tests/test_sprint82j_benchmark.py",
       "missing_metrics": [
         "duckdb_write_throughput_findings_per_second_ramdisk",
         "duckdb_write_throughput_findings_per_second_ssd",
@@ -87,7 +89,7 @@
     },
     "OPSEC_MEMORY": {
       "status": "MISSING",
-      "description": "No dedicated OPSEC benchmarks",
+      "description": "No dedicated OPSEC benchmarks - critical gap",
       "existing_file": null,
       "missing_metrics": [
         "secure_zero_throughput_mb_per_second_1mb_buffer",
@@ -102,7 +104,7 @@
     },
     "SYSTEM": {
       "status": "PARTIAL",
-      "description": "System metrics partial",
+      "description": "System metrics partially covered",
       "existing_file": "utils/performance_monitor.py",
       "missing_metrics": [
         "cold_start_time_ms_to_first_action",
@@ -116,9 +118,9 @@
       ]
     }
   },
-  "total_missing_categories": 7,
+  "total_missing_categories": 2,
   "total_existing_categories": 0,
-  "total_partial_categories": 4,
+  "total_partial_categories": 5,
   "critical_gaps": [
     {
       "category": "PARSING_PATTERN_MATCHING",
@@ -127,7 +129,7 @@
     },
     {
       "category": "OPSEC_MEMORY",
-      "priority": "HIGH", 
+      "priority": "HIGH",
       "reason": "No benchmarks for secure_zero, argon2id, AES throughput"
     },
     {
@@ -147,6 +149,11 @@
     }
   ],
   "v12_sprint_coverage": {
+    "sprint_0_0": {
+      "name": "Baseline establishment",
+      "covered_metrics": ["e2e_findings_per_minute", "e2e_hhi_concentration", "e2e_p95_latency"],
+      "missing_metrics": ["e2e_memory_leak_check"]
+    },
     "sprint_0_1": {
       "name": "uvloop migration",
       "covered_metrics": ["event_loop_lag_ms"],
@@ -167,5 +174,9 @@
       "covered_metrics": ["tokens_per_second"],
       "missing_metrics": ["hermes_3b_ttft_first_token_latency_ms", "kv_cache_hit_rate_percent"]
     }
+  },
+  "probe_bench_a_b_note": {
+    "status": "ACTIVE_BUT_OVERLAY_WHITEOUT",
+    "detail": "probe_bench_a and probe_bench_b dirs appear in ls but files are inaccessible (whiteout from overlayfs). Contents confirmed via earlier sprint commits: run_m1_import_rss_baseline.py and run_m1_control_data_plane_baseline.py with baseline_results.json. Treat as active CI-appropriate benchmarks."
   }
 }

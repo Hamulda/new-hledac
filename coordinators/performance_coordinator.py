@@ -55,7 +55,11 @@ logger = logging.getLogger(__name__)
 def get_memory_usage_mb() -> float:
     """Get current memory usage in MB."""
     if PSUTIL_AVAILABLE and psutil:
-        return get_memory_usage_mb()
+        try:
+            proc = psutil.Process()
+            return proc.memory_info().rss / (1024 * 1024)
+        except Exception:
+            return 0.0
     return 0.0
 
 
@@ -185,8 +189,7 @@ class AgentPool:
 
         # Update metrics
         if agent_name not in self._metrics:
-            if agent_name not in self._metrics:
-                self._metrics[agent_name] = AgentMetrics(name=agent_name)
+            self._metrics[agent_name] = AgentMetrics(name=agent_name)
 
         start_time = time.time()
 
@@ -698,7 +701,7 @@ class AgentPerformanceOptimizer:
                     report.optimizations_applied.append("circuit_breaker_reset")
 
             # Get memory after optimization
-            memory_after = process.memory_info().rss / 1024 / 1024
+            memory_after = get_memory_usage_mb()
             report.memory_freed_mb = max(0, memory_before - memory_after)
 
             # Get pool statistics

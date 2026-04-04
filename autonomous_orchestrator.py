@@ -17,7 +17,7 @@ authority_status: NON_CANONICAL_FACADE
     False-authority risk: modul vypadá jako primary orchestrator, ale není.
 
 replacement_owner:
-    - legacy.autonomous_orchestrator (implementace, 13k+ řádků)
+    - legacy.autonomous_orchestrator (implementace, 31k+ lines)
     - runtime.sprint_scheduler (production orchestrace, 30min sprint cycle)
 
 migration_blocker:
