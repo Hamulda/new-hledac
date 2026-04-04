@@ -167,6 +167,26 @@ class StatisticalStegoDetector:
 
     Memory-optimized for M1 8GB with streaming mode support.
 
+    ---
+    AUTHORITY BOUNDARY — CONDITIONAL MEDIA AUGMENTATION GATE ONLY
+
+    THIS MODULE DOES NOT:
+    - Block, reject, or filter content
+    - Make privacy-gate decisions
+    - Handle PII or sensitive data
+    - Export, vault, or store findings
+    - Extract metadata for downstream processing
+    - Make budget approval decisions
+
+    This module ONLY:
+    - Performs statistical analysis on image bytes (pixels)
+    - Returns StegoResult with has_stego + confidence + method_used
+    - Emits findings as append-only list entries
+    - Operates as a conditional augmentation signal (budget-approved only note)
+
+    Downstream orchestrator decides what to do with has_stego=True findings.
+    StatisticalStegoDetector has NO content rejection authority.
+
     Example:
         >>> config = StegoConfig(max_image_size=1024)
         >>> detector = StatisticalStegoDetector(config)
