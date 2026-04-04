@@ -776,13 +776,18 @@ class ToolRegistry:
                 # exec_logger is AUDIT boundary, NOT execution authority
                 if exec_logger is not None:
                     try:
+                        # Sprint F9B: Normalize correlation at audit handoff seam
+                        # normalize_correlation() ensures only SHARED_CORRELATION_KEYS
+                        # are present (fail-soft: extra keys silently dropped)
+                        from .tool_exec_log import normalize_correlation
+                        normalized_corr = normalize_correlation(correlation)
                         exec_logger.log(
                             tool_name=tool_name,
                             input_data=input_bytes,
                             output_data=output_bytes,
                             status=status,
                             error=error,
-                            correlation=correlation,
+                            correlation=normalized_corr,
                         )
                     except Exception as logger_error:
                         # Audit logging failures must NOT affect execution

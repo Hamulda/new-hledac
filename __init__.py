@@ -398,47 +398,30 @@ if ENHANCED_ORCHESTRATOR_AVAILABLE:
 
 
 # =============================================================================
-# SUPREME INTEGRATION EXPORTS
+# SUPREME INTEGRATION EXPORTS — NOW LAZY (F12C normalization)
 # =============================================================================
-
-# Knowledge Components (from Supreme)
-# Sprint 8VC: persistent_layer moved to legacy/, use knowledge.__init__ proxy
-from .knowledge import (
-    PersistentKnowledgeLayer,
-    KnowledgeNode,
-    KnowledgeEdge,
-    NodeType,
-    EdgeType,
-    KuzuDBBackend,
-    JSONBackend,
-)
-from .knowledge.graph_rag import GraphRAGOrchestrator
-from .knowledge.graph_builder import KnowledgeGraphBuilder
-
-# Tools (from Supreme)
-from .tools import (
-    LightweightReranker,
-    RerankResult,
-    RerankRequest,
-    RerankerConfig,
-    RerankerFactory,
-    create_reranker,
-    RustMiner,
-    MiningResult,
-    create_rust_miner,
-)
-
-# Security (from Supreme)
-from .security import (
-    SecurityGate,
-    PIICategory,
-    PIIMatch,
-    SanitizationResult,
-    create_security_gate,
-    quick_sanitize,
-    LootManager,
-    RamDiskVault,
-)
+# PRE-F12C: These were EAGER imports that overrode the _LAZY_SUBPACKAGES entries.
+# POST-F12C: All knowledge/tools/security symbols are served exclusively via
+# PEP 562 __getattr__ lazy loading from _LAZY_SUBPACKAGES (lines 452-488).
+# This restores lazy-loading discipline and removes import-time side-effects.
+#
+# Canonical owners (verified F12C):
+#   knowledge.*  → knowledge/__init__.py (graph_layer, rag_engine, entity_linker)
+#   tools.*      → tools/__init__.py (reranker, content_miner, adapters)
+#   security.*   → security/__init__.py (pii_gate, vault_manager, encryption)
+#
+# External consumers (legacy/, tests/) import directly from subpackages, not here.
+# SUPREME_INTEGRATION_AVAILABLE was always False — removed as dead attribution.
+#
+# Heavy deps (torch, sklearn, networkx, scipy) are now truly deferred until
+# first attribute access, not loaded at package import time.
+#
+# KNOWN COLLISION (non-blocking, pre-existing):
+#   ResearchFinding: enhanced_research.py:223 (pydantic) vs
+#                   legacy/autonomous_orchestrator.py:2956 (dataclass)
+#   Resolution: lazy path resolves to enhanced_research.py:223 (first in
+#   _LAZY_SUBPACKAGES); eager path resolves to legacy/autonomous_orchestrator.py
+#   via facade. Resolution TBD in future sprint.
 
 SUPREME_INTEGRATION_AVAILABLE = False
 
