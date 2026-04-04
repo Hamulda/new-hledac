@@ -2544,6 +2544,13 @@ class DeepResearchRequest:
 
     Canonical ProviderRequest/ProviderResult z types.py bude použito
     AŽ PO napojení na triádu a session seams.
+
+    Migration direction:
+        DeepResearchRequest.grounding_hints (raw Dict)
+            → CanonicalGroundingHints (types.py:1702)
+        via CanonicalGroundingHints.from_shim() classmethod.
+        Currently discarded in to_engine_kwargs(); activation would
+        wire this to engine's grounding parameter once F11 is ready.
     """
     query: str
     depth: ResearchDepth = ResearchDepth.ADVANCED
@@ -2556,12 +2563,24 @@ class DeepResearchRequest:
 
     def to_engine_kwargs(self) -> Dict[str, Any]:
         """Convert to UnifiedResearchEngine.deep_research() kwargs."""
-        return {
+        kwargs = {
             'query': self.query,
             'depth': self.depth,
             'query_type': self.query_type,
             'max_results': self.max_results,
         }
+        # Migration direction (additive-only, non-activating):
+        # raw grounding_hints Dict should become CanonicalGroundingHints
+        # after F11 activation. Currently unused by engine — see docstring.
+        if self.grounding_hints:
+            from .types import CanonicalGroundingHints
+            _canonical_hints = CanonicalGroundingHints.from_shim(
+                topic_hints=tuple(self.grounding_hints.get('topics', [])),
+                domain_tags=tuple(self.grounding_hints.get('domains', [])),
+            )
+            # Future: pass _canonical_hints to engine's grounding parameter
+            # when F11 activation conditions are met (triada, session seams, etc.)
+        return kwargs
 
 
 @dataclass

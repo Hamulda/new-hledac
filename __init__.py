@@ -488,9 +488,11 @@ _LAZY_SUBPACKAGES = {
 }
 
 # Also lazily export non-existent symbols that were previously in __all__ but not defined
+# NOTE: SUPREME_INTEGRATION_AVAILABLE intentionally omitted from fallback attrs.
+# Actual load state is tracked by the try/except block below (always False currently).
+# Adding it back here with False would be a duplicate of the runtime truth.
 _FALLBACK_ATTRS = {
     "ENHANCED_ORCHESTRATOR_AVAILABLE": False,
-    "SUPREME_INTEGRATION_AVAILABLE": True,
     "INTEGRATED_ORCHESTRATOR_AVAILABLE": False,
     "BUDGET_MANAGER_AVAILABLE": False,
     "UNIFIED_RESEARCH_AVAILABLE": False,

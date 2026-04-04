@@ -1469,6 +1469,110 @@ def get_task_tool_preview_mapping() -> dict[str, str]:
     return dict(TASK_TYPE_TO_TOOL_PREVIEW)
 
 
+# =============================================================================
+# Sprint F6b: Triad-Side Dormant Provider Mirror Seam
+# =============================================================================
+# CANONICAL TRIAD-SIDE READ-ONLY MIRROR: tool_registry.py
+#
+# This seam mirrors the provider-side admission truth from enhanced_research.py
+# (DEEP_RESEARCH_ADMISSION) to the triad side without duplicating the descriptor.
+#
+# PURPOSE:
+# - Provides a triad-side machine-checkable attach point for DeepResearch
+#   provider candidate admission metadata
+# - Maintains the provider-side truth as the single source of authority
+# - Acts as a diagnostic mirror, NOT a new execution authority
+#
+# WHAT THIS IS NOT:
+# - NOT a new provider framework
+# - NOT activation (readiness stays False)
+# - NOT execution authority (ToolRegistry remains canonical)
+# - NOT a duplicate of DEEP_RESEARCH_ADMISSION
+#
+# RELATIONSHIP:
+#   enhanced_research.py: DEEP_RESEARCH_ADMISSION = provider-side admission truth
+#   tool_registry.py: DEEP_RESEARCH_PROVIDER_MIRROR = triad-side mirror seam
+#
+# The mirror is read-only and frozen. It references the provider-side
+# singleton for the actual truth, avoiding duplication.
+# =============================================================================
+
+from dataclasses import dataclass
+from typing import Tuple
+
+
+@dataclass(frozen=True)
+class DeepResearchProviderMirror:
+    """
+    Triad-side read-only mirror for DeepResearch provider admission metadata.
+
+    PROVIDER SIDE (enhanced_research.py):
+    - Owns the canonical admission truth (DEEP_RESEARCH_ADMISSION)
+    - Owns the actual frozen dataclass definition
+
+    TRIAD SIDE (this file):
+    - Holds a read-only mirror reference
+    - Provides machine-checkable attach point on the triad side
+    - Explicitly delegates to provider-side truth
+    - Explicitly states this is NOT execution authority
+
+    INVARIANTS:
+    - is_dormant: True (activation readiness is False)
+    - is_not_execution_authority: True (ToolRegistry remains canonical)
+    - is_not_activation: True (no runtime path exists)
+    - provider_side_truth: references enhanced_research.DEEP_RESEARCH_ADMISSION
+    """
+    # Mirror metadata
+    mirror_module: str = "tool_registry"
+    owning_module: str = "enhanced_research"  # Provider-side owner
+
+    # Triad integration state (mirrors provider-side truth)
+    triad_authority_exists: bool = True
+    deepresearch_napojen: bool = False  # NOT wired to triad
+
+    # Admission blockers (mirrored from provider-side, read-only)
+    blockers: Tuple[str, ...] = (
+        "Session seams (BudgetManager, EvidenceLog): TBD",
+        "Security gate (SecurityGate, privacy layer): TBD",
+        "Minimal grounding seam (ProviderRequest/ProviderResult): TBD",
+        "Transport plane (FetchCoordinator): TBD",
+    )
+
+    # Explicit boundary statements (mirror provider-side invariants)
+    is_dormant: bool = True
+    is_not_execution_authority: bool = True
+    is_not_activation: bool = True
+
+    @property
+    def provider_side_truth(self) -> str:
+        """Reference to canonical provider-side admission truth."""
+        return "enhanced_research.DEEP_RESEARCH_ADMISSION (singleton)"
+
+    @property
+    def admission_summary(self) -> str:
+        """Human-readable admission status (triad-side mirror)."""
+        lines = [
+            "Triad-Side Mirror for DeepResearch Provider Admission",
+            f"Mirror Module: {self.mirror_module}",
+            f"Provider-Side Owner: {self.owning_module}",
+            f"Canonical Truth: {self.provider_side_truth}",
+            "",
+            f"Triad Authority Exists: {self.triad_authority_exists}",
+            f"DeepResearch Napojen: {self.deepresearch_napojen}",
+            f"Dormant: {self.is_dormant}",
+            f"Execution Authority: {self.is_not_execution_authority}",
+            "",
+            "Blockers (read-only mirror from provider-side):",
+        ]
+        for b in self.blockers:
+            lines.append(f"  - {b}")
+        return "\n".join(lines)
+
+
+# Canonical singleton for triad-side read-only admission mirror queries
+DEEP_RESEARCH_PROVIDER_MIRROR = DeepResearchProviderMirror()
+
+
 # ============================================================================
 # Convenience Exports
 # ============================================================================
@@ -1502,4 +1606,7 @@ __all__ = [
     # Sprint F3.11
     "TASK_TYPE_TO_TOOL_PREVIEW",
     "get_task_tool_preview_mapping",
+    # Sprint F6b
+    "DeepResearchProviderMirror",
+    "DEEP_RESEARCH_PROVIDER_MIRROR",
 ]
