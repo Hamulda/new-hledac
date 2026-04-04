@@ -20,6 +20,7 @@ import gc
 import logging
 import time
 import tracemalloc
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from contextlib import asynccontextmanager
@@ -30,6 +31,9 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
     psutil = None
+
+# Snapshot history bound for MemoryProfiler - prevents unbounded memory growth
+MAX_SNAPSHOT_HISTORY: int = 1000
 
 # Optional imports
 try:
@@ -118,9 +122,9 @@ class MemoryProfiler:
     """Memory profiling utility for benchmarking."""
 
     def __init__(self):
-        self._snapshots: List[Tuple[float, float]] = []  # (timestamp, memory_mb)
+        self._snapshots: deque[Tuple[float, float]] = deque(maxlen=MAX_SNAPSHOT_HISTORY)  # (timestamp, memory_mb)
         self._active = False
-        self._process = psutil.Process()
+        self._process = psutil.Process() if PSUTIL_AVAILABLE else None
 
     def start_profiling(self) -> None:
         """Start memory profiling."""
@@ -128,8 +132,13 @@ class MemoryProfiler:
         self._active = True
         tracemalloc.start()
 
-        # Start memory monitoring task
-        asyncio.create_task(self._monitor_memory())
+        # Start memory monitoring task - guard against missing event loop
+        try:
+            asyncio.create_task(self._monitor_memory())
+        except RuntimeError as e:
+            # No running event loop - profiling not available
+            self._active = False
+            tracemalloc.stop()
 
     def stop_profiling(self) -> Tuple[float, float, float]:
         """Stop profiling and return memory statistics."""
@@ -162,6 +171,8 @@ class MemoryProfiler:
         """Monitor memory usage in background."""
         while self._active:
             try:
+                if self._process is None:
+                    break
                 memory_mb = self._process.memory_info().rss / 1024 / 1024
                 self._snapshots.append((time.time(), memory_mb))
                 await asyncio.sleep(0.1)  # Sample every 100ms
@@ -628,6 +639,8 @@ class AgentBenchmarker:
 
     async def _capture_system_baseline(self) -> Dict[str, Any]:
         """Capture system baseline metrics."""
+        if not PSUTIL_AVAILABLE or psutil is None:
+            return {"error": "psutil not available", "timestamp": time.time()}
         process = psutil.Process()
         return {
             "cpu_count": psutil.cpu_count(),
@@ -640,6 +653,8 @@ class AgentBenchmarker:
 
     async def _capture_system_metrics(self) -> Dict[str, Any]:
         """Capture current system metrics."""
+        if not PSUTIL_AVAILABLE or psutil is None:
+            return {"error": "psutil not available", "timestamp": time.time()}
         process = psutil.Process()
         return {
             "memory_usage_mb": process.memory_info().rss / 1024 / 1024,

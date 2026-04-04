@@ -1,6 +1,15 @@
 """
 SystemMonitor - System monitoring pro UniversalResearchOrchestrator
 
+CONTAINMENT METADATA (Sprint perf_c):
+- ROLE: Bounded health observation surface (sync check_health model)
+- IS NOT: Canonical system monitor, execution authority, scheduler, or control surface
+- AUTHORITY: Read-only health checks via psutil; callbacks for notification only
+- DUPLICATE NAME: Differs from utils/performance_monitor.SystemMonitor
+  (which is async with ThermalState/MemoryPressure/flow tracing)
+- NO DAEMON: No background monitoring loop; no asyncio.create_task regrowth
+- M1 Air 8GB: Lightweight psutil-only, no eager init, no heavy deps
+
 Monitoruje:
 - CPU usage
 - Memory usage
