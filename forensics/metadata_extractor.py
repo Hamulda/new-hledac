@@ -577,6 +577,26 @@ class UniversalMetadataExtractor:
         await extractor.close()
     """
 
+    # =========================================================================
+    # ENRICHMENT LAYER — NOT AUTHORITY
+    # -------------------------------------------------------------------------
+    # This module is an ENRICHMENT layer only. It extracts and enriches metadata
+    # from files. It does NOT hold authority over:
+    #
+    # - Retrieval: does not fetch or resolve data from external sources
+    # - Export:    does not own export pipelines or output formats beyond
+    #              returning plain dict/json from its own dataclasses
+    # - Vault:     does not manage sensitive data storage or access control
+    # - PII Gate:  does not perform sanitization; extracted raw data may
+    #              contain PII which callers are responsible for handling
+    # - Network:   enable_reverse_geocode is a NO-OP stub (always returns None);
+    #              no implicit network calls or background geocoding services
+    # - Orchestrator: no pipeline ownership or decision-making authority
+    #
+    # Heavy optional dependencies (PIL, pypdf, docx, mutagen, tarfile, zipfile)
+    # are lazy-loaded inside extraction methods, never at module level.
+    # =========================================================================
+
     def __init__(
         self,
         cache_path: Optional[str] = None,

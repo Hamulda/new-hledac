@@ -36,6 +36,18 @@ class LootManager:
 
     Canonical name: VaultManager (alias below).
     LootManager is the operational name for historical reasons.
+
+    AUTHORITY SCOPE (this module):
+        - secure_export(): encrypted ZIP archive of vault_path → .enc file
+        - decrypt_export(): reverse operation
+        - _shred_directory(): secure deletion after export
+
+    NON-AUTHORITY (NOT this module):
+        - PII detection/sanitization (see pii_gate.py)
+        - Content blocking/rejection (early gate = detection only)
+        - Metadata extraction (see metadata_extractor.py)
+        - Steganography detection (see stego_detector.py)
+        - Sprint report export (see export/sprint_exporter.py)
     """
 
     def __init__(self, vault_path: str):
@@ -164,7 +176,9 @@ class LootManager:
                 f.write(encrypted)
             
             os.unlink(temp_path)
-            logger.warning("Using fallback XOR encryption (not secure)")
+            # FALLBACK PATH: degraded choice when crypto deps unavailable
+            # NOT a security feature — do not present as encryption authority
+            logger.warning("Using fallback XOR encryption (degraded - crypto dependencies unavailable)")
             return True
         except Exception as e:
             logger.error(f"Failed to create encrypted ZIP with fallback: {e}")
