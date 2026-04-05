@@ -419,10 +419,14 @@ if ENHANCED_ORCHESTRATOR_AVAILABLE:
 # KNOWN COLLISION (non-blocking, pre-existing):
 #   ResearchFinding: enhanced_research.py:223 (@dataclass) vs
 #                   legacy/autonomous_orchestrator.py:2956 (@dataclass)
-#   Both definitions are @dataclass — neither is pydantic.
-#   Resolution: lazy path resolves to enhanced_research.py:223 (first in
-#   _LAZY_SUBPACKAGES); eager path resolves to legacy/autonomous_orchestrator.py
-#   via facade. Resolution TBD in future sprint.
+#   Neither is pydantic — both are @dataclass.
+#   Resolution paths:
+#     - Eager default: .autonomous_orchestrator facade → legacy/ definition
+#       (facade loads legacy/autonomous_orchestrator.py at import time)
+#     - Enhanced conditional: only if UNIFIED_RESEARCH_AVAILABLE=True,
+#       via conditional eager import of enhanced_research.py (NOT lazy)
+#   ResearchFinding is NOT in _LAZY_SUBPACKAGES — no lazy resolution applies.
+#   Collision is contained: neither definition overwrites the other in __all__.
 
 SUPREME_INTEGRATION_AVAILABLE = False
 
