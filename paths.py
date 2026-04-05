@@ -23,6 +23,7 @@ __all__ = [
     "get_sprint_parquet_dir",
     "get_ioc_db_path",
     "get_sprint_report_path",
+    "get_sprint_json_report_path",
     "assert_ramdisk_alive",
     "cleanup_fallback_artifacts",
     "lmdb_map_size",
@@ -293,6 +294,26 @@ def get_sprint_report_path(sprint_id: str) -> Path:
     reports_dir = Path.home() / ".hledac" / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     return reports_dir / f"{sprint_id}.md"
+
+
+def get_sprint_json_report_path(sprint_id: str) -> Path:
+    """
+    Sprint F500A §A: Canonical JSON sprint report path computation.
+
+    Parallels get_sprint_report_path() for the JSON sibling file.
+    Consumer: export/sprint_exporter.py inline computation
+    (report_dir = SPRINT_STORE_ROOT.parent / "reports").
+
+    Path semantics: ~/.hledac/reports/{sprint_id}_report.json
+
+    Returns
+    -------
+    Path
+        Absolute path to sprint report JSON file.
+    """
+    reports_dir = Path.home() / ".hledac" / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    return reports_dir / f"{sprint_id}_report.json"
 
 
 # ---------------------------------------------------------------------------
