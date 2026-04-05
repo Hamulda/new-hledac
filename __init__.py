@@ -417,8 +417,9 @@ if ENHANCED_ORCHESTRATOR_AVAILABLE:
 # first attribute access, not loaded at package import time.
 #
 # KNOWN COLLISION (non-blocking, pre-existing):
-#   ResearchFinding: enhanced_research.py:223 (pydantic) vs
-#                   legacy/autonomous_orchestrator.py:2956 (dataclass)
+#   ResearchFinding: enhanced_research.py:223 (@dataclass) vs
+#                   legacy/autonomous_orchestrator.py:2956 (@dataclass)
+#   Both definitions are @dataclass — neither is pydantic.
 #   Resolution: lazy path resolves to enhanced_research.py:223 (first in
 #   _LAZY_SUBPACKAGES); eager path resolves to legacy/autonomous_orchestrator.py
 #   via facade. Resolution TBD in future sprint.
