@@ -195,7 +195,7 @@ class ResourceGovernor:
         if cost_estimate.get('gpu', False):
             try:
                 # Sprint 8W: use top-level mx API when available (MLX 0.31.1+)
-                if hasattr(mx, 'get_active_memory'):
+                if hasattr(_get_mx(), 'get_active_memory'):
                     gpu_used = _get_mx().get_active_memory() / (1024 * 1024)
                 elif hasattr(_get_mx().metal, 'get_active_memory'):
                     gpu_used = _get_mx().metal.get_active_memory() / (1024 * 1024)

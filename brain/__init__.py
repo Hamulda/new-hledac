@@ -77,13 +77,22 @@ except ImportError:
     HYPOTHESIS_AVAILABLE = False
 
 # MoE Router
+# NOTE: moe_router.py has 'class RouterMLP(mlx_nn.Module)' where mlx_nn=None
+# when MLX import fails via ImportError. This causes AttributeError, not ImportError.
+# Bounded compat: catch broader Exception to ensure fail-soft containment.
 try:
     from .moe_router import MoERouter, MoERouterConfig, create_moe_router
     MOE_AVAILABLE = True
 except ImportError:
     MOE_AVAILABLE = False
+except Exception:
+    # AttributeError/TypeError from nn=None when MLX unavailable
+    MOE_AVAILABLE = False
 
 # Distillation Engine (MLX-based reasoning chain quality scoring)
+# NOTE: distillation_engine.py has 'class CriticMLP(nn.Module)' where nn=None
+# when MLX import fails via ImportError. This causes TypeError, not ImportError.
+# Bounded compat: catch broader Exception to ensure fail-soft containment.
 try:
     from .distillation_engine import (
         DistillationEngine,
@@ -93,6 +102,9 @@ try:
     )
     DISTILLATION_AVAILABLE = True
 except ImportError:
+    DISTILLATION_AVAILABLE = False
+except Exception:
+    # AttributeError/TypeError from nn=None when MLX unavailable
     DISTILLATION_AVAILABLE = False
 
 # Model Manager (lifecycle management for M1 8GB)

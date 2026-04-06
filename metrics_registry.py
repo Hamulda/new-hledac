@@ -112,7 +112,16 @@ class MetricsRegistry:
         """
         self._run_dir = run_dir
         self._run_id = run_id
-        self._correlation = correlation
+        # Merge run_id into correlation if no correlation provided — ensures run_id
+        # propagates to persisted JSONL (tiny local patch for F200B drift).
+        # Grammar normalization: only shared RunCorrelation keys survive.
+        _GRAMMAR_KEYS = frozenset(["run_id", "branch_id", "provider_id", "action_id"])
+        if correlation is None:
+            self._correlation = {"run_id": run_id}
+        else:
+            # Normalize to shared grammar keys only; merge run_id from __init__.
+            self._correlation = {k: correlation.get(k) for k in _GRAMMAR_KEYS}
+            self._correlation["run_id"] = run_id
         self._last_flush = datetime.utcnow()
 
         # Counters (integers)
