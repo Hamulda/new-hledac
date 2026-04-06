@@ -10,7 +10,7 @@ Implements statistical methods for detecting steganography in images:
 Optimized for M1 MacBook with 8GB RAM:
 - Streaming mode: load → analyze → release
 - Max 2048x2048 images in memory
-- NumPy-based calculations (no PyTorch/TensorFlow)
+- NumPy-based calculations with optional PyTorch/MPS acceleration (lazy import)
 - Aggressive garbage collection after heavy operations
 
 Performance Targets:
@@ -65,7 +65,7 @@ class StegoConfig:
         max_image_size: Maximum image dimension (M1 8GB limit) (default: 2048)
         streaming_mode: Enable streaming mode for memory efficiency (default: True)
         rs_mask: Mask for RS analysis (default: [0, 1, 0, 1])
-        dct_threshold: Threshold for DCT anomaly detection (default: 2.0)
+        dct_threshold: Threshold for DCT anomaly detection (default: 0.5, must be in 0-1 range)
     """
 
     chi_square_threshold: float = 0.05
@@ -74,7 +74,7 @@ class StegoConfig:
     max_image_size: int = 2048
     streaming_mode: bool = True
     rs_mask: List[int] = field(default_factory=lambda: [0, 1, 0, 1])
-    dct_threshold: float = 2.0
+    dct_threshold: float = 0.5
 
 
 @dataclass

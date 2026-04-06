@@ -224,6 +224,20 @@ class LootManager:
             return False
 
     def secure_export(self, output_dir: str, password: str, archive_name: Optional[str] = None) -> Optional[str]:
+        """
+        Create encrypted ZIP archive of vault contents and shred original.
+
+        Encrypts vault_path contents using AES (pyzipper) or Fernet (cryptography)
+        into a .enc file, then securely deletes the original vault directory.
+
+        Args:
+            output_dir: Destination directory for the encrypted archive
+            password: Encryption password
+            archive_name: Optional output filename (default: ghostvault_{timestamp}.enc)
+
+        Returns:
+            Path to encrypted archive, or None on failure
+        """
         if not self.vault_path.exists():
             logger.error(f"Vault path does not exist: {self.vault_path}")
             return None
@@ -252,19 +266,33 @@ class LootManager:
         if not encrypted_file.exists():
             logger.error(f"Encrypted file does not exist: {encrypted_file}")
             return None
-        
+
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
-        
+
         try:
             with open(encrypted_file, 'rb') as f:
                 encrypted_data = f.read()
-            
+
+            # FALLBACK_ENC: prefix — always checked first (XOR degraded)
             if encrypted_data.startswith(b'FALLBACK_ENC:'):
                 return self._decrypt_fallback(encrypted_data[14:], password, output_path)
+
+            # Format sniffing: ZIP AES vs Fernet blob
+            # Priority: ZIP (pyzipper) → Fernet
+            # Rationale: ZIP format has distinct header (PK\x03\x04), Fernet is base64-like
+            if encrypted_data[:4] == b'PK\x03\x04':
+                # ZIP container — try pyzipper first if available
+                if PYZIPPER_AVAILABLE:
+                    return self._decrypt_pyzipper(encrypted_file, password, output_path)
+                else:
+                    logger.error("ZIP archive but pyzipper unavailable — cannot decrypt")
+                    return None
             elif CRYPTO_AVAILABLE:
+                # Fernet blob or other cryptography format
                 return self._decrypt_fernet(encrypted_data, password, output_path)
             elif PYZIPPER_AVAILABLE:
+                # Fallback: pyzipper without ZIP check (legacy behavior)
                 return self._decrypt_pyzipper(encrypted_file, password, output_path)
             else:
                 logger.error("No decryption method available")

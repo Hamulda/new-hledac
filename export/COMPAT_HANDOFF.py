@@ -77,10 +77,12 @@ def ensure_export_handoff(
       from_windup() extracts scorecard["top_graph_nodes"] → top_nodes.
       Two chained compat seams: windup dict → scorecard dict → ExportHandoff.
       REMOVAL CONDITION: windup_engine returns typed ExportHandoff directly.
+      ACTIVE CALLERS: only non-main legacy call-sites (NOT __main__ — __main__ uses direct ctor).
 
     Compat seam B (None path):
       Returns empty ExportHandoff with default_sprint_id.
-      REMOVAL CONDITION: __main__ always passes typed ExportHandoff, never None.
+      REMOVAL CONDITION: __main__ always passes typed ExportHandoff (never None);
+      currently active as defensive seam in export_sprint() consumer boundary.
 
     Args:
         handoff: ExportHandoff instance, dict (scorecard-style), or None
@@ -110,12 +112,21 @@ def ensure_export_handoff(
     if isinstance(handoff, dict):
         # Compat seam A: dict → typed via from_windup()
         # scorecard["top_graph_nodes"] → top_nodes is the current compat extraction
+        # ACTIVE CALLERS: non-main legacy call-sites only; __main__ uses direct ctor.
+        if not handoff:  # truthfulness guard: empty dict gets same treatment as None
+            return TypesExportHandoff(
+                sprint_id=default_sprint_id,
+                scorecard={},
+                top_nodes=[],
+            )
         sprint_id = handoff.get("sprint_id", default_sprint_id)
         return TypesExportHandoff.from_windup(
             sprint_id=sprint_id,
             scorecard=handoff,
         )
 
+    # Exhaustive: None handled above, ExportHandoff handled above, dict handled above.
+    # Only reachable for truly unexpected types (neither None nor ExportHandoff nor dict).
     raise TypeError(
         f"ensure_export_handoff() got unexpected type: {type(handoff).__name__}. "
         f"Expected ExportHandoff, dict, or None."

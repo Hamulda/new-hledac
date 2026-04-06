@@ -27,6 +27,7 @@ import asyncio
 import hashlib
 import io
 import json
+import math
 import os
 import sqlite3
 import struct
@@ -728,7 +729,7 @@ class UniversalMetadataExtractor:
         for count in byte_counts:
             if count > 0:
                 p = count / total_bytes
-                entropy -= p * (p.bit_length() - 1)  # log2 approximation
+                entropy -= p * math.log2(p)  # correct Shannon entropy
 
         return entropy
 
@@ -1012,10 +1013,14 @@ class UniversalMetadataExtractor:
         """
         try:
             def dms_to_decimal(dms, ref):
-                """Convert DMS to decimal degrees."""
-                degrees = dms[0]
-                minutes = dms[1] / 60.0
-                seconds = dms[2] / 3600.0
+                """Convert DMS to decimal degrees. Handles EXIF rationals (num, denom) and floats."""
+                def to_float(val):
+                    if isinstance(val, tuple):
+                        return val[0] / val[1]
+                    return float(val)
+                degrees = to_float(dms[0])
+                minutes = to_float(dms[1]) / 60.0
+                seconds = to_float(dms[2]) / 3600.0
                 decimal = degrees + minutes + seconds
                 if ref in ["S", "W"]:
                     decimal = -decimal
@@ -1656,7 +1661,15 @@ class UniversalMetadataExtractor:
             img = data["image"]
             gps = None
             if img.get("gps"):
-                gps = GPSCoordinates(**img["gps"])
+                gps_data = img["gps"]
+                ts = gps_data.get("timestamp")
+                gps = GPSCoordinates(
+                    latitude=gps_data.get("latitude", 0.0),
+                    longitude=gps_data.get("longitude", 0.0),
+                    altitude=gps_data.get("altitude"),
+                    accuracy=gps_data.get("accuracy"),
+                    timestamp=datetime.fromisoformat(ts) if ts else None,
+                )
             result.image = ImageMetadata(
                 width=img.get("width"),
                 height=img.get("height"),

@@ -24,6 +24,7 @@ __all__ = [
     "get_ioc_db_path",
     "get_sprint_report_path",
     "get_sprint_json_report_path",
+    "get_sprint_next_seeds_path",
     "assert_ramdisk_alive",
     "cleanup_fallback_artifacts",
     "lmdb_map_size",
@@ -314,6 +315,28 @@ def get_sprint_json_report_path(sprint_id: str) -> Path:
     reports_dir = Path.home() / ".hledac" / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     return reports_dir / f"{sprint_id}_report.json"
+
+
+def get_sprint_next_seeds_path(sprint_id: str) -> Path:
+    """
+    Sprint F500A §T004: Canonical next-seeds JSON path computation.
+
+    Parallels get_sprint_report_path() and get_sprint_json_report_path()
+    for the third export artifact — seed tasks for the next sprint.
+
+    Consumer: export/sprint_exporter._generate_next_sprint_seeds()
+    (report_dir / f"{sprint_id}_next_seeds.json" → this helper).
+
+    Path semantics: ~/.hledac/reports/{sprint_id}_next_seeds.json
+
+    Returns
+    -------
+    Path
+        Absolute path to next-seeds JSON file.
+    """
+    reports_dir = Path.home() / ".hledac" / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    return reports_dir / f"{sprint_id}_next_seeds.json"
 
 
 # ---------------------------------------------------------------------------

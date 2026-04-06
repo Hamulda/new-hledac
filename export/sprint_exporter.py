@@ -33,6 +33,7 @@ async def export_sprint(
 
     Součásti:
       1. JSON report do ~/.hledac/reports/{sprint_id}_report.json
+         Canonical path owner: paths.get_sprint_json_report_path() (post-F500B)
       2. Seed tasky pro příští sprint z top IOC graph nodes
 
     PRIMARY HANDOFF SURFACE (Sprint 8VX):
@@ -46,7 +47,7 @@ async def export_sprint(
       - Future owner: duckdb_store.get_top_seed_nodes() — already implemented, this
         fallback is the compat bridge pending windup engine producing typed ExportHandoff.
     """
-    from hledac.universal.paths import SPRINT_STORE_ROOT
+    from hledac.universal.paths import get_sprint_json_report_path
     from hledac.universal.export.COMPAT_HANDOFF import ensure_export_handoff
 
     # Sprint 8VJ §C: Normalize ExportHandoff | dict | None → typed ExportHandoff
@@ -55,12 +56,10 @@ async def export_sprint(
 
     # Resolve sprint_id — prefer from handoff (typed path)
     _sprint_id = eh.sprint_id if eh.sprint_id != "unknown" else (sprint_id or "unknown")
-    report_dir = SPRINT_STORE_ROOT.parent / "reports"
-    try:
-        report_dir.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        logger.warning(f"[EXPORT] Could not create report_dir: {e}")
-        report_dir = SPRINT_STORE_ROOT  # fallback
+
+    # Sprint F500B §2: Canonical JSON report path via paths.py helper
+    # (post-F500B: inline report_dir composition replaced by get_sprint_json_report_path)
+    report_path = get_sprint_json_report_path(_sprint_id)
 
     # Sprint 8VZ §C: F10 runtime boundary wiring
     # sanitize_outbound() na JSON report boundary — content opouští systém
@@ -84,8 +83,8 @@ async def export_sprint(
         logger.warning("[EXPORT] sanitize_outbound failed (non-fatal): %s", e)
         sanitized_scorecard_raw = boundary_text
 
-    # 1. JSON report — use sanitized scorecard (F10 boundary applied)
-    report_path = report_dir / f"{_sprint_id}_report.json"
+    # 1. JSON report — write via canonical path (F10 boundary applied)
+    # report_path already computed via get_sprint_json_report_path() above
     try:
         # Re-parse sanitized text back to JSON for writing
         try:
@@ -119,7 +118,11 @@ async def export_sprint(
         except Exception:
             pass
 
-    seeds_path = _generate_next_sprint_seeds(top_nodes, _sprint_id, report_dir)
+    # Sprint F500B §2: seeds land in same directory as JSON report (colocation)
+    # Fallback to SPRINT_STORE_ROOT.parent/"reports" if report_path is None (write failed)
+    from hledac.universal.paths import SPRINT_STORE_ROOT
+    seeds_output_dir = report_path.parent if report_path else (SPRINT_STORE_ROOT.parent / "reports")
+    seeds_path = _generate_next_sprint_seeds(top_nodes, _sprint_id, seeds_output_dir)
 
     return {
         "report_json": str(report_path) if report_path else "",
