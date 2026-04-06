@@ -226,9 +226,12 @@ class Tool(BaseModel):
     """
     Tool definition with schemas, cost model, and handler.
 
-    NOTE: This is the CANONICAL execution-control surface for the tool registry.
-    The required_capabilities field is a scaffold for future capability-gated
-    tool execution (planned for Sprint 8SE). Currently not enforced.
+    CANONICAL EXECUTION-CONTROL SURFACE (Sprint 8VF):
+    ══════════════════════════════════════════════════
+    execute_with_limits() gates on required_capabilities when
+    available_capabilities is explicitly provided. When None
+    (backward-compat mode), capability check is skipped with
+    DeprecationWarning (Sprint 8SG controlled compat debt).
     """
 
     model_config = {"arbitrary_types_allowed": True}
@@ -241,11 +244,11 @@ class Tool(BaseModel):
     rate_limits: RateLimits = Field(default_factory=RateLimits)
     handler: Callable[..., Any] = Field(description="Tool implementation")
 
-    # Scaffold for capability-gated execution (Sprint 8SE)
-    # Set of required capability names that must be available before execution
+    # Capability-gated execution: enforced when available_capabilities provided
+    # Backward-compat (None): DeprecationWarning emitted, execution continues
     required_capabilities: Set[str] = Field(
         default_factory=set,
-        description="Scaffold: capabilities required for this tool (not yet enforced)"
+        description="Capabilities required for this tool (enforced via execute_with_limits)"
     )
 
     def to_tool_card(self) -> dict[str, Any]:

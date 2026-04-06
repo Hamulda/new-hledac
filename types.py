@@ -1279,13 +1279,14 @@ class SNNEncryptedContainer:
 # KNOWN EXCEPTIONS — sanctioned local seam (see F011_DEEP_RESEARCH_PROVIDER_CONTAINMENT.md)
 #   DeepResearchRequest / DeepResearchResponse (enhanced_research.py):
 #     Owner: autonomous_orchestrator pipeline (F11 integration)
+#     NON-CANONICAL: internal/provider-owned, not public activation surface
 #     Removal condition: replaced by canonical ProviderRequest/ProviderResult
-#       AFTER triáda + session seams + BudgetManager/EvidenceLog integration
-#     Migration blocker: UnifiedResearchEngine.deep_research() seam is dormant;
-#       full activation requires triáda (analyzer→capability_router→tool_registry),
-#       source plane routing, FetchCoordinator transport, session context, security gate
+#       after F11 migration conditions are met
+#     Migration status: F11/F11b complete (triáda, capabilities, tool_registry,
+#       grounding hints bridge). DeepResearchRequest/Response remain NON-CANONICAL
+#       until F11 provider cutover activates typed seam.
 #     Runtime impact if removed: deep_research_provider_seam() becomes untyped wrapper;
-#       F11 provider candidate loses typed seam — activation blockers documented in F011 doc
+#       F11 provider candidate loses typed seam — activation documented in F011 doc
 #
 # RULES:
 #   [1] NEW activation-relevant handoffs MUST be added here, not elsewhere

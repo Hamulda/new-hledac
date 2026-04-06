@@ -2809,11 +2809,13 @@ class TriadAdmissionDescriptor:
     expects_registry: bool = True  # Expects ToolRegistry.execute_with_limits()
 
     # Admission blockers (what must be resolved before F11 activation)
+    # REASON: Blockers declare existence status, not just TBD.
+    # "exists, not wired" = component exists but DeepResearch is not connected.
     blockers: Tuple[str, ...] = (
-        "Session seams (BudgetManager, EvidenceLog): TBD",
-        "Security gate (SecurityGate, privacy layer): TBD",
-        "Minimal grounding seam (ProviderRequest/ProviderResult): TBD",
-        "Transport plane (FetchCoordinator): TBD",
+        "Session seams (BudgetManager, EvidenceLog): exists, not wired to DeepResearch",
+        "Security gate (PII gate): exists, not wired to DeepResearch",
+        "Minimal grounding seam (ProviderRequest/ProviderResult): exists, not wired to DeepResearch",
+        "Transport plane (FetchCoordinator): exists, not wired to DeepResearch runtime",
     )
 
     # Explicit boundary statement
@@ -2916,11 +2918,11 @@ class LocalCorpusConsumerDescriptor:
 
     # What blocks wiring (pre-F11 activation)
     blockers: Tuple[str, ...] = (
-        "LocalSearchSeam ingestion plane: not yet connected",
+        "LocalSearchSeam ingestion plane: exists, not yet connected to DeepResearch",
         "Corpus population: documents need to be ingested first",
-        "BudgetManager seam: no consumer-side budget tracking for corpus queries",
+        "BudgetManager seam: exists, no consumer-side budget tracking for corpus queries",
         "DeepResearch runtime path: no activation call site exists",
-        "ProviderRequest/ProviderResult handoff: minimal grounding seam TBD",
+        "ProviderRequest/ProviderResult handoff: exists, not wired to DeepResearch",
     )
 
     # Explicit boundary
