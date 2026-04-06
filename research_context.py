@@ -73,10 +73,21 @@ class ContextHandoffMetadata:
     iteration_snapshot: Optional[int] = None
     source_component: Optional[str] = None
     target_components: Optional[List[str]] = None
-    ttl_seconds: int = 0
+    ttl_seconds: Optional[int] = None  # None = no expiry, 0 = expired
 
     def to_correlation_dict(self) -> Dict[str, Optional[str]]:
-        """Convert to RunCorrelation-compatible dict for EvidenceLog injection."""
+        """
+        Convert to RunCorrelation-compatible dict for EvidenceLog injection.
+
+        Mapping:
+          parent_run_id → run_id  (run context propagation)
+          branch_id     → branch_id (parallel branch correlation)
+          provider_id   → None     (set by provider layer, not carrier)
+          action_id     → None     (set by action layer, not carrier)
+
+        NOTE: This is a one-way conversion from handoff metadata to correlation.
+              The carrier owns the handoff metadata; the ledger owns correlation.
+        """
         return {
             "run_id": self.parent_run_id,
             "branch_id": self.branch_id,
@@ -251,6 +262,53 @@ class ResearchContext(BaseModel):
     key_findings: List[str] = Field(default_factory=list)
     open_questions: List[str] = Field(default_factory=list)
     context_metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    # =============================================================================
+    # CONTEXT HANDOFF HELPERS — Sprint F1100B: Typed Handoff Surface
+    # =============================================================================
+    # Convenience helpers for typed handoff metadata.
+    # These are thin wrappers over context_metadata dict — no new authority.
+    # =============================================================================
+
+    def get_handoff_metadata(self) -> Optional[ContextHandoffMetadata]:
+        """
+        Get typed handoff metadata from context_metadata dict.
+
+        Returns:
+            ContextHandoffMetadata if stored in context_metadata["handoff"], else None.
+            This is a convenience accessor — carrier does NOT validate handoff.
+        """
+        handoff = self.context_metadata.get("handoff")
+        if isinstance(handoff, ContextHandoffMetadata):
+            return handoff
+        return None
+
+    def set_handoff_metadata(self, metadata: ContextHandoffMetadata) -> None:
+        """
+        Store typed handoff metadata in context_metadata dict.
+
+        This is a convenience setter — carrier does NOT validate handoff.
+        The metadata is stored at context_metadata["handoff"] key.
+        """
+        self.context_metadata["handoff"] = metadata
+        self.updated_at = datetime.utcnow()
+
+    def get_correlation_for_handoff(self) -> Dict[str, Optional[str]]:
+        """
+        Get RunCorrelation-compatible dict from stored handoff metadata.
+
+        This is a convenience accessor that combines:
+          1. get_handoff_metadata() to retrieve stored handoff
+          2. to_correlation_dict() to convert to correlation dict
+
+        Returns:
+            Correlation dict suitable for EvidenceLog.create_event(correlation=...)
+            Empty dict if no handoff metadata is stored.
+        """
+        handoff = self.get_handoff_metadata()
+        if handoff is None:
+            return {}
+        return handoff.to_correlation_dict()
 
     # Časové značky
     created_at: datetime = Field(default_factory=datetime.utcnow)

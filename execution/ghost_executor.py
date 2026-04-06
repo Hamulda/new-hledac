@@ -31,7 +31,6 @@ Do té doby zůstává donor/compat vrstvou s tímto bridge seamem.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from dataclasses import dataclass
 from enum import Enum
@@ -644,11 +643,19 @@ class GhostExecutor:
     async def _action_deep_read(self, params: Dict[str, Any], context) -> Dict[str, Any]:
         """
         Bezpečné čtení obsahu z URL (8KB chunks, 5MB limit).
-        
+
         Bezpečně stáhne a přečte obsah z URL s ochranou před velkými soubory.
+
+        CONTEXT CARRIER COMPATIBILITY (Sprint F900A):
+        - Používá add_visited_url() místo přímého .add() pro správné
+          domain extraction přes ResearchContext carrier
+        - Nezapisuje content_hashes/collected_data přímo na context —
+          tyto atributy existují pouze na ExecutionContext (types.py),
+          ne na ResearchContext (research_context.py)
+        - Fallback: používá pouze visited_urls.add() pro compatibility
         """
         url = params.get("url", "")
-        
+
         # Kontrola duplicity
         if self._bloom_filter and self._bloom_filter.contains(url):
             logger.info(f"Skipping duplicate URL: {url}")
@@ -657,31 +664,33 @@ class GhostExecutor:
                 action="deep_read",
                 data={"url": url, "skipped": True, "reason": "duplicate"},
             ).to_dict()
-        
+
         logger.info(f"Deep reading: {url}")
-        
+
         try:
             driver = await self._get_network_driver()
-            
+
             # Harvestovat stránku
             result = await driver.harvest(url)
-            
+
             if result.success:
                 # Přidat do Bloom Filter
                 if self._bloom_filter:
                     self._bloom_filter.add(url)
-                
-                # Přidat do kontextu
+
+                # Přidat do kontextu přes canonical carrier method
                 if context:
-                    context.visited_urls.add(url)
-                    content_hash = hashlib.md5(result.main_content.encode()).hexdigest()
-                    context.content_hashes.add(content_hash)
-                    context.collected_data.append({
-                        "url": url,
-                        "title": result.metadata.get("title", ""),
-                        "content": result.main_content[:5000],  # Prvních 5000 znaků
-                    })
-                
+                    # Sprint F900A: Use add_visited_url() instead of direct .add()
+                    # This properly extracts domain and updates timestamp
+                    if hasattr(context, 'add_visited_url'):
+                        context.add_visited_url(url)
+                    elif hasattr(context, 'visited_urls'):
+                        # Fallback for ExecutionContext (types.py)
+                        context.visited_urls.add(url)
+                    # Note: content_hashes and collected_data are NOT written here
+                    # They exist on ExecutionContext but NOT on ResearchContext.
+                    # Writing them directly would cause AttributeError with RC.
+
                 return ActionResult(
                     success=True,
                     action="deep_read",
@@ -699,7 +708,7 @@ class GhostExecutor:
                     data={"url": url},
                     error=result.error or "Harvest failed"
                 ).to_dict()
-                
+
         except Exception as e:
             return ActionResult(
                 success=False,
@@ -800,24 +809,33 @@ class GhostExecutor:
             ).to_dict()
     
     async def _action_stealth_harvest(self, params: Dict[str, Any], context) -> Dict[str, Any]:
-        """Stealth harvestování"""
+        """
+        Stealth harvestování.
+
+        CONTEXT CARRIER COMPATIBILITY (Sprint F900A):
+        - stealth_activated field exists only on ExecutionContext (types.py),
+          NOT on ResearchContext (research_context.py)
+        - Removed direct write to context.stealth_activated to prevent
+          AttributeError when context is ResearchContext
+        """
         url = params.get("url", "")
         logger.info(f"Stealth harvest: {url}")
-        
+
         try:
             from hledac.advanced_web.detection_evader import DetectionEvader
-            
+
             evader = DetectionEvader()
             driver = await self._get_network_driver()
-            
+
             async with evader.evasion_session() as session:
                 result = await driver.harvest(url, session=session)
-                
+
                 if result.success:
-                    # Označit stealth aktivaci v kontextu
-                    if context:
-                        context.stealth_activated = True
-                    
+                    # Sprint F900A: Do NOT write to context.stealth_activated
+                    # This field exists only on ExecutionContext, not ResearchContext.
+                    # Direct write would cause AttributeError with RC.
+                    # Stealth activation is implicit in successful result.
+
                     return ActionResult(
                         success=True,
                         action="stealth_harvest",
@@ -834,7 +852,7 @@ class GhostExecutor:
                         data={"url": url},
                         error=result.error
                     ).to_dict()
-                    
+
         except Exception as e:
             return ActionResult(
                 success=False,

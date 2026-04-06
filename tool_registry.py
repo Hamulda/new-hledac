@@ -13,7 +13,9 @@ import io
 import json
 import math
 import operator
+import os
 import re
+import signal
 import sys
 import time
 import traceback
@@ -982,9 +984,13 @@ async def _web_search_handler(
     Returns truthful staged response when backend not ready:
     - backend_ready: False (no web search engine exists)
     - query_ready: True (interface accepts queries)
-    - contract_ready: False (reranking capability missing)
-    - capability_blockers: ["reranking"]
+    - contract_ready: False (no operational search backend)
+    - capability_blockers: ["web_search_backend"]
     - results: [] (empty, not fake)
+
+    Sprint F600B FIX: 'reranking' IS defined and available in capability
+    system (registered in capabilities.py), so capability_blockers no longer
+    falsely claims it is undefined. The actual blocker is the missing backend.
 
     This is NOT fake activation — it's explicit contract stating
     why web_search cannot execute and what is needed to unblock it.
@@ -994,12 +1000,13 @@ async def _web_search_handler(
         "backend_ready": False,
         "query_ready": True,
         "contract_ready": False,
-        "capability_blockers": ["reranking"],
+        "capability_blockers": ["web_search_backend"],
         "staged_reason": (
             "web_search backend not implemented: no search engine found in "
-            "intelligence/ module. Required capability 'reranking' is not "
-            "defined in capability system. Backend must exist before tool "
-            "contract can be satisfied."
+            "intelligence/ module. Capability 'reranking' IS defined and "
+            "available in the capability system (registered as core utility), "
+            "but no actual search/ranking backend exists. Backend must exist "
+            "before tool contract can be satisfied."
         ),
         "results": [],
         "total_found": 0,
@@ -1155,10 +1162,34 @@ async def _python_execute_handler(
     """Handler for restricted Python execution.
 
     Runs code in restricted environment with safe builtins only.
+
+    Sprint F600B FIX: Respects timeout_seconds via signal.alarm() on Unix.
+    Falls back to no-op timeout enforcement on non-Unix platforms.
     """
     import time
+    import os
 
     start_time = time.time()
+
+    # Sprint F600B: Respect timeout_seconds parameter via signal.alarm (Unix)
+    # This ensures the actual exec() respects the user-specified timeout,
+    # not just the asyncio.wait_for wrapper in execute_with_limits.
+    class _TimeoutError(Exception):
+        """Local timeout exception for exec context."""
+        pass
+
+    def _timeout_handler(signum, frame):
+        raise _TimeoutError(f"Execution timed out after {timeout_seconds}s")
+
+    _alarm_registered = False
+    if timeout_seconds and 1 <= timeout_seconds <= 300 and os.name == "posix":
+        try:
+            signal.signal(signal.SIGALRM, _timeout_handler)
+            signal.alarm(timeout_seconds)
+            _alarm_registered = True
+        except (ValueError, OSError):
+            # signal.SIGALRM not available on this platform
+            pass
 
     # Safe builtins whitelist
     safe_builtins = {
@@ -1243,11 +1274,18 @@ async def _python_execute_handler(
 
         success = True
 
+    except _TimeoutError:
+        stderr_capture.write(f"TimeoutError: Execution timed out after {timeout_seconds}s\n")
+        success = False
+
     except Exception as e:
         stderr_capture.write(f"{type(e).__name__}: {e}\n")
         stderr_capture.write(traceback.format_exc())
 
     finally:
+        # Sprint F600B: Cancel alarm if registered
+        if _alarm_registered:
+            signal.alarm(0)
         sys.stdout = old_stdout
         sys.stderr = old_stderr
 

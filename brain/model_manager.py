@@ -17,7 +17,7 @@ import logging
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, Optional, Callable, Literal
+from typing import Any, Dict, List, Optional, Callable, Literal
 from enum import Enum, auto
 
 try:
@@ -513,7 +513,7 @@ class ModelManager:
                 self._current_model = None
 
             # Agresivní čištění paměti
-            await self._cleanup_memory_async()
+            await self._cleanup_memory_async(model_type)
 
         except Exception as e:
             logger.error(f"Failed to release model {model_name}: {e}")
@@ -544,23 +544,28 @@ class ModelManager:
                         await loop.run_in_executor(None, model.unload)
                     logger.info(f"[MODEL RELEASE] {model_name} done")
                 del self._loaded_models[model_type]
-
             self._current_model = None
-            await self._cleanup_memory_async()
+            await self._cleanup_memory_async(model_type)
 
         except Exception as e:
             logger.error(f"Error releasing current model: {e}")
 
-    async def _cleanup_memory_async(self) -> None:
-        """Agresivní async čištění paměti po uvolnění modelu."""
+    async def _cleanup_memory_async(self, model_type: Optional[ModelType] = None) -> None:
+        """Agresivní async čištění paměti po uvolnění modelu.
+
+        Args:
+            model_type: ModelType being released. If None, uses self._current_model.
+        """
         # =========================================================================
         # Sprint 30: KV Cache Compression - apply before cleanup
         # =========================================================================
         # Invariant 3: Quantization in cleanup() - no inference impact
-        if self._current_model and self._current_model.name == "HERMES":
+        # FIX: Use passed model_type since _current_model is None at call time
+        target_model = model_type if model_type is not None else self._current_model
+        if target_model and target_model.name == "HERMES":
             try:
                 from .hermes3_engine import Hermes3Engine
-                engine = self._loaded_models.get(self._current_model)
+                engine = self._loaded_models.get(target_model)
                 if engine and hasattr(engine, '_prompt_cache') and engine._prompt_cache:
                     context_len = self._estimate_context_length(engine._prompt_cache)
                     if context_len > 1024:
@@ -683,8 +688,10 @@ class ModelManager:
         logger.info("Releasing all models...")
 
         async with self._lock:
+            last_released: Optional[ModelType] = None
             for model_type in list(self._loaded_models.keys()):
                 model_name = model_type.name.lower()
+                last_released = model_type
                 try:
                     model = self._loaded_models[model_type]
                     if hasattr(model, 'unload'):
@@ -701,7 +708,7 @@ class ModelManager:
                     logger.error(f"Failed to release {model_name}: {e}")
 
             self._current_model = None
-            await self._cleanup_memory_async()
+            await self._cleanup_memory_async(last_released)
             logger.info("✓ All models released")
 
     async def with_phase(self, phase_name: str):

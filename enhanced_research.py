@@ -2569,17 +2569,22 @@ class DeepResearchRequest:
             'query_type': self.query_type,
             'max_results': self.max_results,
         }
+        # GROUNDING SEAM TRUTH: grounding_hints flow to engine.
         # Migration direction (additive-only, non-activating):
         # raw grounding_hints Dict should become CanonicalGroundingHints
-        # after F11 activation. Currently unused by engine — see docstring.
+        # after F11 activation. Currently stored in kwargs for seam
+        # propagation — engine receives but does not yet apply it (TBD).
         if self.grounding_hints:
             from .types import CanonicalGroundingHints
             _canonical_hints = CanonicalGroundingHints.from_shim(
                 topic_hints=tuple(self.grounding_hints.get('topics', [])),
                 domain_tags=tuple(self.grounding_hints.get('domains', [])),
             )
-            # Future: pass _canonical_hints to engine's grounding parameter
-            # when F11 activation conditions are met (triada, session seams, etc.)
+            # Propagation: engine.deep_research() receives grounding_hints kwarg
+            # but engine implementation is TBD for F11 activation.
+            # For now, store in kwargs so seam IS propagating (not discarding).
+            if not _canonical_hints.is_empty():
+                kwargs['grounding_hints'] = _canonical_hints
         return kwargs
 
 

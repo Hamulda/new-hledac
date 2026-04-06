@@ -256,6 +256,12 @@ def _get_tool_capability_declarations() -> dict[str, set[str]]:
     """
     Read Tool.required_capabilities from tool_registry (read-only, lazy import).
 
+    NOTE: This function calls tool_registry.create_default_registry() to get
+    Tool.required_capabilities declarations. This is a KNOWN HEAVY operation
+    (creates full ToolRegistry instance) but is wrapped in try/except and
+    guarded by test_no_eager_probing_regressions. For M1 8GB, prefer
+    passing tool_contract_declarations explicitly to avoid this overhead.
+
     Returns:
         Dict of tool_name -> set of required capability string names.
         Empty dict if tool_registry not available.
@@ -340,7 +346,16 @@ class CapabilityRegistry:
         )
 
     def is_available(self, capability: Capability) -> bool:
-        """Check if capability is available."""
+        """
+        Check if capability is available.
+
+        NOTE: This conflates two distinct truth layers:
+        - registry_declared_available: registered with available=True
+        - runtime_loaded: successfully loaded via load()
+
+        Returns True if EITHER is true. This preserves backward compatibility.
+        For granular four-layer truth, use probe_capability_truth() instead.
+        """
         if capability in self._loaded:
             return True
         status = self._status.get(capability)
