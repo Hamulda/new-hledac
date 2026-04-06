@@ -2690,4 +2690,8 @@ def get_stealth_web_scraper() -> StealthWebScraper:
 
 
 # Global instances
+# F300I: DEAD CODE - FetchCoordinator._fetch_with_curl() instantiates
+# StealthWebScraper() fresh per call (line ~729). The singleton below is
+# NEVER reached from the active fetch path. This is intentional: per-fetch
+# isolation, no session re-use across fetches.
 _stealth_web_scraper: Optional[StealthWebScraper] = None

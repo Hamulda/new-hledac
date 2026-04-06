@@ -6,6 +6,7 @@ Sprint 46: Access to Unreachable Data (Sessions + Paywall + OSINT + Darknet)
 import asyncio
 import logging
 from typing import Optional, Dict, Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +124,15 @@ class DarknetConnector:
             return False
 
     async def fetch_onion(self, url: str) -> Optional[Dict[str, Any]]:
-        """Fetch .onion URL through Tor."""
-        if not url.endswith('.onion'):
+        """Fetch .onion URL through Tor.
+
+        Validates that the hostname (not full URL) ends with .onion.
+        """
+        try:
+            host = urlparse(url).hostname or ''
+            if not host.lower().endswith('.onion'):
+                return None
+        except Exception:
             return None
 
         content = await self.fetch_via_tor(url)
@@ -133,8 +141,15 @@ class DarknetConnector:
         return None
 
     async def fetch_i2p(self, url: str) -> Optional[Dict[str, Any]]:
-        """Fetch .i2p URL through I2P."""
-        if not url.endswith('.i2p'):
+        """Fetch .i2p URL through I2P.
+
+        Validates that the hostname (not full URL) ends with .i2p.
+        """
+        try:
+            host = urlparse(url).hostname or ''
+            if not host.lower().endswith('.i2p'):
+                return None
+        except Exception:
             return None
 
         content = await self.fetch_via_i2p(url)

@@ -144,9 +144,6 @@ AIMD_MIN_CONCURRENCY = 1      # floor
 AIMD_MAX_CONCURRENCY = 25     # ceiling (matches GLOBAL_MAX)
 AIMD_SUCCESS_THRESHOLD = 3    # count successes before increase
 
-logger = logging.getLogger(__name__)
-
-
 # Maximum evidence IDs to return per step (bounded output)
 MAX_EVIDENCE_IDS_PER_STEP = 10
 
