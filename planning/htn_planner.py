@@ -162,20 +162,32 @@ class HTNPlanner:
 
     def _get_live_remaining_time(self) -> Optional[float]:
         """
-        Sprint 8U: Read live remaining_time from SprintLifecycleManager singleton.
+        Sprint 8U + F400E: Read live remaining_time from SprintLifecycleManager singleton.
+        Source preference: runtime/sprint_lifecycle (canonical) → utils/sprint_lifecycle (compat fallback).
         Fail-open: returns None if manager is unavailable, accessor raises,
         or sprint has not yet started.
         Lazy import — no module-level lifecycle manager dependency.
         """
         try:
-            # Lazy import inside helper to preserve import hygiene (no module-level lifecycle import)
-            SprintLifecycleManager = __import__(
-                "hledac.universal.utils.sprint_lifecycle",
-                fromlist=["SprintLifecycleManager"]
-            ).SprintLifecycleManager
+            # Sprint F400E: runtime/sprint_lifecycle is canonical authority.
+            # utils/sprint_lifecycle is a deprecated compat shim — prefer
+            # canonical first, fall back to shim only if canonical unavailable.
+            try:
+                runtime_mgr = __import__(
+                    "hledac.universal.runtime.sprint_lifecycle",
+                    fromlist=["SprintLifecycleManager"]
+                )
+                SprintLifecycleManager = runtime_mgr.SprintLifecycleManager
+            except Exception:
+                # Fallback to compat shim (Sprint F4 legacy path)
+                compat_mgr = __import__(
+                    "hledac.universal.utils.sprint_lifecycle",
+                    fromlist=["SprintLifecycleManager"]
+                )
+                SprintLifecycleManager = compat_mgr.SprintLifecycleManager
             manager: "SprintLifecycleManager" = SprintLifecycleManager.get_instance()
-            # SprintLifecycleManager.remaining_time is a @property (not method)
-            # Return None if sprint has not started (0.0 is the "not started" sentinel)
+            # SprintLifecycleManager.remaining_time is a @property (utils) or method (runtime);
+            # both return 0.0 when sprint has not started
             remaining = manager.remaining_time
             if remaining <= 0.0:
                 return None
