@@ -1,11 +1,23 @@
 """
-Sprint 8PB: Exposure Intelligence Clients (Shodan + Censys)
+Sprint F300E: Mixed Exposure Intelligence Clients
 
-ShodanClient + CensysClient s LMDB cache tier.
-Žádné API volání bez cache miss (SHODAN_API_KEY/CENSYS_API_ID env vars).
+Dva transport modely v jednom souboru — toto je záměrný mixed model:
 
-LMDB single-writer: DB_EXECUTOR = ThreadPoolExecutor(max_workers=1)
-TTL: 7 dní
+OWN-SESSION (LMDB cache):
+  - ShodanClient: vlastní aiohttp session, LMDB ExposureCache, 7 dní TTL
+  - CensysClient: vlastní aiohttp session, LMDB ExposureCache, 7 dní TTL
+  Bez API key → LMDB-only mode, žádná HTTP volání.
+  LMDB single-writer: _DB_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+
+INJECTED-SESSION (file xxhash cache):
+  - GitHubCodeSearchClient: session předána zvenku, file cache 1h TTL
+  - MalwareBazaarClient: session předána zvenku, file cache 1h TTL
+  - GreyNoiseClient: session předána zvenku, file cache 4h TTL
+  Throttle: rate-limit per klient, ne per session.
+
+Mixed model NENÍ design flaw — je to správné rozdělení:
+  - Own-session klienti: dlouhodobá LMDB cache, API key management internal
+  - Injected-session klienti: lightweight, sdílená session z pivot dispatch
 """
 
 from __future__ import annotations
