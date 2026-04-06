@@ -492,14 +492,37 @@ def fallback_sanitize(text: str, max_length: int = MAX_FALLBACK_LENGTH) -> str:
     replacements.sort(key=lambda x: (-x[0], x[3]))
 
     # Deduplicate: keep only highest priority (lowest number) for each unique position
-    seen_positions = {}
+    # FIX: When higher-priority match overlaps with lower-priority one, REMOVE the lower-priority
+    non_overlapping = []
     for start, end, replacement, priority in replacements:
-        key = (start, end)
-        if key not in seen_positions or priority < seen_positions[key][3]:
-            seen_positions[key] = (start, end, replacement, priority)
+        to_remove = []
+        should_skip = False
 
-    # Apply replacements (using deduplicated seen_positions)
-    for start, end, replacement, priority in seen_positions.values():
+        for existing_start, existing_end, _, existing_priority in non_overlapping:
+            # Check for overlap
+            overlaps = not (end <= existing_start or existing_end <= start)
+
+            if overlaps and priority > existing_priority:
+                # This match has lower priority and overlaps with higher-priority existing
+                should_skip = True
+                break
+            elif overlaps and priority < existing_priority:
+                # This match has higher priority - mark existing lower-priority for removal
+                to_remove.append((existing_start, existing_end))
+
+        if should_skip:
+            continue
+
+        # Remove lower-priority overlapping matches that this higher-priority one supersedes
+        non_overlapping = [(s, e, r, p) for s, e, r, p in non_overlapping
+                           if (s, e) not in to_remove]
+
+        non_overlapping.append((start, end, replacement, priority))
+
+    # Apply replacements from HIGHEST start position to LOWEST (reverse order)
+    # This ensures earlier replacements don't shift indices of later ones
+    non_overlapping.sort(key=lambda x: -x[0])
+    for start, end, replacement, priority in non_overlapping:
         result = result[:start] + replacement + result[end:]
 
     return result

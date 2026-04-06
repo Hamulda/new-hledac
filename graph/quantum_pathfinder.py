@@ -982,7 +982,7 @@ class DuckPGQGraph:
     def __init__(self, db_path: str | None = None):
         import duckdb
         if db_path is None:
-            from paths import get_ioc_db_path
+            from hledac.universal.paths import get_ioc_db_path
             db_path = str(get_ioc_db_path())
         self.db_path = db_path
         self.con = duckdb.connect(db_path)

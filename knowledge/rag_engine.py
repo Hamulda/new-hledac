@@ -73,7 +73,7 @@ class RAGConfig:
 
     # HNSW Vector Search configuration
     use_hnsw: bool = True
-    hnsw_dim: int = 768  # Vector dimension
+    hnsw_dim: int = 384  # Vector dimension (BAAI/bge-small-en-v1.5 produces 384D)
     hnsw_max_elements: int = 100000  # Maximum elements in index
     hnsw_M: int = 16  # Number of bi-directional links for each node
     hnsw_ef_construction: int = 200  # Size of dynamic candidate list

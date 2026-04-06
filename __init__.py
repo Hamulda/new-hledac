@@ -513,18 +513,19 @@ def __dir__():
 # PHASE C INTEGRATION - Full Autonomy with Connected Coordinators
 # =============================================================================
 
+# Pre-initialize so assignment is single in __all__ extend below
+INTEGRATED_ORCHESTRATOR_AVAILABLE = False
 try:
     from .orchestrator_integration import (
         IntegratedOrchestrator,
         integrated_research,
     )
     INTEGRATED_ORCHESTRATOR_AVAILABLE = True
-    
+
     # Make IntegratedOrchestrator the default for advanced usage
     AdvancedOrchestrator = IntegratedOrchestrator
-    
+
 except ImportError as e:
-    INTEGRATED_ORCHESTRATOR_AVAILABLE = False
     import logging
     logging.getLogger(__name__).debug(
         f"Integrated orchestrator not available (optional dependencies): {e}"

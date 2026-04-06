@@ -140,7 +140,7 @@ class IntelligentResourceAllocator:
                 config = yaml.safe_load(f)
                 default_config.update(config)
 
-            return default_config
+        return default_config
 
     def _init_prediction_model(self):
         """Initialize resource usage prediction model (lazy)."""
@@ -391,9 +391,9 @@ class IntelligentResourceAllocator:
 
             # Try allocation again
             if await self._allocate_resources(request):
-                        return True
+                return True
 
-            return False
+        return False
 
     async def release_resources(self, task_id: str):
         """Release allocated resources"""
@@ -475,11 +475,11 @@ class IntelligentResourceAllocator:
         """Handle detected resource anomaly"""
         # Get the anomalous data point
         if history_index < len(self.resource_history):
-                anomaly_data = self.resource_history[-(50 - history_index)]
+            anomaly_data = self.resource_history[-(50 - history_index)]
 
             # If CPU usage is too high, consider preempting low-priority tasks
-                if anomaly_data['cpu_usage'] > self.scale_up_threshnew:
-                    low_priority_tasks = [
+            if anomaly_data['cpu_usage'] > self.scale_up_threshnew:
+                low_priority_tasks = [
                     task_id for task_id, alloc in self.active_allocations.items()
                     if alloc.efficiency_score < 0.5
                 ]
@@ -560,14 +560,14 @@ class IntelligentResourceAllocator:
                 stats['average_efficiency'] = total_efficiency / len(self.completed_allocations)
 
         if self.resource_history:
-                latest = self.resource_history[-1]
-                stats['resource_utilization'] = {
+            latest = self.resource_history[-1]
+            stats['resource_utilization'] = {
                 'cpu_usage': latest['cpu_usage'],
                 'memory_usage': latest['memory_usage'],
                 'gpu_usage': latest['gpu_usage']
             }
 
-                return stats
+        return stats
 
     def export_allocation_report(self, filepath: str):
         """Export detailed allocation report"""
@@ -695,7 +695,7 @@ class ParallelExecutionOptimizer:
             batch_results = await self._execute_parallel_batch(batch_tasks)
             results.extend(batch_results)
 
-            return results
+        return results
 
     async def _execute_parallel_batch(self, batch_tasks: List[tuple]) -> List[Any]:
         """Execute a batch of tasks in parallel"""

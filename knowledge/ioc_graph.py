@@ -269,11 +269,21 @@ class IOCGraph:
             pass
 
     async def close(self) -> None:
-        """Gracefully close the Kuzu connection."""
+        """Gracefully close the Kuzu connection.
+
+        Flushes any pending IOC and observation buffers before shutdown
+        to prevent silent data loss when close() is called without
+        an intervening WINDUP phase.
+        """
         if self._closed:
             return
         self._closed = True
         loop = asyncio.get_running_loop()
+        try:
+            # Flush pending buffers before closing — no-op if both are empty
+            await self.flush_buffers()
+        except Exception:
+            pass
         try:
             await loop.run_in_executor(self._executor, self._close_sync)
         except Exception:
