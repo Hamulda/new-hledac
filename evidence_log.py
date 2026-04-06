@@ -709,6 +709,13 @@ class EvidenceLog:
         """
         event_id = f"{self._run_id}_{uuid.uuid4().hex[:12]}"
 
+        # Sprint F200A FIX: Add correlation to payload BEFORE hash computation.
+        # Previously correlation was added AFTER calculate_hash(), causing
+        # verify_integrity() to fail on events with correlation (the stored
+        # content_hash didn't reflect the final payload with _correlation).
+        if correlation:
+            payload["_correlation"] = correlation
+
         # Vytvoř událost s dočasným hashem
         event = EvidenceEvent(
             event_id=event_id,
@@ -720,12 +727,8 @@ class EvidenceLog:
             run_id=self._run_id,
         )
 
-        # Vypočítej hash
+        # Vypočítej hash - nyní včetně correlation
         event.content_hash = event.calculate_hash()
-
-        # Přidej korelaci do payload (flattened, query-friendly)
-        if correlation:
-            event.payload["_correlation"] = correlation
 
         # Přidej do logu
         self.append(event)

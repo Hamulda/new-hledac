@@ -285,8 +285,8 @@ class MetricsRegistry:
         }
 
     def close(self) -> None:
-        """Close and flush"""
-        self.flush()
+        """Close and flush - force=True to prevent tail-loss of pending metrics."""
+        self.flush(force=True)
         if self._persist_file:
             try:
                 self._persist_file.flush()

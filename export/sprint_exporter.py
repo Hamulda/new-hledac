@@ -118,11 +118,10 @@ async def export_sprint(
         except Exception:
             pass
 
-    # Sprint F500B §2: seeds land in same directory as JSON report (colocation)
-    # Fallback to SPRINT_STORE_ROOT.parent/"reports" if report_path is None (write failed)
-    from hledac.universal.paths import SPRINT_STORE_ROOT
-    seeds_output_dir = report_path.parent if report_path else (SPRINT_STORE_ROOT.parent / "reports")
-    seeds_path = _generate_next_sprint_seeds(top_nodes, _sprint_id, seeds_output_dir)
+    # Sprint F500B §2 + F500D §3: seeds land alongside JSON report (colocation)
+    # Primary: get_sprint_next_seeds_path() from paths.py (canonical)
+    # Fallback: SPRINT_STORE_ROOT.parent/"reports" if report_path is None (write failed)
+    seeds_path = _generate_next_sprint_seeds(top_nodes, _sprint_id, report_path)
 
     return {
         "report_json": str(report_path) if report_path else "",
@@ -133,7 +132,7 @@ async def export_sprint(
 def _generate_next_sprint_seeds(
     top_nodes: list,
     sprint_id: str,
-    output_dir: pathlib.Path,
+    report_path: pathlib.Path | None,
 ) -> pathlib.Path:
     """
     Generuje PivotTask seed JSON pro příští sprint.
@@ -146,12 +145,25 @@ def _generate_next_sprint_seeds(
         → ExportHandoff(top_nodes=...) → export_sprint() → _generate_next_sprint_seeds()
     Žádný přístup k scheduler._ioc_graph internals.
 
+    Canonical next-seeds path (Sprint F500D):
+      - Primary: get_sprint_next_seeds_path(sprint_id) z paths.py
+      - Colocation: when report_path write succeeded, seeds land in same dir as JSON report
+      - Fallback: SPRINT_STORE_ROOT.parent/"reports" if report_path is None (write failed)
+
     Každý top IOC generuje 3 follow-up tasky:
       - rdap_lookup (nejvyšší priorita)
       - domain_to_ct
       - dht_infohash_lookup
     """
-    seeds_path = output_dir / f"{sprint_id}_next_seeds.json"
+    # Sprint F500D §3: Use canonical helper; colocation via report_path parent
+    from hledac.universal.paths import get_sprint_next_seeds_path, SPRINT_STORE_ROOT
+    if report_path is not None:
+        # Colocation with JSON report — canonical sibling path
+        seeds_path = get_sprint_next_seeds_path(sprint_id)
+    else:
+        # Fallback: report write failed, use same fallback dir as JSON would have
+        seeds_path = SPRINT_STORE_ROOT.parent / "reports" / f"{sprint_id}_next_seeds.json"
+        seeds_path.parent.mkdir(parents=True, exist_ok=True)
     seeds: list[dict[str, Any]] = []
 
     try:

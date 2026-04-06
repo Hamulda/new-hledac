@@ -110,11 +110,14 @@ def _reset_uma_hysteresis_for_testing() -> None:
         _io_only_latch = False
 
 # Sprint 8AB: Lightweight telemetry counters (module-level, no class instantiation)
+# F130A: io_only_enter/exit are now transition-based (only on actual transitions),
+# not state-sampled (every sample in a given state).
 _telemetry = {
     "transition_count": 0,
     "io_only_enter_count": 0,
     "io_only_exit_count": 0,
     "last_state": "ok",
+    "last_io_only": False,  # F130A: tracks previous io_only for transition detection
 }
 
 
@@ -387,15 +390,25 @@ def sample_uma_status() -> UMAStatus:
     # Sprint 8AK: Shared hysteresis latch — thread-safe, prevents state thrashing
     io_only, _ = _update_io_only_latch_with_lock(system_used_gib)
 
-    # Update telemetry
+    # Update telemetry — F130A: all counters are transition-based, not state-sampled.
+    # - transition_count: every state change (ok→warn, warn→critical, etc.)
+    # - io_only_enter_count: actual io_only activation (False→True transition)
+    # - io_only_exit_count: actual io_only deactivation (True→False transition)
     global _telemetry
     if _telemetry["last_state"] != state:
         _telemetry["transition_count"] += 1
         _telemetry["last_state"] = state
-    if io_only and state == "critical":
+
+    # F130A: transition-based enter/exit — only fire on actual latched transitions
+    prev_io_only = _telemetry["last_io_only"]
+    if io_only and not prev_io_only:
+        # False → True: io_only was just activated
         _telemetry["io_only_enter_count"] += 1
-    elif not io_only and state in ("ok", "warn"):
+    elif not io_only and prev_io_only:
+        # True → False: io_only was just deactivated
         _telemetry["io_only_exit_count"] += 1
+
+    _telemetry["last_io_only"] = io_only
 
     return UMAStatus(
         rss_gib=rss_gib,
