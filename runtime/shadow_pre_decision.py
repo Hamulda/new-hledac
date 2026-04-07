@@ -702,8 +702,12 @@ def compose_pre_decision(
     )
 
     # --- Sprint F3.5-F3.6: Provider Readiness Preview (diagnostic only) ---
+    # F360A FIX: pass pr (PrecursorSummary) to access has_provider_recommend
+    # has_recommendation comes from pr.has_provider_recommend (provider_recommend fact)
+    # has_facts comes from model_control.models_needed (model availability fact)
+    # These are DISTINCT facts and must NOT be conflated
     provider_readiness = _compose_provider_readiness_preview(
-        lc, mc, runtime_facts
+        lc, mc, pr, runtime_facts
     )
 
     return PreDecisionSummary(
@@ -1318,30 +1322,31 @@ def _compose_provider_activation_note(
 def _compose_provider_readiness_preview(
     lifecycle: LifecycleInterpretation,
     model_control: ModelControlSummary,
+    precursor: PrecursorSummary,
     runtime_facts: Optional["ProviderRuntimeFactsBundle"] = None,
 ) -> ProviderReadinessPreview:
     """
-    Sestaví ProviderReadinessPreview z LifecycleInterpretation a ModelControlSummary.
+    Sestaví ProviderReadinessPreview z LifecycleInterpretation, ModelControlSummary a PrecursorSummary.
 
     DIAGNOSTIC ONLY — readiness preview bez activation.
     NESMÍ volat load_model(), acquire(), unload(), execute_with_limits().
     NESMÍ domýšlet chybějící facts jako ready.
 
     Rozlišuje TŘI různé věci (NESMÍ splývat):
-    1. recommendation fact — co capabilities.py doporučuje (model_control.models_needed)
+    1. recommendation fact — co capabilities.py doporučuje (z precursor.provider_recommend)
     2. readiness preview — diagnostická klasifikace readiness z facts
     3. actual activation — skutečné volání provider pool
 
+    F360A FIX: has_recommendation a has_facts jsou DISTINCT facts:
+    - has_recommendation: z precursor.has_provider_recommend (provider_recommend fact exists)
+    - has_facts: z model_control.models_needed (model availability)
+
     Readiness klasifikace:
-    - ready: lifecycle ACTIVE/WINDUP + models_needed non-empty + normal/prune control
-    - deferred: lifecycle not ready OR models_needed empty
+    - ready: lifecycle ACTIVE/WINDUP + has_recommendation=True + normal/prune control
+    - deferred: lifecycle not ready OR no provider_recommend
     - blocked: hard constraint (terminal phase, phase_conflict, panic mode)
     - unknown: facts insufficient to determine readiness
     - compat: lifecycle in COMPAT path (WARMUP), readiness indeterminate
-
-    Provider recommendation fact (model_control.models_needed):
-    - models_needed: [str] — seznam požadovaných modelů z analyzer/analyzer_result
-    - source: raw_profile["models_needed"] v ModelControlFactsBundle
     """
     blockers: List[str] = []
     unknowns: List[str] = []
@@ -1351,6 +1356,11 @@ def _compose_provider_readiness_preview(
     lifecycle_ready = lifecycle.is_active or lifecycle.is_windup
     control_ready = lifecycle.control_phase_mode in ("normal", "prune")
     thermal_safe = lifecycle.control_phase_thermal != "critical"
+
+    # F360A FIX: SEPARATE the two distinct facts
+    # has_recommendation: provider_recommend fact exists (from precursor)
+    has_recommendation_fact = precursor.has_provider_recommend and precursor.provider_recommend is not None
+    # has_facts: model availability from analyzer (from model_control.models_needed)
     has_facts = model_control.models_needed is not None and len(model_control.models_needed) > 0
 
     # Sprint F3.13: Runtime facts — read-only runtime model state
@@ -1362,8 +1372,8 @@ def _compose_provider_readiness_preview(
     if lifecycle.is_terminal:
         blockers.append(f"lifecycle in terminal phase={lifecycle.workflow_phase}")
         return ProviderReadinessPreview(
-            has_recommendation=has_facts,
-            recommendation=str(model_control.models_needed) if has_facts else None,
+            has_recommendation=has_recommendation_fact,
+            recommendation=precursor.provider_recommend if has_recommendation_fact else None,
             readiness="blocked",
             lifecycle_ready=lifecycle_ready,
             control_ready=control_ready,
@@ -1381,8 +1391,8 @@ def _compose_provider_readiness_preview(
     if lifecycle.phase_conflict:
         blockers.append(f"phase_conflict: {lifecycle.phase_conflict_reason}")
         return ProviderReadinessPreview(
-            has_recommendation=has_facts,
-            recommendation=str(model_control.models_needed) if has_facts else None,
+            has_recommendation=has_recommendation_fact,
+            recommendation=precursor.provider_recommend if has_recommendation_fact else None,
             readiness="blocked",
             lifecycle_ready=lifecycle_ready,
             control_ready=control_ready,
@@ -1400,8 +1410,8 @@ def _compose_provider_readiness_preview(
     if lifecycle.control_phase_mode == "panic":
         blockers.append("control_mode=panic — provider activation blocked")
         return ProviderReadinessPreview(
-            has_recommendation=has_facts,
-            recommendation=str(model_control.models_needed) if has_facts else None,
+            has_recommendation=has_recommendation_fact,
+            recommendation=precursor.provider_recommend if has_recommendation_fact else None,
             readiness="blocked",
             lifecycle_ready=lifecycle_ready,
             control_ready=control_ready,
@@ -1424,8 +1434,8 @@ def _compose_provider_readiness_preview(
         # COMPAT path: WARMUP phase means we can't determine
         if lifecycle.workflow_phase == "WARMUP":
             return ProviderReadinessPreview(
-                has_recommendation=has_facts,
-                recommendation=str(model_control.models_needed) if has_facts else None,
+                has_recommendation=has_recommendation_fact,
+                recommendation=precursor.provider_recommend if has_recommendation_fact else None,
                 readiness="compat",
                 lifecycle_ready=lifecycle_ready,
                 control_ready=control_ready,
@@ -1441,8 +1451,8 @@ def _compose_provider_readiness_preview(
             )
 
         return ProviderReadinessPreview(
-            has_recommendation=has_facts,
-            recommendation=str(model_control.models_needed) if has_facts else None,
+            has_recommendation=has_recommendation_fact,
+            recommendation=precursor.provider_recommend if has_recommendation_fact else None,
             readiness="deferred",
             lifecycle_ready=lifecycle_ready,
             control_ready=control_ready,
@@ -1475,8 +1485,8 @@ def _compose_provider_readiness_preview(
         # Only mark as ready if we have actual recommendation fact
         if model_control.readiness in ("ready", "partial"):
             return ProviderReadinessPreview(
-                has_recommendation=has_facts,
-                recommendation=str(model_control.models_needed),
+                has_recommendation=has_recommendation_fact,
+                recommendation=precursor.provider_recommend if has_recommendation_fact else None,
                 readiness="ready",
                 lifecycle_ready=lifecycle_ready,
                 control_ready=control_ready,
@@ -1494,8 +1504,8 @@ def _compose_provider_readiness_preview(
             # readiness="unknown" from model_control — insufficient facts
             unknowns.append("model_control.readiness=unknown — insufficient facts")
             return ProviderReadinessPreview(
-                has_recommendation=has_facts,
-                recommendation=str(model_control.models_needed) if has_facts else None,
+                has_recommendation=has_recommendation_fact,
+                recommendation=precursor.provider_recommend if has_recommendation_fact else None,
                 readiness="unknown",
                 lifecycle_ready=lifecycle_ready,
                 control_ready=control_ready,
@@ -1513,8 +1523,8 @@ def _compose_provider_readiness_preview(
     # Deferred or unknown
     if unknowns or deferred_reasons:
         return ProviderReadinessPreview(
-            has_recommendation=has_facts,
-            recommendation=str(model_control.models_needed) if has_facts else None,
+            has_recommendation=has_recommendation_fact,
+            recommendation=precursor.provider_recommend if has_recommendation_fact else None,
             readiness="deferred" if deferred_reasons else "unknown",
             lifecycle_ready=lifecycle_ready,
             control_ready=control_ready,
@@ -1531,8 +1541,8 @@ def _compose_provider_readiness_preview(
 
     # Fallback — should not reach here
     return ProviderReadinessPreview(
-        has_recommendation=has_facts,
-        recommendation=str(model_control.models_needed) if has_facts else None,
+        has_recommendation=has_recommendation_fact,
+        recommendation=precursor.provider_recommend if has_recommendation_fact else None,
         readiness="unknown",
         lifecycle_ready=lifecycle_ready,
         control_ready=control_ready,

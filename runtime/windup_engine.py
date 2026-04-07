@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import resource as _resource
 import time
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from .sprint_scheduler import SprintScheduler
@@ -112,13 +112,11 @@ async def run_windup(
         logger.warning(f"[WINDUP] ANE dedup: {e}")
 
     # 5. MoE synthesis engine selection + synthesis
-    synthesis_result: Any = None
     synthesis_meta: dict = {}
     synthesis_engine_used = "unknown"
 
     try:
         from brain.moe_router import route_synthesis
-        from resource_allocator import get_memory_pressure_level
 
         memory_level = "nominal"
         try:
@@ -154,7 +152,7 @@ async def run_windup(
             text = f.get("text") or f.get("snippet") or f.get("title") or str(f)
             finding_texts.append(text[:500])
 
-        synthesis_result = await runner.synthesize_findings(
+        await runner.synthesize_findings(
             query=sprint_query,
             findings=[{"text": t, "ioc": f.get("ioc", ""), "source": f.get("source", "")}
                       for t, f in zip(finding_texts, deduped or [])],
@@ -197,7 +195,7 @@ async def run_windup(
 
         for h in (hypotheses or [])[:3]:
             h_text = h if isinstance(h, str) else str(h)
-            await scheduler.enqueue_pivot(
+            scheduler.enqueue_pivot(
                 ioc_value=h_text[:200],
                 ioc_type="hypothesis",
                 confidence=0.82,
@@ -221,10 +219,11 @@ async def run_windup(
     rss = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
     finding_count = getattr(scheduler, "_finding_count", 0)
 
-    # Phase durations
+    # Phase durations — NOTE: t_warmup_dur is actually the ACTIVE period duration
+    # (t_active_end - t_warmup_end). run_windup() does not receive t_warmup_start,
+    # so warmup cannot be measured directly. Label reflects what we compute.
     try:
-        t_windup_start = t_active_end
-        t_warmup_dur = round(t_warmup_end - t_active_end, 2) if t_active_end and t_warmup_end else 0.0
+        t_warmup_dur = round(t_active_end - t_warmup_end, 2) if t_warmup_end and t_active_end else 0.0
         t_active_dur = round(t_active_end - t_warmup_end, 2) if t_warmup_end and t_active_end else 0.0
         t_windup_dur = round(time.monotonic() - t_active_end, 2) if t_active_end else 0.0
     except Exception:

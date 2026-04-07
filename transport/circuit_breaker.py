@@ -45,6 +45,7 @@ class CircuitBreaker:
         self._failure_count = 0
         self._consecutive_timeouts = 0
         self._state = CBState.CLOSED
+        self.recovery_timeout = 60.0  # reset to baseline after successful recovery
 
     def record_failure(self, is_timeout: bool = False):
         self._failure_count += 1

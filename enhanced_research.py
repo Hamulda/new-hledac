@@ -75,6 +75,7 @@ from .types import (
     ResearchResult,
     ExecutionContext,
     RunCorrelation,
+    CanonicalGroundingHints,
 )
 from .utils import WorkflowEngine, Workflow, Task, TaskType, PredictivePlanner, PerformanceMonitor
 
@@ -647,6 +648,7 @@ class UnifiedResearchEngine:
         query_type: Optional[QueryType] = None,
         max_results: int = 50,
         correlation: Optional[RunCorrelation] = None,
+        grounding_hints: Optional[CanonicalGroundingHints] = None,
     ) -> UnifiedResearchResult:
         """
         Execute deep research across all integrated tools.
@@ -2728,10 +2730,10 @@ async def deep_research_provider_seam(
     Používá se pouze po splnění admission blockers:
     1. Triáda: PARTIAL — analyzer + router + registry EXISTUJÍ, DeepResearch NE napojen
     2. Source plane: EXISTS — SourceFamily + SourcePlan + _build_source_plan()
-    3. Transport plane (FetchCoordinator): TBD
-    4. Session seams (BudgetManager, EvidenceLog): TBD
-    5. Security gate (SecurityGate, privacy layer): TBD
-    6. Minimal grounding seam (ProviderRequest/ProviderResult handoff): TBD
+    3. Transport plane (FetchCoordinator): exists, not wired to DeepResearch runtime
+    4. Session seams (BudgetManager, EvidenceLog): exists, not wired to DeepResearch
+    5. Security gate (SecurityGate, privacy layer): exists, not wired to DeepResearch
+    6. Minimal grounding seam (ProviderRequest/ProviderResult): exists, not wired to DeepResearch
 
     Args:
         request: DeepResearchRequest s query a config

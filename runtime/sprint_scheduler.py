@@ -610,8 +610,6 @@ class SprintScheduler:
         Run one bounded fetch cycle across all sources, tier-ordered.
         Returns False when lifecycle says stop; True otherwise.
         """
-        self._result.cycles_started += 1
-
         async_run_live_feed, FeedPipelineRunResult = _import_live_feed_pipeline()
 
         # Build tiered work list
@@ -1214,11 +1212,16 @@ class SprintScheduler:
                 peeked = list(self._pivot_queue.queue)[:n]
         except AttributeError:
             # Fallback for queues without mutex
+            # NON-DESTRUCTIVE: get item, re-enqueue immediately to preserve queue
             peeked = []
             for _ in range(min(n, self._pivot_queue.qsize())):
                 try:
-                    peeked.append(self._pivot_queue.get_nowait())
+                    item = self._pivot_queue.get_nowait()
+                    peeked.append(item)
+                    self._pivot_queue.put_nowait(item)
                 except asyncio.QueueEmpty:
+                    break
+                except asyncio.QueueFull:
                     break
 
         for pivot_task in peeked[:n]:
@@ -1228,7 +1231,7 @@ class SprintScheduler:
 
             async def _speculative_run(pt=pivot_task, key=task_key):
                 try:
-                    result = await self._execute_pivot(pt, session)
+                    result = await self._execute_pivot(pt)
                     self._speculative_results[key] = result or {}
                     log.debug(f"Speculative hit: {key}")
                 except asyncio.CancelledError:
