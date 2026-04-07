@@ -733,6 +733,10 @@ def compose_pre_decision(
         provider_readiness=provider_readiness,
         # Sprint F3.13: Provider runtime facts
         runtime_facts=runtime_facts,
+        # F350A: dispatch_parity NOT populated here — requires task_candidates +
+        # available_capabilities which are not in ParityArtifact. Consumers call
+        # preview_dispatch_parity() separately and assign dispatch_parity field directly.
+        dispatch_parity=None,
     )
 
 
@@ -1931,7 +1935,8 @@ def preview_dispatch_parity(
         task_candidates: Seznam task_type řetězců kandidátů
         available_capabilities: Set dostupných capability names
         control_mode: "normal" | "prune" | "panic"
-        registry_tools: Optional[List[Tool]] — pokud None, použije create_default_registry()
+        registry_tools: Optional[List[Tool]] — pokud None, vrací truthful unknown/dispatch_unknown
+            bez heavy create_default_registry() fallback (M1-unfriendly v shadow-only path)
 
     Returns:
         DispatchReadinessPreview — DIAGNOSTIC ONLY artifact
@@ -1940,6 +1945,7 @@ def preview_dispatch_parity(
     - execute_with_limits()
     - acquire() / load_model()
     - Provider activation
+    - create_default_registry() (M1-unfriendly heavy init v shadow-only path)
     """
     # Sprint F3.11: Read mapping from canonical read-side owner (tool_registry.py)
     # Previously this was a local constant — now centralized to prevent drift
@@ -1947,13 +1953,39 @@ def preview_dispatch_parity(
     TASK_TYPE_TO_TOOL = get_task_tool_preview_mapping()
 
     # Load tools from registry (read-only, no execute)
+    # H350A FIX: M1-friendly fallback — truthful unknown místo heavy create_default_registry()
+    # v shadow-only diagnostic path. create_default_registry() je M1-unfriendly:
+    # - registruje všechny handlery včetně _web_search_handler, _entity_extraction_handler atd.
+    # - tyto handlery importují celé moduly (requests, bs4, pdfplumber,...)
+    # - v shadow-only path nemáme tool execution context, jen metadata
+    # SPRÁVNÁ odpověď: return truthful dispatch_unknown když registry_tools=None
     if registry_tools is None:
-        try:
-            from ..tool_registry import create_default_registry
-            registry = create_default_registry()
-            tools = registry.list_tools()
-        except Exception:
-            tools = []
+        # M1-friendly: truthful unknown bez heavy registry init
+        # Build dispatch readiness s prázdným registry — mapped handlers = runtime_only
+        will_prune = control_mode in ("prune", "panic")
+
+        # All candidates become runtime_only since we have no registry metadata
+        runtime_only_handlers = list(task_candidates)
+        readiness = "unknown"
+        dispatch_path = "runtime_only_compat"
+
+        return DispatchReadinessPreview(
+            readiness=readiness,
+            dispatch_path=dispatch_path,
+            tool_candidates={},  # No registry → no tool mapping
+            capability_gaps={},  # No registry → no gap analysis
+            blockers=["registry_tools not provided — cannot determine capability gaps in shadow-only path"],
+            pruned_tools=[],
+            unknown_tools=[],
+            runtime_only_handlers=runtime_only_handlers,
+            control_mode=control_mode,
+            will_be_pruned=will_prune,
+            canonical_count=0,
+            runtime_only_count=len(runtime_only_handlers),
+            satisfied_count=0,
+            blocked_count=0,
+            execution_context=None,
+        )
     else:
         tools = registry_tools
 

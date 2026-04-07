@@ -143,6 +143,9 @@ class MetricsRegistry:
         # Event count for flush cadence
         self._event_count = 0
 
+        # Closed state — prevents post-close mutation drift (F200E)
+        self._closed = False
+
         # Persist file
         self._persist_file = self._init_persist_file()
 
@@ -172,6 +175,8 @@ class MetricsRegistry:
             name: Metric name
             delta: Amount to increment
         """
+        if self._closed:
+            return
         if not self._validate_metric_name(name):
             logger.warning(f"Invalid metric name: {name}")
             return
@@ -188,6 +193,8 @@ class MetricsRegistry:
             name: Metric name
             value: Gauge value
         """
+        if self._closed:
+            return
         if not self._validate_metric_name(name):
             logger.warning(f"Invalid metric name: {name}")
             return
@@ -207,7 +214,10 @@ class MetricsRegistry:
         Captures current system metrics.
 
         F200G fix: psutil is optional; skip if not available.
+        F200E fix: post-close tick is no-op.
         """
+        if self._closed:
+            return
         if not _PSUTIL_AVAILABLE:
             return
 
@@ -298,6 +308,9 @@ class MetricsRegistry:
 
     def close(self) -> None:
         """Close and flush - force=True to prevent tail-loss of pending metrics."""
+        if self._closed:
+            return
+        self._closed = True
         self.flush(force=True)
         if self._persist_file:
             try:

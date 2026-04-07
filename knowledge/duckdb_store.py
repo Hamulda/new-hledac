@@ -953,6 +953,9 @@ class DuckDBShadowStore:
         Runs as a background task (not awaited). Fail-open: any exception
         is caught and logged — semantic buffering failure never blocks storage.
         """
+        import logging as _logging
+
+        _logger = _logging.getLogger(__name__)
         if self._semantic_store is None:
             return
         try:
@@ -2071,7 +2074,7 @@ class DuckDBShadowStore:
         return await loop.run_in_executor(self._executor, _sync)
 
     # ------------------------------------------------------------------
-    # Sprint 8TA B.4: ghost_global.duckdb — cross-sprint entity accumulation
+    # Sprint 8TA B.4: ghost_global cross-sprint entity accumulation (SQLite-backed)
     # ------------------------------------------------------------------
 
     async def upsert_global_entities(
@@ -2079,10 +2082,11 @@ class DuckDBShadowStore:
         entities: list[tuple[str, str, float]],
     ) -> int:
         """
-        Sprint 8TA B.4: Upsert entities into ghost_global.duckdb.
+        Sprint 8TA B.4: Upsert entities into ghost_global store.
 
-        Path: ~/.hledac/ghost_global.duckdb
+        Path: ~/.hledac/ghost_global.duckdb  (file named .duckdb but backed by SQLite)
         filelock: ~/.hledac/ghost_global.lock
+        Engine: sqlite3 (NOT DuckDB) — legacy naming preserved for file identity
         Schema: global_entities(entity_value TEXT PK, entity_type TEXT,
                 sprint_count INT, last_seen DOUBLE, confidence_cumulative REAL)
         INSERT OR REPLACE with MAX(confidence) semantics.

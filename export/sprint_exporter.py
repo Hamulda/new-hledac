@@ -193,27 +193,11 @@ def _generate_next_sprint_seeds(
             if not ioc_value or len(ioc_value) < 3:
                 continue
 
-            # Každý top IOC generuje 3 follow-up tasky
-            seeds.extend([
-                {
-                    "task_type": "rdap_lookup",
-                    "value": ioc_value,
-                    "priority": 0.85,
-                    "reason": f"top_graph_node/{ioc_type}",
-                },
-                {
-                    "task_type": "domain_to_ct",
-                    "value": ioc_value,
-                    "priority": 0.80,
-                    "reason": f"top_graph_node/{ioc_type}",
-                },
-                {
-                    "task_type": "dht_infohash_lookup",
-                    "value": ioc_value,
-                    "priority": 0.70,
-                    "reason": f"top_graph_node/{ioc_type}",
-                },
-            ])
+            # Sprint F500G §H2: type-aware seed generation
+            # Generate tasky JEN pro typy kde dávají smysl.
+            # Neriskuj falsy seeds pro typy ktere nedávají smysl.
+            node_seeds = _type_aware_seeds(ioc_value, ioc_type)
+            seeds.extend(node_seeds)
 
         seeds_path.write_text(json.dumps(seeds, indent=2, default=str))
         logger.info(f"[EXPORT] {len(seeds)} seed tasks → {seeds_path}")
@@ -222,6 +206,93 @@ def _generate_next_sprint_seeds(
         seeds_path.write_text(json.dumps([], indent=2))
 
     return seeds_path
+
+
+def _type_aware_seeds(value: str, ioc_type: str) -> list[dict[str, Any]]:
+    """
+    Sprint F500G §H2: Type-aware seed generation.
+
+    Truthful mapping — generates seeds JEN kde typu odpovídá task_type.
+
+    | ioc_type  | rdap_lookup | domain_to_ct | dht_infohash_lookup |
+    |-----------|-------------|--------------|---------------------|
+    | domain    | YES         | YES          | NO                  |
+    | ip        | YES         | NO           | NO                  |
+    | url       | YES         | NO           | NO                  |
+    | infohash  | NO          | NO           | YES                 |
+    | onion     | NO          | NO           | CONDITIONAL         |
+    | cve       | NO          | NO           | NO                  |
+    | md5/sha*  | NO          | NO           | NO                  |
+    | unknown   | NO          | NO           | NO                  |
+
+    Truthful skip: CVE, hash, unknown — žádné seed tasky, není co generovat.
+    Willing to SKIP: není false-positive seed generation.
+    """
+    # Normalize ioc_type lowercase for matching
+    t = ioc_type.lower()
+
+    if t == "domain":
+        return [
+            {
+                "task_type": "rdap_lookup",
+                "value": value,
+                "priority": 0.85,
+                "reason": f"top_graph_node/{ioc_type}",
+            },
+            {
+                "task_type": "domain_to_ct",
+                "value": value,
+                "priority": 0.80,
+                "reason": f"top_graph_node/{ioc_type}",
+            },
+        ]
+    elif t in ("ip", "ipv4", "ipv6"):
+        return [
+            {
+                "task_type": "rdap_lookup",
+                "value": value,
+                "priority": 0.85,
+                "reason": f"top_graph_node/{ioc_type}",
+            },
+        ]
+    elif t == "url":
+        # URL has host component — RDAP lookup makes sense
+        # domain_to_ct makes NO sense (URL is not a domain)
+        return [
+            {
+                "task_type": "rdap_lookup",
+                "value": value,
+                "priority": 0.80,
+                "reason": f"top_graph_node/{ioc_type}",
+            },
+        ]
+    elif t == "infohash":
+        return [
+            {
+                "task_type": "dht_infohash_lookup",
+                "value": value,
+                "priority": 0.90,
+                "reason": f"top_graph_node/{ioc_type}",
+            },
+        ]
+    elif t == "onion":
+        # Onion is not a DNS domain — no domain_to_ct
+        # DHT lookup is marginally relevant (some Tor research uses DHT)
+        # but skip entirely to be safe — no strong signal
+        return []
+    elif t in ("cve", "md5", "sha1", "sha256", "sha512", "sha384",
+               "md6", "ripemd160", "unknown", "email", "phone",
+               "ipv4_addr", "ipv6_addr", "mac_addr", "btc", "eth",
+               "xmpp", "jabber"):
+        # Truthful skip — these types have no meaningful follow-up seed
+        # CVE: vuln ID not a network observable
+        # Hashes: not domains, not infohashes, not IPs
+        # Unknown: no valid seeds possible
+        return []
+    else:
+        # Catch-all for any other type not explicitly handled:
+        # generate NO seeds — better to skip than to generate falsy task
+        return []
 
 
 def _make_serializable(obj: Any) -> Any:

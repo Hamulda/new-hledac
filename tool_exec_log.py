@@ -20,7 +20,7 @@ import json
 import logging
 import os
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -257,8 +257,21 @@ class ToolExecLog:
 
         Returns:
             The created ToolExecEvent
+
+        Raises:
+            RuntimeError: If log has been finalized/closed and can no longer
+                truthfully persist events.
         """
         import uuid
+
+        # Audit truth guard: after finalize() the audit trail is closed.
+        # log() must NOT silently mutate RAM chain state without persisting —
+        # that would create a false impression of a live append-only ledger.
+        if self._persist_file is None and self._seq > 0:
+            raise RuntimeError(
+                "ToolExecLog.log() called after finalize()/close(): "
+                "audit trail is closed, refusing to log event"
+            )
 
         # Compute hashes (never store raw data)
         input_hash = self._hash_bytes(input_data) if input_data else ""
@@ -321,8 +334,10 @@ class ToolExecLog:
             except Exception as e:
                 logger.error(f"Failed to persist tool event: {e}")
 
-        # Add to ring buffer
-        self._log.append(event)
+        # Add to ring buffer (only if still open — ring buffer is meaningful
+        # only while the ledger is open; closed logs should not accumulate RAM)
+        if self._persist_file is not None:
+            self._log.append(event)
 
         return event
 
@@ -378,7 +393,7 @@ class ToolExecLog:
             if event.chain_hash != expected_chain:
                 errors.append(
                     f"Hash mismatch at seq {event.seq_no}: "
-                    f"expected {expected_chain[:16]}..., got {event.chain_hash[:16]}..."
+                    f"expected {expected_chain[:16]}..., got {(event.chain_hash or '')[:16]}..."
                 )
 
             expected_head = event.chain_hash
@@ -425,7 +440,7 @@ class ToolExecLog:
     def __enter__(self) -> "ToolExecLog":
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, *_: Any) -> None:
         self.close()
 
 

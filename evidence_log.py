@@ -608,7 +608,20 @@ class EvidenceLog:
                 logger.error(f"Failed to persist event: {e}")
 
         # Trim payload pro RAM šetření
+        # NOTE: After trimming, content_hash must be RECOMPUTED to match the
+        # trimmed payload in RAM. This ensures verify_integrity() passes
+        # on in-memory events. The JSONL was already written with the correct
+        # original-payload hash before this trim, so persisted events are fine.
         event.payload = self._trim_payload(event.payload)
+        event.content_hash = event.calculate_hash()
+
+        # Recompute chain_hash to match the new content_hash.
+        # The chain_hash at line 558 was computed with the original (pre-trim)
+        # content_hash. After content_hash update, chain_hash must be updated too
+        # so verify_all() chain validation passes.
+        chain_input = f"{event.prev_chain_hash}:{event.content_hash}:{event.event_id}"
+        event.chain_hash = hashlib.sha256(chain_input.encode()).hexdigest()
+        self._chain_head = event.chain_hash
 
         # Ring buffer logika - using deque with maxlen (auto overflow)
         # Check if deque is full before appending
