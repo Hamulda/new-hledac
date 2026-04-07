@@ -111,7 +111,16 @@ class FeedDiscoveryBatchResult(msgspec.Struct, frozen=True, gc=False):
 
 
 class FeedSeed(msgspec.Struct, frozen=True, gc=False):
-    """Single curated OSINT-relevant feed seed."""
+    """
+    Single curated OSINT-relevant RSS/Atom feed seed.
+
+    ``source`` field values:
+    - ``"curated_seed"`` — runtime-usable RSS/Atom feed (primary surface)
+    - ``"topology_candidate"`` — non-feed endpoint (intelligence/topology candidate only)
+
+    Only ``curated_seed`` sources belong in the runtime RSS/Atom feed surface.
+    ``topology_candidate`` sources are excluded from feed-surface processing.
+    """
 
     feed_url: str
     label: str
@@ -1138,20 +1147,32 @@ async def async_discover_feed_urls(
 
 def get_default_feed_seeds() -> tuple[FeedSeed, ...]:
     """
-    Return a small typed set of OSINT-relevant curated feed seeds.
+    Return a typed set of OSINT-relevant curated feed seeds.
 
     No network calls are made at import time. Priority is non-zero only
     for feeds that are primary OSINT sources; supporting feeds get 0.
+
+    Source values:
+    - ``curated_seed`` — runtime RSS/Atom feed (belongs in feed-surface processing)
+    - ``topology_candidate`` — non-feed endpoint (intelligence/topology candidate only,
+      excluded from RSS/Atom feed-surface processing but kept in this surface
+      for source completeness and auditability)
+
+    Runtime RSS/Atom surface: CISA HNS, NVD CVE RSS, The Hacker News, URLhaus,
+    WeLiveSecurity, BleepingComputer.
+    Topology/intelligence candidates: CISA KEV JSON, NVD CVE JSON, Wayback CDX,
+    CommonCrawl CDX.
     """
     return (
-        # CISA — critical infrastructure advisories
+        # ---- Runtime RSS/Atom feed surface ----
+        # CISA — critical infrastructure advisories (RSS)
         FeedSeed(
             feed_url="https://www.cisa.gov/feeds/hns.xml",
             label="CISA HNS",
             source="curated_seed",
             priority=10,
         ),
-        # NVD — CVE database
+        # NVD — CVE database (RSS)
         FeedSeed(
             feed_url="https://nvd.nist.gov/feeds/xml/cve/misc/nvd-rss.xml",
             label="NVD CVE RSS",
@@ -1165,53 +1186,54 @@ def get_default_feed_seeds() -> tuple[FeedSeed, ...]:
             source="curated_seed",
             priority=5,
         ),
-        # Abuse.ch URLhaus — malware URL blocklist
+        # Abuse.ch URLhaus — malware URL blocklist (RSS)
         FeedSeed(
             feed_url="https://abuse.ch/feeds/urlhaus/",
             label="URLhaus",
             source="curated_seed",
             priority=10,
         ),
-        # WeLiveSecurity — ESET security research
+        # WeLiveSecurity — ESET security research (RSS)
         FeedSeed(
             feed_url="https://www.welivesecurity.com/feed/",
             label="WeLiveSecurity",
             source="curated_seed",
             priority=3,
         ),
-        # CISA Known Exploited Vulnerabilities JSON feed (Sprint 8UF B.3)
-        FeedSeed(
-            feed_url="https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
-            label="CISA KEV",
-            source="curated_seed",
-            priority=10,
-        ),
-        # NVD CVE JSON feed — recent vulnerabilities (Sprint 8UF B.3)
-        FeedSeed(
-            feed_url="https://services.nvd.nist.gov/rest/json/cves/2.0?pubStartDate=2025-01-01T00:00:00.000&pubEndDate=2025-12-31T23:59:59.999",
-            label="NVD CVE JSON",
-            source="curated_seed",
-            priority=8,
-        ),
-        # BleepingComputer — security news (Sprint 8UF B.3)
+        # BleepingComputer — security news (RSS)
         FeedSeed(
             feed_url="https://www.bleepingcomputer.com/feed/",
             label="BleepingComputer",
             source="curated_seed",
             priority=4,
         ),
-        # Sprint 8VB: Wayback CDX — historical web archive
+        # ---- Topology/intelligence candidates (non-feed endpoints) ----
+        # CISA KEV — Known Exploited Vulnerabilities catalog (JSON, not RSS/Atom)
+        FeedSeed(
+            feed_url="https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+            label="CISA KEV",
+            source="topology_candidate",
+            priority=10,
+        ),
+        # NVD CVE JSON — NVD REST API for CVEs (JSON, not RSS/Atom)
+        FeedSeed(
+            feed_url="https://services.nvd.nist.gov/rest/json/cves/2.0?pubStartDate=2025-01-01T00:00:00.000&pubEndDate=2025-12-31T23:59:59.999",
+            label="NVD CVE JSON",
+            source="topology_candidate",
+            priority=8,
+        ),
+        # Wayback CDX — Wayback Machine CDX API (JSON, not RSS/Atom)
         FeedSeed(
             feed_url="https://web.archive.org/cdx/search/cdx?url=*.com&output=json&limit=20",
             label="Wayback CDX",
-            source="curated_seed",
+            source="topology_candidate",
             priority=1,
         ),
-        # Sprint 8VB: CommonCrawl CDX — petabyte crawl index
+        # CommonCrawl CDX — CommonCrawl index endpoint (WARC index, not RSS/Atom)
         FeedSeed(
             feed_url="https://index.commoncrawl.org/CC-MAIN-2024-51-index",
             label="CommonCrawl CDX",
-            source="curated_seed",
+            source="topology_candidate",
             priority=1,
         ),
     )
@@ -1241,12 +1263,28 @@ def get_default_feed_seed_truth() -> dict[str, Any]:
     Return a truth-surface dict describing the current curated seed state.
 
     Intended for test and audit use. Side-effect free.
+
+    Truth surface fields:
+    - ``count`` — total number of curated seeds (runtime + topology)
+    - ``runtime_rss_atom_count`` — seeds with source=curated_seed (runtime RSS/Atom feeds)
+    - ``topology_candidate_count`` — seeds with source=topology_candidate
+    - ``runtime_rss_atom_urls`` — sorted list of runtime RSS/Atom feed URLs
+    - ``topology_candidate_urls`` — sorted list of non-feed endpoint URLs
+    - ``all_urls`` — sorted list of all seed URLs
+    - ``has_authenticated_reuters`` — True if Reuters feed is present (should be absent)
     """
     seeds = get_default_feed_seeds()
+    runtime = [s for s in seeds if s.source == "curated_seed"]
+    topology = [s for s in seeds if s.source == "topology_candidate"]
     return {
         "count": len(seeds),
-        "identities": sorted(normalize_seed_identity(s) for s in seeds),
-        "urls": sorted(s.feed_url for s in seeds),
+        "runtime_rss_atom_count": len(runtime),
+        "topology_candidate_count": len(topology),
+        "runtime_rss_atom_identities": sorted(normalize_seed_identity(s) for s in runtime),
+        "topology_candidate_identities": sorted(normalize_seed_identity(s) for s in topology),
+        "runtime_rss_atom_urls": sorted(s.feed_url for s in runtime),
+        "topology_candidate_urls": sorted(s.feed_url for s in topology),
+        "all_urls": sorted(s.feed_url for s in seeds),
         "has_authenticated_reuters": any(
             "reuters.com" in s.feed_url.lower() for s in seeds
         ),

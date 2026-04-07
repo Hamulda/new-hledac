@@ -467,7 +467,7 @@ def _unload_model_legacy(
         gc.collect()
 
         # Krok 5: mx.eval([])
-        mx = _get_mlx()
+        mx = _get_mlx_safe()
         if mx is not None:
             try:
                 mx.eval([])
@@ -527,8 +527,6 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
-import msgspec
-
 logger = logging.getLogger(__name__)
 
 # CPU executor pro synchronní MLX inference (z utils/executors.py)
@@ -540,18 +538,19 @@ except Exception:
 
 # Lazy importy pro MLX
 _mlx: Any = None
+_MLX_AVAILABLE_SAFETY: bool = False
 
 
 def _get_mlx_safe() -> Any:
-    global _mx, _mlx_available
+    global _mx, _MLX_AVAILABLE_SAFETY
     if _mx is None:
         try:
             import mlx.core as mx
             _mx = mx
-            _mlx_available = True
+            _MLX_AVAILABLE_SAFETY = True
         except ImportError:
-            _mlx = None
-            _mlx_available = False
+            _mx = None
+            _MLX_AVAILABLE_SAFETY = False
     return _mx
 
 
@@ -615,7 +614,7 @@ class ModelLifecycle:
     # Lazy load
     # ------------------------------------------------------------------
 
-    async def _ensure_loaded(self) -> tuple[Any, Any, Path]:
+    async def _ensure_loaded(self) -> tuple[Any, Any, Path | None]:
         """Lazy load s 3-tier fallback. Volá se před každým generate."""
         if self._loaded and self._model is not None:
             return (self._model, self._tokenizer, self._model_path)

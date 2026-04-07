@@ -42,7 +42,6 @@ except ImportError:
 # Chosen because: (a) fits within M1 8GB UMA budget, (b) covers typical
 # lightweight research requests, (c) is well above the 100MB minimum floor.
 _FALLBACK_RAM_ESTIMATE_MB: float = 500.0
-_FALLBACK_RAM_ESTIMATE_GB: float = 0.5
 
 
 @dataclass
@@ -52,6 +51,10 @@ class ResourceBudget:
     time_sec: float
     priority: int
     request_id: str
+    # F130B: context stored so release() can extract features for learning.
+    # Without this field, release() has no access to the original ctx,
+    # and the MLX linear regression model never learns from actual data.
+    context: Any = None
 
 
 class ResourceExhausted(Exception):
@@ -94,11 +97,10 @@ class ResourceAllocator:
 
     def _update_model(self):
         """Update MLX linear regression model from history."""
+        # F130B: Single warmup gate — model trains once history reaches WARMUP_QUERIES.
+        # warmup_counter is incremented in release() when history is empty; kept for
+        # compatibility. Train when history is large enough, regardless of counter.
         if len(self.history) < self.WARMUP_QUERIES:
-            self.warmup_counter += 1
-            return
-
-        if self.warmup_counter < self.WARMUP_QUERIES:
             self.warmup_counter += 1
             return
 
@@ -154,7 +156,8 @@ class ResourceAllocator:
             ram_mb=int(predicted),
             time_sec=300.0,
             priority=priority,
-            request_id=request_id
+            request_id=request_id,
+            context=ctx,  # F130B: stored for release() learning path
         )
 
         self.active_requests[request_id] = budget
@@ -303,41 +306,65 @@ def get_adaptive_concurrency() -> int:
 
 class AdaptiveSemaphore:
     """
-    Semaphore jehož limit se adaptivně mění podle memory pressure.
-    Drop-in replacement pro asyncio.Semaphore v orchestrátoru.
+    Semaphore whose effective limit adapts to memory pressure.
+    Drop-in replacement for asyncio.Semaphore in the orchestrator.
+
+    F130B fix: previous implementation replaced asyncio.Semaphore on limit change,
+    orphaning holders — their release() called the new (wrong) semaphore object.
+    This version never replaces the semaphore; it enforces the effective limit
+    via an active-holder counter, so release() always pairs with the correct object.
+
+    Invariants:
+    - Internal semaphore ceiling = _CONCURRENCY_CEILING (3 on M1 8GB).
+    - Effective limit is enforced per-acquire via _active_holders counter.
+    - When limit drops below active holders, new acquires are rejected immediately.
+    - No background cleanup tasks needed.
     """
 
-    def __init__(self, initial_limit: int = _CONCURRENCY_CEILING):
-        self._limit = initial_limit
-        self._semaphore = asyncio.Semaphore(initial_limit)
-        self._last_check = time.monotonic()
-        self._check_interval = 5.0  # přehodnoť každých 5s
+    _CEILING = _CONCURRENCY_CEILING
 
-    async def _maybe_update_limit(self) -> None:
-        """Aktualizuj limit pokud uplynulo dost času od posledního checku."""
+    def __init__(self, initial_limit: int = _CONCURRENCY_CEILING):
+        self._effective_limit = initial_limit
+        self._sem = asyncio.Semaphore(self._CEILING)
+        self._active_holders = 0
+        self._lock = asyncio.Lock()
+        self._last_check = 0.0
+        self._check_interval = 5.0
+
+    async def _compute_effective_limit(self) -> int:
+        """Recompute effective limit if check_interval has elapsed."""
         now = time.monotonic()
         if now - self._last_check < self._check_interval:
-            return
+            return self._effective_limit
         self._last_check = now
+        self._effective_limit = get_adaptive_concurrency()
+        return self._effective_limit
 
-        new_limit = get_adaptive_concurrency()
-        if new_limit != self._limit:
-            self._limit = new_limit
-            # Vytvoř nový semaphore s novým limitem
-            # POZOR: existující holders zůstanou — nový limit se projeví až po release
-            self._semaphore = asyncio.Semaphore(new_limit)
-
-    async def __aenter__(self):
-        await self._maybe_update_limit()
-        await self._semaphore.acquire()
+    async def __aenter__(self) -> "AdaptiveSemaphore":
+        async with self._lock:
+            await self._compute_effective_limit()
+            if self._active_holders >= self._effective_limit:
+                raise RuntimeError(
+                    f"AdaptiveSemaphore: concurrency limit ({self._effective_limit}) "
+                    f"reached ({self._active_holders} active)"
+                )
+            self._active_holders += 1
+        await self._sem.acquire()
         return self
 
-    async def __aexit__(self, *args):
-        self._semaphore.release()
+    async def __aexit__(self, *args) -> None:
+        self._sem.release()
+        async with self._lock:
+            self._active_holders -= 1
 
     @property
     def current_limit(self) -> int:
-        return self._limit
+        return self._effective_limit
+
+    @property
+    def active_holders(self) -> int:
+        """For testing / diagnostics only."""
+        return self._active_holders
 
 
 def get_mlx_memory_mb() -> float:

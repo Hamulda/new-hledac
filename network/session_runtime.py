@@ -184,13 +184,25 @@ def get_session_runtime_status() -> dict:
     Returns:
         dict with keys:
             - session_created: bool  — a session instance exists or existed
-            - session_closed: bool   — currently closed
+            - session_closed: bool   — currently closed (truthful, checks .closed)
             - uvloop_enabled: bool   — uvloop was successfully installed
             - last_error: str | None — last error string if any
+
+    Truthfulness contract:
+        - session_closed reflects the actual session.closed state when
+          an instance exists; falls back to the _session_closed marker
+          only when _session_instance is None (e.g. after sync close).
     """
+    # Authoritative session closed state — prefer the actual session.closed
+    # when an instance exists; fall back to marker for sync-close path
+    if _session_instance is not None:
+        session_actually_closed = _session_instance.closed
+    else:
+        session_actually_closed = _session_closed
+
     return {
         "session_created": _session_instance is not None or _session_closed,
-        "session_closed": _session_closed,
+        "session_closed": session_actually_closed,
         "uvloop_enabled": _uvloop_enabled,
         "last_error": _last_error,
     }

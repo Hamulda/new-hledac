@@ -942,6 +942,9 @@ async def async_run_live_feed_pipeline(
     _entries_with_content_seen = 0
     _MAX_SAMPLE_ENTRIES = 3
     _MAX_SAMPLE_CHARS = 160
+    # Sprint F300C: separate enriched sample (post-enrichment text)
+    _sample_enriched_texts: list[str] = []
+    _sample_enriched_texts_truncated = False
 
     for entry in entries:
         entry_url = getattr(entry, "entry_url", "") or f"urn:feed:entry:{getattr(entry, 'title', '')[:64]}"
@@ -1016,6 +1019,12 @@ async def async_run_live_feed_pipeline(
             if article_fallback_used:
                 article_fallback_fetch_successes += 1
             enriched_text_chars_total += assembled_len
+            # F300C: capture post-enrichment text for enriched sample (bounded, separate from scanned sample)
+            if len(_sample_enriched_texts) < _MAX_SAMPLE_ENTRIES:
+                enriched_trunc = clean_text[:_MAX_SAMPLE_CHARS]
+                if len(clean_text) > _MAX_SAMPLE_CHARS:
+                    _sample_enriched_texts_truncated = True
+                _sample_enriched_texts.append(enriched_trunc)
             if matched > 0:
                 entries_with_hits += 1
                 findings_built_pre_store += len(findings)
@@ -1116,11 +1125,11 @@ async def async_run_live_feed_pipeline(
         article_fallback_fetch_successes=article_fallback_fetch_successes,
         enriched_text_chars_total=enriched_text_chars_total,
         avg_enriched_text_len=(
-            enriched_text_chars_total / entries_with_text
-            if entries_with_text > 0
+            enriched_text_chars_total / (entries_with_rich_feed_content + entries_with_article_fallback)
+            if (entries_with_rich_feed_content + entries_with_article_fallback) > 0
             else 0.0
         ),
-        sample_enriched_texts=tuple(_sample_texts),
+        sample_enriched_texts=tuple(_sample_enriched_texts),
         enrichment_phase_used="article_fallback" if entries_with_article_fallback > 0 else ("feed_rich_content" if entries_with_rich_feed_content > 0 else "none"),
         temporal_feed_vocabulary_mismatch=False,
     )
