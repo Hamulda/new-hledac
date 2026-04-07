@@ -183,7 +183,7 @@ class IOCGraph:
             if ioc_copy:
                 ioc_ids = await self.upsert_ioc_batch(ioc_copy)
             if obs_copy:
-                await self._record_observation_batch_sync(obs_copy)
+                await self._record_observation_batch_sync_async(obs_copy)
         except Exception as e:
             import logging
             logging.warning(f"[IOCGraph] flush_buffers failed: {e}")
@@ -195,37 +195,12 @@ class IOCGraph:
         )
         return {"ioc_flushed": len(ioc_ids), "obs_flushed": len(obs_copy)}
 
-    async def _record_observation_batch_sync(
+    async def _record_observation_batch_sync_async(
         self, obs: list[tuple[str, str, str, float, str]]
     ) -> None:
-        """Synchronous batch observation insert — runs on _executor thread."""
+        """Async wrapper — runs sync impl on _executor thread via run_in_executor."""
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(self._executor, self._record_observation_batch_impl, obs)
-
-    def _record_observation_batch_impl(
-        self, obs: list[tuple[str, str, str, float, str]]
-    ) -> None:
-        """Sync implementation — runs on _executor thread."""
-        conn = self._conn
-        if conn is None:
-            return
-        for id_a, id_b, fid, ts, src in obs:
-            try:
-                res = conn.execute(
-                    "MATCH (a:IOC)-[r:OBSERVED]->(b:IOC) "
-                    "WHERE a.id=$id_a AND b.id=$id_b RETURN r",
-                    {"id_a": id_a, "id_b": id_b},
-                )
-                if not res.has_next():
-                    conn.execute(
-                        "MATCH (a:IOC), MATCH (b:IOC) "
-                        "WHERE a.id=$id_a AND b.id=$id_b "
-                        "CREATE (a)-[:OBSERVED {finding_id:$fid, "
-                        "first_seen:$ts, last_seen:$ts, source_type:$src}]->(b)",
-                        {"id_a": id_a, "id_b": id_b, "fid": fid, "ts": ts, "src": src},
-                    )
-            except Exception:
-                pass
+        await loop.run_in_executor(self._executor, self._record_observation_batch_sync, obs)
 
     # -------------------------------------------------------------------------
     # Lifecycle
@@ -435,18 +410,6 @@ class IOCGraph:
                 "SET r.last_seen = $ts",
                 {"ida": ioc_id_a, "idb": ioc_id_b, "ts": ts},
             )
-
-    # -------------------------------------------------------------------------
-    # Batch Upsert (Sprint 8RA)
-    #
-    # CANONICAL SEMANTICS (Sprint 8TD):
-    #   upsert_ioc_batch(iocs) -> list of NEWLY CREATED node IDs only.
-    #   Running twice with same inputs: first call returns N created IDs,
-    #   second call returns [] (all nodes already exist).
-    #   Use graph_stats() if you need total node count.
-    #
-    #   flush_buffers() uses this to report 'ioc_flushed' = newly created count.
-    # -------------------------------------------------------------------------
 
     # -------------------------------------------------------------------------
     # Batch Upsert (Sprint 8RA)

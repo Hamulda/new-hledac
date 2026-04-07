@@ -1010,7 +1010,7 @@ class DuckPGQGraph:
             result = self.con.execute(f"""
                 INSERT OR IGNORE INTO ioc_nodes (id, value, ioc_type, confidence, source)
                 SELECT
-                    hash(ioc) & 9223372036854775807,
+                    {hex(0x7FFFFFFFFFFFFFFF)} & CAST(sha1(ioc) AS BIGINT),
                     ioc,
                     ioc_type,
                     MAX(confidence),
@@ -1103,37 +1103,44 @@ class DuckPGQGraph:
 
     def find_connected(self, value: str, max_hops: int = 2) -> list[dict]:
         """SQL/PGQ MATCH s recursive CTE fallback. max_hops je vzdy respektován."""
+        # PGQ path: TRY first, transparent fallback to CTE on any GRAPH_TABLE error.
+        # _DUCKPGQ_AVAILABLE means extension is loaded — but ioc_graph property graph
+        # may not exist, so we guard with try/except and fall back gracefully.
         if _DUCKPGQ_AVAILABLE:
-            sql = f"""
-                FROM GRAPH_TABLE(ioc_graph
-                    MATCH (a:ioc_nodes)
-                          -[e:ioc_edges*1..{max_hops}]->
-                          (b:ioc_nodes)
-                    WHERE a.value = ?
-                    COLUMNS (b.value, b.ioc_type, b.confidence, b.source)
-                ) LIMIT 100
-            """
-            params = [value]
-        else:
-            # max_hops jako bound parameter — NEnatvrdo
-            sql = """
-                WITH RECURSIVE paths(dst_id, depth) AS (
-                    SELECT e.dst_id, 1
-                    FROM ioc_edges e
-                    JOIN ioc_nodes n ON n.id = e.src_id
-                    WHERE n.value = ?
-                    UNION ALL
-                    SELECT e.dst_id, p.depth + 1
-                    FROM ioc_edges e
-                    JOIN paths p ON p.dst_id = e.src_id
-                    WHERE p.depth < ?
-                )
-                SELECT n.value, n.ioc_type, n.confidence, n.source
-                FROM paths p
-                JOIN ioc_nodes n ON n.id = p.dst_id
-                LIMIT 100
-            """
-            params = [value, max_hops]
+            try:
+                sql = f"""
+                    FROM GRAPH_TABLE(ioc_graph
+                        MATCH (a:ioc_nodes)
+                              -[e:ioc_edges*1..{max_hops}]->
+                              (b:ioc_nodes)
+                        WHERE a.value = ?
+                        COLUMNS (b.value, b.ioc_type, b.confidence, b.source)
+                    ) LIMIT 100
+                """
+                return self.con.execute(sql, [value]).fetchdf().to_dict("records")
+            except Exception as e:
+                logger.debug(f"[GRAPH] PGQ path failed, falling back to CTE: {e}")
+                # Fall through to CTE path — do NOT return []
+
+        # CTE fallback: always runnable, max_hops is a bound parameter
+        sql = """
+            WITH RECURSIVE paths(dst_id, depth) AS (
+                SELECT e.dst_id, 1
+                FROM ioc_edges e
+                JOIN ioc_nodes n ON n.id = e.src_id
+                WHERE n.value = ?
+                UNION ALL
+                SELECT e.dst_id, p.depth + 1
+                FROM ioc_edges e
+                JOIN paths p ON p.dst_id = e.src_id
+                WHERE p.depth < ?
+            )
+            SELECT n.value, n.ioc_type, n.confidence, n.source
+            FROM paths p
+            JOIN ioc_nodes n ON n.id = p.dst_id
+            LIMIT 100
+        """
+        params = [value, max_hops]
         try:
             return self.con.execute(sql, params).fetchdf().to_dict("records")
         except Exception as e:
@@ -1144,7 +1151,7 @@ class DuckPGQGraph:
         nodes = self.con.execute("SELECT COUNT(*) FROM ioc_nodes").fetchone()[0]
         edges = self.con.execute("SELECT COUNT(*) FROM ioc_edges").fetchone()[0]
         return {"nodes": nodes, "edges": edges,
-                "pgq_active": _DUCKPGQ_AVAILABLE}
+                "pgq_available": _DUCKPGQ_AVAILABLE}
 
 
 # Module availability flag

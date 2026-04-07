@@ -50,14 +50,17 @@ class NymTransport(Transport):
         self.circuit_breaker_last_failure = 0.0
 
     async def start(self):
-        self.client_process = await asyncio.create_subprocess_exec(
-            self.nym_client_path,
-            '--id', 'hledac',
-            '--config-dir', str(self.data_dir),
-            '--port', str(self.websocket_port),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
+        try:
+            self.client_process = await asyncio.create_subprocess_exec(
+                self.nym_client_path,
+                '--id', 'hledac',
+                '--config-dir', str(self.data_dir),
+                '--port', str(self.websocket_port),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+        except FileNotFoundError:
+            raise RuntimeError(f"nym-client not found at {self.nym_client_path}")
         logger.info("Nym client process started")
 
         self._stdout_task = asyncio.create_task(self._drain_stream(self.client_process.stdout, 'stdout'))
@@ -127,7 +130,12 @@ class NymTransport(Transport):
             await self.websocket.close()
         if self.client_process:
             self.client_process.terminate()
-            await self.client_process.wait()
+            try:
+                await asyncio.wait_for(self.client_process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Nym process did not terminate gracefully, killing")
+                self.client_process.kill()
+                await self.client_process.wait()
 
     async def wait_ready(self):
         await self._ready.wait()
@@ -158,6 +166,7 @@ class NymTransport(Transport):
 
     async def _sender_loop(self):
         while not self._stop_event.is_set():
+            msg_id = None
             try:
                 msg_id, msg = await self._outgoing_queue.get()
                 await self.websocket.send(json.dumps(msg))
@@ -211,6 +220,9 @@ class NymTransport(Transport):
             try:
                 self.websocket = await self._websockets.connect(f"ws://127.0.0.1:{self.websocket_port}")
                 logger.info("Nym websocket reconnected")
+                # Reset breaker state on successful reconnect
+                self.circuit_breaker_open = False
+                self.circuit_breaker_failures = 0
                 return
             except ConnectionRefusedError:
                 await asyncio.sleep(1)

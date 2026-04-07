@@ -167,22 +167,21 @@ class SourceAdapter(ABC):
         return xxhash.xxh64("|".join(f or "" for f in fields)).hexdigest()
 
     @staticmethod
-    def _fetch_text(
+    async def _fetch_text(
         url: str,
         timeout_s: float = 30.0,
         max_bytes: int = 5_000_000,
     ) -> tuple[str | None, str | None]:
         """
-        Fetch text content via public_fetcher.
+        Fetch text content via public_fetcher (async).
 
         Returns (text, error). One is always None.
         """
-        import asyncio
         from hledac.universal.fetching.public_fetcher import async_fetch_public_text
 
         try:
-            result: FetchResult = asyncio.run(
-                async_fetch_public_text(url, timeout_s=timeout_s, max_bytes=max_bytes)
+            result: FetchResult = await async_fetch_public_text(
+                url, timeout_s=timeout_s, max_bytes=max_bytes
             )
         except Exception as e:
             return None, str(e)
@@ -241,7 +240,7 @@ class NvdApiAdapter(SourceAdapter):
             f"&startIndex=0"
         )
 
-        text, error = self._fetch_text(url, timeout_s=30.0, max_bytes=5_000_000)
+        text, error = await self._fetch_text(url, timeout_s=30.0, max_bytes=5_000_000)
         if error or text is None:
             return ()
 
@@ -375,7 +374,7 @@ class CisaKevAdapter(SourceAdapter):
         """
         limit = min(max(limit, 1), self.HARD_LIMIT)
 
-        text, error = self._fetch_text(self.API_URL, timeout_s=45.0, max_bytes=10_000_000)
+        text, error = await self._fetch_text(self.API_URL, timeout_s=45.0, max_bytes=10_000_000)
         if error or text is None:
             return ()
 
