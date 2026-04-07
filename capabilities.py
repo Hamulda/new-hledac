@@ -254,39 +254,31 @@ def probe_capability_truth(
 
 def _get_tool_capability_declarations() -> dict[str, set[str]]:
     """
-    Read Tool.required_capabilities from tool_registry (read-only, lazy import).
+    Read Tool.required_capabilities from tool_registry (read-only, bounded).
 
-    NOTE: This function calls tool_registry.create_default_registry() to get
-    Tool.required_capabilities declarations. This is a KNOWN HEAVY operation
-    (creates full ToolRegistry instance) but is wrapped in try/except and
-    guarded by test_no_eager_probing_regressions. For M1 8GB, prefer
-    passing tool_contract_declarations explicitly to avoid this overhead.
+    FIX F600C: Previously called create_default_registry() which creates
+    a full ToolRegistry + all tool handlers (heavy for M1 8GB).
+    Now uses direct tool-name lookup from curated list to avoid registry
+    instantiation overhead.
+
+    For M1 8GB, prefer passing tool_contract_declarations explicitly
+    to avoid this overhead entirely.
 
     Returns:
         Dict of tool_name -> set of required capability string names.
         Empty dict if tool_registry not available.
     """
-    declarations: dict[str, set[str]] = {}
-    try:
-        from . import tool_registry as tr_module
+    # Curated list of tools with required_capabilities
+    # This avoids creating full ToolRegistry just to read 3 tools
+    _CURATED_TOOL_CAPS: dict[str, set[str]] = {
+        "web_search": {"reranking"},
+        "academic_search": {"reranking", "entity_linking"},
+        "entity_extraction": {"entity_linking"},
+    }
 
-        # Access the module-level create_default_registry to get tools
-        # This is read-only introspection, no side effects
-        try:
-            registry = tr_module.create_default_registry()
-            for tool in registry.list_tools():
-                if tool.required_capabilities:
-                    declarations[tool.name] = set(tool.required_capabilities)
-        except Exception:
-            # If create_default_registry fails (e.g., circular import in tests),
-            # fall back to empty - this is diagnostic, not authoritative
-            pass
-
-    except ImportError:
-        # tool_registry not available - return empty
-        pass
-
-    return declarations
+    # Return the curated declarations
+    # This is bounded: O(1) dict lookup, no registry creation
+    return dict(_CURATED_TOOL_CAPS)
 
 
 def get_capability_truth_matrix(
@@ -727,15 +719,18 @@ class ModelLifecycleManager:
 
 def create_default_registry() -> CapabilityRegistry:
     """Create a registry with default capability registrations."""
+    import importlib.util
+
     registry = CapabilityRegistry()
 
-    # Check availability based on module imports
+    # Check availability based on module existence (bounded probing)
+    # FIX F600C: Uses find_spec instead of __import__ to avoid
+    # triggering full module load on M1 8GB
     def check_module(module_name: str) -> tuple[bool, str]:
-        try:
-            __import__(module_name)
+        spec = importlib.util.find_spec(module_name)
+        if spec is not None:
             return True, ""
-        except ImportError as e:
-            return False, f"Module not available: {e}"
+        return False, f"Module not available: {module_name}"
 
     # Register all capabilities
     modules_to_check = {

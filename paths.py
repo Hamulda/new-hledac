@@ -5,10 +5,13 @@
 from __future__ import annotations
 
 __all__ = [
+    # RAMdisk / fallback roots
     "RAMDISK_ROOT",
     "FALLBACK_ROOT",
     "RAMDISK_ACTIVE",
     "CACHE_ROOT",
+    "LIGHTRAG_ROOT",
+    # Runtime path constants
     "DB_ROOT",
     "LMDB_ROOT",
     "SPRINT_LMDB_ROOT",
@@ -20,16 +23,23 @@ __all__ = [
     "SOCKETS_ROOT",
     "SPRINT_STORE_ROOT",
     "IOC_DB_PATH",
+    # Sprint artifact helpers
     "get_sprint_parquet_dir",
     "get_ioc_db_path",
     "get_sprint_report_path",
     "get_sprint_json_report_path",
     "get_sprint_next_seeds_path",
+    # Boot hygiene
     "assert_ramdisk_alive",
     "cleanup_fallback_artifacts",
+    # LMDB
     "lmdb_map_size",
     "get_lmdb_max_size_mb",
     "open_lmdb",
+    # Stale lock/socket cleanup (legacy boot hygiene helpers — prefer open_lmdb
+    # for new code; these are kept for the AO.initialize() bootstrap path)
+    "cleanup_stale_lmdb_locks",
+    "cleanup_stale_sockets",
 ]
 
 # Sprint 8VG A.3: Warn if 'None' file exists on disk

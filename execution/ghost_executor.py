@@ -510,6 +510,7 @@ class GhostExecutor:
             ActionType.FACT_CHECK.value: self._action_fact_check,
             ActionType.STEALTH_HARVEST.value: self._action_stealth_harvest,
             ActionType.OSINT_DISCOVERY.value: self._action_osint_discovery,
+            ActionType.ERROR.value: self._action_error,
         }
     
     async def initialize(self) -> None:
@@ -621,9 +622,11 @@ class GhostExecutor:
             driver = await self._get_network_driver()
             
             # Použít stealth pokud je povolen
-            if self.enable_stealth and self._stealth_manager:
-                # TODO: Implementovat stealth google search
-                pass
+            if self.enable_stealth:
+                stealth_mgr = await self._get_stealth_manager()
+                if stealth_mgr:
+                    # TODO: Implementovat stealth google search
+                    pass
             
             # Prozatím placeholder
             return ActionResult(
@@ -926,7 +929,16 @@ class GhostExecutor:
     
     async def _action_crack(self, params, context):
         return ActionResult(success=True, action="crack", data={}).to_dict()
-    
+
+    async def _action_error(self, params, context):
+        """Error placeholder — used when an action fails to resolve."""
+        error_msg = params.get("error", "Unknown error") if params else "Unknown error"
+        return ActionResult(
+            success=False,
+            action="error",
+            data={"error": error_msg},
+        ).to_dict()
+
     # =====================================================================
     # CLEANUP
     # =====================================================================

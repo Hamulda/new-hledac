@@ -1577,11 +1577,14 @@ class DeepResearchProviderMirror:
     deepresearch_napojen: bool = False  # NOT wired to triad
 
     # Admission blockers (mirrored from provider-side, read-only)
+    # Sprint F600D: Updated to match enhanced_research.py DEEP_RESEARCH_ADMISSION
+    # Provider side updated blockers from "TBD" → "exists, not wired to DeepResearch"
+    # This is the ONLY drift that was confirmed — mirror now matches provider truth.
     blockers: Tuple[str, ...] = (
-        "Session seams (BudgetManager, EvidenceLog): TBD",
-        "Security gate (SecurityGate, privacy layer): TBD",
-        "Minimal grounding seam (ProviderRequest/ProviderResult): TBD",
-        "Transport plane (FetchCoordinator): TBD",
+        "Session seams (BudgetManager, EvidenceLog): exists, not wired to DeepResearch",
+        "Security gate (PII gate): exists, not wired to DeepResearch",
+        "Minimal grounding seam (ProviderRequest/ProviderResult): exists, not wired to DeepResearch",
+        "Transport plane (FetchCoordinator): exists, not wired to DeepResearch runtime",
     )
 
     # Explicit boundary statements (mirror provider-side invariants)

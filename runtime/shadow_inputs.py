@@ -24,7 +24,7 @@ Feature flag vocabulary (scaffold only, NOT activated):
 Inventory of shadow inputs:
 1. lifecycle_snapshot   → SprintLifecycleManager.snapshot()
 2. export_handoff       → ExportHandoff (typed) or scorecard dict (compat)
-3. graph_summary        → duckdb_store._ioc_graph.stats() (DuckPGQGraph)
+3. graph_summary        → duckdb_store.get_graph_stats() (public seam)
 4. graph_backend_caps   → which graph backend (Kuzu vs DuckPGQ)
 5. model/control_facts → AnalyzerResult / AutoResearchProfile
 6. provider_recommend   → from capabilities.py registry (future)
@@ -35,7 +35,7 @@ Owned by: this module (shadow scaffold)
 Future owners:
 - lifecycle_snapshot → runtime/sprint_lifecycle.py (already there)
 - export_handoff → export/COMPAT_HANDOFF.py (already there)
-- graph_summary → knowledge/duckdb_store.py (duckdb_store._ioc_graph.stats())
+- graph_summary → knowledge/duckdb_store.py (duckdb_store.get_graph_stats() public seam)
 - graph_backend_caps → knowledge/ioc_graph.py or knowledge/graph_layer.py
 - model/control_facts → autonomous_analyzer.py / capabilities.py
 - provider_recommend → capabilities.py CapabilityRegistry
@@ -257,19 +257,25 @@ class GraphSummaryBundle:
     """
     Bundle graph-related shadow inputs.
 
-    source: duckdb_store._ioc_graph.stats() (DuckPGQGraph)
+    source: duckdb_store.get_graph_stats() (public seam)
     compat source: scorecard["top_graph_nodes"]
 
     Shrouded ownership — DIAGNOSTIC SCAFFOLD, NOT a shared contract.
-    Canonical facts owned by knowledge/duckdb_store.py (DuckPGQGraph.stats()).
+    Canonical facts owned by knowledge/duckdb_store.py (public seam: get_graph_stats()).
 
     Fact stability:
-    - from_ioc_graph_stats: STABLE (from duckdb_store._ioc_graph)
+    - from_ioc_graph_stats: STABLE (from duckdb_store._ioc_graph via duckdb_store.get_graph_stats())
     - from_scorecard_top_nodes: COMPAT (legacy compat path)
-      → future_owner: eventually duckdb_store only, scorecard path deprecated
+      → future_owner: duckdb_store.get_top_seed_nodes() — already implemented, scorecard path deprecated
 
     Class-level attributes (NOT instance overrides):
     - __future_owner__: "knowledge/duckdb_store.py" — canonical owner
+
+    duckdb_store public seams (Sprint 8VY/8TF):
+    - get_graph_stats() → {nodes, edges, pgq_active} or {} fail-open
+    - get_top_seed_nodes(n=5) → list[dict] or [] fail-open
+    - get_connected_iocs(value, max_hops) → list or [] fail-open
+    - get_analytics_graph_for_synthesis() → DuckPGQGraph | None
     """
     node_count: int = 0
     edge_count: int = 0
@@ -287,7 +293,7 @@ class GraphSummaryBundle:
 
     @classmethod
     def from_ioc_graph_stats(cls, stats: Dict[str, Any], top_nodes: Optional[List[Any]] = None) -> "GraphSummaryBundle":
-        """Build from DuckPGQGraph.stats() dict. STABLE path."""
+        """Build from duckdb_store.get_graph_stats() dict. STABLE path."""
         return cls(
             node_count=stats.get("nodes", 0),
             edge_count=stats.get("edges", 0),
@@ -309,7 +315,7 @@ class GraphSummaryBundle:
             backend="unknown",
             raw_stats={},
             fact_stability="COMPAT",
-            __compat_note__="scorecard path is deprecated; use duckdb_store._ioc_graph.stats()",
+            __compat_note__="scorecard path is deprecated; use duckdb_store.get_graph_stats() seam",
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -468,7 +474,7 @@ def collect_graph_summary(
     PURE function — no side effects, no I/O.
 
     Args:
-        ioc_graph: DuckPGQGraph instance (duckdb_store._ioc_graph) or None
+        ioc_graph: DuckPGQGraph instance or duckdb_store.get_graph_stats() seam output; None for scorecard-only path
         scorecard: scorecard dict (compat path) or None
 
     Returns:

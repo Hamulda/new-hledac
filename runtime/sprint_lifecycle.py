@@ -272,9 +272,9 @@ class SprintLifecycleManager:
         """
         COMPAT ALIAS — transitions WARMUP→ACTIVE.
 
-        Canonical: the WARMUP→ACTIVE transition happens via start() + tick()
-        or directly via transition_to(ACTIVE). This alias exists for
-        __main__.py call-site compatibility.
+        Canonical: the WARMUP→ACTIVE transition happens via start() followed by
+        mark_warmup_done() or directly via transition_to(ACTIVE).
+        This alias exists for __main__.py call-site compatibility.
 
         F4 metadata:
           future_owner: __main__.py
@@ -343,11 +343,14 @@ class SprintLifecycleManager:
         COMPAT ALIAS — forwards to mark_teardown_started().
 
         Canonical: use mark_teardown_started() directly.
+        Idempotent: skips if already in TEARDOWN (matching request_export/request_windup).
 
         F4 metadata:
           future_owner: __main__.py
           removal_condition: All call-sites use mark_teardown_started()
         """
+        if self._current_phase == SprintPhase.TEARDOWN:
+            return
         self.mark_teardown_started()
 
     # ── COMPAT: is_windup_phase ─────────────────────────────────────────────
