@@ -24,7 +24,7 @@ Uses regex patterns for fast, lightweight PII detection.
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -165,9 +165,11 @@ class SecurityGate:
             SanitizationResult with sanitized text and PII info
         """
         try:
-            if not text or not isinstance(text, str):
+            if not isinstance(text, str):
+                # Explicit coercion to str for non-string inputs (int, float, list, etc.)
+                # Ensures sanitized_text contract is always str
                 return SanitizationResult(
-                    sanitized_text=text or "",
+                    sanitized_text="",
                     pii_found=[],
                     pii_count=0,
                     success=True
@@ -274,21 +276,33 @@ class SecurityGate:
         Returns:
             Risk analysis including level, score, and breakdown
         """
+        # Fail-soft: coerce non-string to empty string to avoid TypeError
+        if not isinstance(text, str):
+            return {
+                "risk_level": "low",
+                "risk_score": 0,
+                "detection_count": 0,
+                "by_category": {},
+                "method": "regex"
+            }
         matches = self._detect_with_regex(text)
+
+        # Deduplicate matches for consistent risk scoring with sanitize()
+        unique_matches = self._deduplicate_matches(matches)
 
         # Count by category
         by_category = {}
-        for match in matches:
+        for match in unique_matches:
             cat = match.category.value
             by_category[cat] = by_category.get(cat, 0) + 1
 
-        risk_score = len(matches) * 5
+        risk_score = len(unique_matches) * 5
         risk_level = "high" if risk_score > 20 else "medium" if risk_score > 5 else "low"
 
         return {
             "risk_level": risk_level,
             "risk_score": risk_score,
-            "detection_count": len(matches),
+            "detection_count": len(unique_matches),
             "by_category": by_category,
             "method": "regex"
         }
@@ -451,8 +465,8 @@ def fallback_sanitize(text: str, max_length: int = MAX_FALLBACK_LENGTH) -> str:
     Returns:
         Sanitized text with PII replaced by tokens
     """
-    if not text or not isinstance(text, str):
-        return text or ""
+    if not isinstance(text, str):
+        return ""
 
     # Bound input length for runtime safety (prevent catastrophic regex backtracking)
     # MUST be done before finditer() calls

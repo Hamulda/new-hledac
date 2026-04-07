@@ -42,6 +42,17 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 # =============================================================================
+# HELPERS
+# =============================================================================
+
+def _exif_to_float(val):
+    """Handle EXIF rational (num, denom) tuples and plain numeric values."""
+    if isinstance(val, tuple):
+        return val[0] / val[1]
+    return float(val)
+
+
+# =============================================================================
 # DATACLASSES
 # =============================================================================
 
@@ -949,8 +960,13 @@ class UniversalMetadataExtractor:
                     exif_data = {}
                     for tag_id, value in exif.items():
                         tag = TAGS.get(tag_id, tag_id)
-                        exif_data[tag] = str(value)
-                    metadata.exif = exif_data
+                        # Preserve numeric shape for rationals/tuples so downstream
+                        # parsers (FocalLength, FNumber, ISOSpeedRatings, GPSAltitude)
+                        # can reconstruct the value correctly. Convert simple types only.
+                        if isinstance(value, tuple):
+                            exif_data[tag] = value
+                        else:
+                            exif_data[tag] = value
 
                     # Extract specific fields
                     metadata.camera_make = exif_data.get("Make")
@@ -959,27 +975,35 @@ class UniversalMetadataExtractor:
 
                     if "FocalLength" in exif_data:
                         try:
-                            metadata.focal_length = float(exif_data["FocalLength"])
-                        except ValueError:
+                            fl = exif_data["FocalLength"]
+                            metadata.focal_length = _exif_to_float(fl)
+                        except (ValueError, TypeError):
                             pass
 
                     if "ExposureTime" in exif_data:
-                        metadata.exposure_time = exif_data["ExposureTime"]
+                        metadata.exposure_time = str(exif_data["ExposureTime"])
 
                     if "FNumber" in exif_data:
                         try:
-                            metadata.f_number = float(exif_data["FNumber"])
-                        except ValueError:
+                            fn = exif_data["FNumber"]
+                            metadata.f_number = _exif_to_float(fn)
+                        except (ValueError, TypeError):
                             pass
 
                     if "ISOSpeedRatings" in exif_data:
                         try:
-                            metadata.iso = int(exif_data["ISOSpeedRatings"])
-                        except ValueError:
+                            iso = exif_data["ISOSpeedRatings"]
+                            metadata.iso = int(_exif_to_float(iso))
+                        except (ValueError, TypeError):
                             pass
 
                     if "Flash" in exif_data:
-                        metadata.flash = exif_data["Flash"] != "0"
+                        flash = exif_data["Flash"]
+                        # Flash is typically 0/1 int, not string "0"; handle both cases
+                        try:
+                            metadata.flash = bool(int(flash)) if not isinstance(flash, bool) else flash
+                        except (ValueError, TypeError):
+                            pass
 
                     if "Orientation" in exif_data:
                         try:
@@ -988,14 +1012,17 @@ class UniversalMetadataExtractor:
                             pass
 
                     # Extract GPS
-                    if self.enable_gps and "GPSInfo" in exif:
-                        gps_info = exif["GPSInfo"]
-                        gps_data = {}
-                        for key in gps_info.keys():
-                            decode = GPSTAGS.get(key, key)
-                            gps_data[decode] = gps_info[key]
+                    # img._getexif() returns dict with INTEGER tag IDs (e.g., 34853 for GPSInfo),
+                    # not string "GPSInfo" keys. The lookup must use the integer tag ID.
+                    if self.enable_gps:
+                        gps_info = exif.get(34853) or exif.get("GPSInfo")
+                        if gps_info:
+                            gps_data = {}
+                            for key in gps_info.keys():
+                                decode = GPSTAGS.get(key, key)
+                                gps_data[decode] = gps_info[key]
 
-                        metadata.gps = self._parse_gps_data(gps_data)
+                            metadata.gps = self._parse_gps_data(gps_data)
 
                 return metadata
 
@@ -1014,13 +1041,9 @@ class UniversalMetadataExtractor:
         try:
             def dms_to_decimal(dms, ref):
                 """Convert DMS to decimal degrees. Handles EXIF rationals (num, denom) and floats."""
-                def to_float(val):
-                    if isinstance(val, tuple):
-                        return val[0] / val[1]
-                    return float(val)
-                degrees = to_float(dms[0])
-                minutes = to_float(dms[1]) / 60.0
-                seconds = to_float(dms[2]) / 3600.0
+                degrees = _exif_to_float(dms[0])
+                minutes = _exif_to_float(dms[1]) / 60.0
+                seconds = _exif_to_float(dms[2]) / 3600.0
                 decimal = degrees + minutes + seconds
                 if ref in ["S", "W"]:
                     decimal = -decimal
@@ -1037,7 +1060,8 @@ class UniversalMetadataExtractor:
                 lon = dms_to_decimal(gps_data["GPSLongitude"], gps_data["GPSLongitudeRef"])
 
             if "GPSAltitude" in gps_data:
-                alt = float(gps_data["GPSAltitude"])
+                alt_raw = gps_data["GPSAltitude"]
+                alt = _exif_to_float(alt_raw) if isinstance(alt_raw, tuple) else float(alt_raw)
 
             if lat is not None and lon is not None:
                 return GPSCoordinates(latitude=lat, longitude=lon, altitude=alt)

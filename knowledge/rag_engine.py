@@ -974,11 +974,16 @@ class RAGEngine:
         except Exception as e:
             logger.warning(f"MLXEmbeddingManager fallback failed: {e}")
 
-        # Last resort: deterministic hash-based embeddings
-        import random
+        # Last resort: stable SHA256-based deterministic embeddings
+        # FIX F800A: hash(t) is process-salted (PYTHONHASHSEED), not cross-run deterministic.
+        # Using SHA256 digest to derive float values ensures identical output across runs.
         return [
-            [random.Random(hash(t)).random() for _ in range(384)]
+            [
+                float(digest[i % 32]) / 255.0
+                for i in range(384)
+            ]
             for t in texts
+            for digest in [hashlib.sha256(t.encode()).digest()]
         ]
     
     def _dense_retrieval(

@@ -35,19 +35,24 @@ logger = logging.getLogger(__name__)
 # Sprint 53: MPS (Metal Performance Shaders) detection
 # NOTE: torch import moved to function scope to avoid loading 659 torch modules at import time
 MPS_AVAILABLE = False
+_MPS_CHECKED = False
 
 def _check_mps_available():
     """Check MPS availability lazily - only when actually needed."""
-    global MPS_AVAILABLE
+    global MPS_AVAILABLE, _MPS_CHECKED
     if MPS_AVAILABLE:
         return True
+    if _MPS_CHECKED:
+        return False
     try:
         import torch
         if torch.backends.mps.is_available():
             MPS_AVAILABLE = True
+            _MPS_CHECKED = True
             return True
     except ImportError:
         pass
+    _MPS_CHECKED = True
     return False
 
 # Maximum image size for MPS analysis (protect against OOM)
@@ -795,6 +800,9 @@ class StatisticalStegoDetector:
 
         Call when done with detector to free memory.
         """
+        if self._thread_pool is not None:
+            self._thread_pool.shutdown(wait=False)
+            self._thread_pool = None
         self._image_lib = None
         self._initialized = False
         gc.collect()

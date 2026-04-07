@@ -213,10 +213,11 @@ async def async_search_public_web(
 
     Fail-soft errors:
         - "empty_query"     : query was blank after strip
-        - "max_results_invalid": max_results <= 0 or > HARD_MAX_RESULTS
         - "rate_limited"    : RatelimitException from backend
         - "timeout"         : TimeoutException / asyncio.TimeoutError
         - "backend_error"   : Any other DuckDuckGoSearchException
+
+    Note: max_results is silently clamped to [1, HARD_MAX_RESULTS] — no error is returned.
 
     CancelledError is always re-raised (not swallowed).
 
@@ -225,13 +226,19 @@ async def async_search_public_web(
     global _last_error
 
     # ---- input validation ---------------------------------------------------
+    if query is None:
+        _last_error = "empty_query"
+        return DiscoveryBatchResult(hits=(), error="empty_query")
     trimmed = query.strip() if isinstance(query, str) else str(query).strip()
     if not trimmed:
         _last_error = "empty_query"
         return DiscoveryBatchResult(hits=(), error="empty_query")
 
-    # ---- bounds -----------------------------------------------------------
-    max_results = max(1, min(max_results, HARD_MAX_RESULTS))
+    # ---- bounds + type guard ----------------------------------------------
+    try:
+        max_results = max(1, min(int(max_results), HARD_MAX_RESULTS))
+    except (TypeError, ValueError):
+        max_results = DEFAULT_MAX_RESULTS
 
     # ---- timeout wrapper ---------------------------------------------------
     try:
@@ -378,7 +385,10 @@ async def _search_wayback_cdx(
 async def _search_commoncrawl_cdx(
     url_pattern: str, max_results: int = 20
 ) -> list[dict]:
-    """CommonCrawl CDX index — petabytes of crawl data, free."""
+    """CommonCrawl CDX index — petabytes of crawl data, free.
+    COMPAT: Tato funkce je dočasný compat wrapper.
+    AUTHORITY: archive_discovery.commondrawl_cdx_lookup() je search-shaped canonical.
+    REMOVAL CONDITION: po přechodu všech call-sites na archive_discovery."""
     import json as _json
     results = []
     try:
@@ -415,7 +425,10 @@ async def _search_commoncrawl_cdx(
 
 
 async def _query_shodan_internetdb(ip: str) -> dict:
-    """Shodan InternetDB — open ports, CVEs, hostnames. Free, no API key."""
+    """Shodan InternetDB — open ports, CVEs, hostnames. Free, no API key.
+    COMPAT: Tato funkce je dočasný compat wrapper.
+    AUTHORITY: registry/shodan_internetdb_lookup() je search-shaped canonical.
+    REMOVAL CONDITION: po přechodu všech call-sites na registry/shodan_internetdb_lookup()."""
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(
@@ -438,7 +451,10 @@ async def _query_shodan_internetdb(ip: str) -> dict:
 
 
 async def _query_rdap(target: str) -> dict:
-    """RDAP — structured WHOIS successor, free without key."""
+    """RDAP — structured WHOIS successor, free without key.
+    COMPAT: Tato funkce je dočasný compat wrapper.
+    AUTHORITY: registry/rdap_lookup() je search-shaped canonical.
+    REMOVAL CONDITION: po přechodu všech call-sites na registry/rdap_lookup()."""
     is_ip = target.replace(".", "").isdigit() or ":" in target
     base  = "https://rdap.org"
     endpoint = f"{base}/ip/{target}" if is_ip else f"{base}/domain/{target}"
@@ -486,8 +502,11 @@ async def search_multi_engine(
     seen: set[str] = set()
     deduped: list[dict] = []
     for r in all_results:
-        u = r.get("url", "")
-        if u and u not in seen:
-            seen.add(u)
+        raw_u = r.get("url", "")
+        if not raw_u:
+            continue
+        norm = _normalize_url_for_dedup(raw_u)
+        if norm and norm not in seen:
+            seen.add(norm)
             deduped.append(r)
     return deduped[:max_results]
