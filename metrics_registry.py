@@ -17,9 +17,16 @@ from __future__ import annotations
 import json
 import logging
 import os
-import psutil
 from collections import deque
-from dataclasses import dataclass, field
+
+# psutil is optional — lazy import with fail-soft fallback
+try:
+    import psutil
+    _PSUTIL_AVAILABLE = True
+except ImportError:
+    psutil = None  # type: ignore[assignment]
+    _PSUTIL_AVAILABLE = False
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -154,8 +161,8 @@ class MetricsRegistry:
             return None
 
     def _validate_metric_name(self, name: str) -> bool:
-        """Validate metric name is in bounded set"""
-        return name in METRIC_NAMES or name.startswith(("orchestrator_", "cache_", "memory_"))
+        """Validate metric name is in bounded set (exact match only — no arbitrary prefixes)"""
+        return name in METRIC_NAMES
 
     def inc(self, name: str, delta: int = 1) -> None:
         """
@@ -198,10 +205,15 @@ class MetricsRegistry:
         """
         Tick metrics - call periodically from research loop.
         Captures current system metrics.
+
+        F200G fix: psutil is optional; skip if not available.
         """
+        if not _PSUTIL_AVAILABLE:
+            return
+
         # Process memory
         try:
-            process = psutil.Process(os.getpid())
+            process = psutil.Process(os.getpid())  # type: ignore[union-attr]
             mem_info = process.memory_info()
             self.set_gauge("memory_rss_mb", mem_info.rss / (1024 * 1024))
             self.set_gauge("memory_vms_mb", mem_info.vms / (1024 * 1024))
@@ -210,7 +222,7 @@ class MetricsRegistry:
 
         # Open file descriptors (Unix)
         try:
-            process = psutil.Process(os.getpid())
+            process = psutil.Process(os.getpid())  # type: ignore[union-attr]
             self.set_gauge("memory_open_fds", process.num_fds())
         except Exception:
             pass
@@ -299,7 +311,7 @@ class MetricsRegistry:
     def __enter__(self) -> "MetricsRegistry":
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, _exc_type, _exc_val, _exc_tb) -> None:
         self.close()
 
 

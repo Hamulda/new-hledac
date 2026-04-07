@@ -713,8 +713,9 @@ class EvidenceLog:
         # Previously correlation was added AFTER calculate_hash(), causing
         # verify_integrity() to fail on events with correlation (the stored
         # content_hash didn't reflect the final payload with _correlation).
+        # Sprint F200E FIX: Do NOT mutate caller's dict — use shallow copy.
         if correlation:
-            payload["_correlation"] = correlation
+            payload = {**payload, "_correlation": correlation}
 
         # Vytvoř událost s dočasným hashem
         event = EvidenceEvent(
@@ -1177,10 +1178,23 @@ class EvidenceLog:
 
         Idempotent: safe to call multiple times.
         """
-        # 1. Shutdown flush worker — drain queue, flush remaining, then send None
-        self._closing = True  # Block append() queue access during shutdown
+        # Sprint F200E: Signal closing FIRST — no new appends will be queued.
+        # This MUST happen before draining so that any concurrent append()
+        # calls that see _closing=True will skip queueing.
+        self._closing = True
 
-        # Drain pending items (keep them in a list for flush)
+        # 1. Cancel flush task first (guaranteed clean termination)
+        if self._flush_task:
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass  # Expected
+            except Exception as e:
+                logger.warning(f"Flush worker shutdown error: {e}")
+            self._flush_task = None
+
+        # 2. Drain any remaining items from queue (items queued after _closing=True)
         drained = []
         while True:
             try:
@@ -1191,38 +1205,35 @@ class EvidenceLog:
             except asyncio.QueueEmpty:
                 break
 
-        # Flush drained items via call_soon_threadsafe (SQLite is thread-bound)
+        # Flush drained items synchronously (SQLite is thread-bound, runs in event loop thread)
         if drained:
-            loop = asyncio.get_running_loop()
-            evt = threading.Event()
-
-            def _do_flush():
-                self._flush_batch(drained)
-                evt.set()
-
-            loop.call_soon_threadsafe(_do_flush)
-            evt.wait(timeout=5.0)
-
-        if self._flush_task and not self._flush_task.done():
             try:
-                self._queue.put_nowait(None)  # Shutdown signal
-                await self._flush_task
-            except asyncio.CancelledError:
-                pass
+                self._flush_batch(drained)
             except Exception as e:
-                logger.warning(f"Flush worker shutdown error: {e}")
-        self._flush_task = None
+                logger.warning(f"Failed to flush remaining items: {e}")
 
-        # 2. Close SQLite connection via event loop (sqlite3.Connection is not thread-safe)
+        # 3. Close SQLite connection via event loop (sqlite3.Connection is not thread-safe)
+        # Sprint F200E: use a Future to wait for actual close completion
         if self._db is not None:
             try:
                 loop = asyncio.get_running_loop()
-                loop.call_soon_threadsafe(self._db.close)
+                close_future = loop.create_future()
+
+                def _do_close():
+                    try:
+                        self._db.close()
+                    finally:
+                        close_future.set_result(None)
+
+                loop.call_soon_threadsafe(_do_close)
+                # Wait for close to complete before proceeding
+                await close_future
             except Exception as e:
                 logger.warning(f"Failed to schedule SQLite close: {e}")
-            self._db = None
+            finally:
+                self._db = None
 
-        # 3. Close persist file (synchronous — runs in thread via close())
+        # 4. Close persist file (synchronous — runs in thread via close())
         self._close_persist_file()
 
         logger.debug(f"[EVIDENCE] aclose complete: run_id={self._run_id}")

@@ -1993,15 +1993,31 @@ class DuckDBShadowStore:
     # Sprint 8UC B.2: research_episodes — sprint episode recall
     # ------------------------------------------------------------------
 
-    def _execute_in_thread_sync(self, fn) -> None:
-        """Execute synchronous function in the duckdb executor."""
-        f = self._executor.submit(fn)
-        f.result()
+    def _execute_in_thread_sync(self, fn) -> Any:
+        """
+        Execute synchronous function on the duckdb executor and return its result.
+
+        MUST be called from the main thread. The callable fn runs on the
+        single-worker ThreadPoolExecutor and blocks until complete.
+
+        Returns:
+            The return value of fn(), or None if the executor raised an exception.
+
+        NOTE: This is a synchronous helper. Async callers MUST await the result:
+            result = await loop.run_in_executor(self._executor, self._execute_in_thread_sync, fn)
+        For direct async wrappers, prefer loop.run_in_executor() directly.
+        """
+        try:
+            f = self._executor.submit(fn)
+            return f.result()
+        except Exception:
+            return None
 
     async def upsert_episode(self, data: dict) -> None:
         """Sprint 8UC B.2: Zapsat sprint epizodu pro budoucí recall."""
         import orjson
         import time as _t
+
         def _sync():
             conn = self._persistent_conn
             if conn is None:
@@ -2024,7 +2040,8 @@ class DuckDBShadowStore:
                     float(data.get("ts", _t.time())),
                 ],
             )
-        await self._execute_in_thread_sync(_sync)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(self._executor, _sync)
 
     async def recall_episodes(
         self,
@@ -2050,7 +2067,8 @@ class DuckDBShadowStore:
                 return [dict(zip(cols, r)) for r in rows]
             except Exception:
                 return []
-        return await self._execute_in_thread_sync(_sync)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, _sync)
 
     # ------------------------------------------------------------------
     # Sprint 8TA B.4: ghost_global.duckdb — cross-sprint entity accumulation

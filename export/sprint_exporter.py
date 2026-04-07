@@ -89,8 +89,20 @@ async def export_sprint(
         # Re-parse sanitized text back to JSON for writing
         try:
             sanitized_obj = json.loads(sanitized_scorecard_raw)
-        except (json.JSONDecodeError, TypeError):
-            sanitized_obj = boundary_content  # Fallback to original
+        except (json.JSONDecodeError, TypeError) as parse_err:
+            # Sprint F500E §1: sanitize_outbound fallback_sanitize truncates to 10KB.
+            # If content exceeded 10KB, sanitized string is truncated JSON → parse fails.
+            # CRITICAL: do NOT fall back to original (unsanitized) content here — that
+            # would be an export boundary correctness drift. Write sanitized prefix only.
+            logger.warning(
+                "[EXPORT] sanitize boundary parse failed (truncated JSON, size=%d): %s. "
+                "Writing sanitized prefix only, NOT falling back to unsanitized content.",
+                len(sanitized_scorecard_raw), parse_err
+            )
+            # Write what we have from sanitized — it's bounded and sanitized
+            sanitized_obj = json.loads(sanitized_scorecard_raw[:5000]) if sanitized_scorecard_raw else {}
+            if sanitized_obj is None:
+                sanitized_obj = {}
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(sanitized_obj, f, indent=2, default=str)
         logger.info(f"[EXPORT] JSON report → {report_path}")

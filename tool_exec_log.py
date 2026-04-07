@@ -37,6 +37,9 @@ BOUNDED_ERROR_CLASSES = frozenset([
     "RateLimitError", "CircuitBreakerError", "Unknown"
 ])
 
+# Bounded status values
+BOUNDED_STATUSES = frozenset(["success", "error", "cancelled"])
+
 
 # =============================================================================
 # CORRELATION GRAMMAR — SHARED BOUNDARY (Sprint F2B)
@@ -265,12 +268,23 @@ class ToolExecLog:
         # Bound error class
         error_class = self._bound_error_class(error)
 
+        # Bound status to known values (fail-soft: invalid/unknown → "error")
+        if status not in BOUNDED_STATUSES:
+            status = "error"
+
+        # Normalize correlation at audit boundary (drops extra keys)
+        correlation = normalize_correlation(correlation)
+
         # Create event with chain
         self._seq += 1
 
-        # Chain hash: sha256(prev_chain_hash + ":" + event_id + ":" + input_hash + ":" + output_hash)
+        # Chain hash: sha256(prev + event_id + input_hash + output_hash + status + error_class)
+        # Status and error_class are included to make metadata tamper-evident
         event_id = f"tool_{self._seq}_{uuid.uuid4().hex[:8]}"
-        chain_input = f"{self._chain_head}:{event_id}:{input_hash}:{output_hash}"
+        chain_input = (
+            f"{self._chain_head}:{event_id}:{input_hash}:{output_hash}"
+            f":{status}:{error_class}"
+        )
         chain_hash = hashlib.sha256(chain_input.encode()).hexdigest()
 
         event = ToolExecEvent(
@@ -355,8 +369,11 @@ class ToolExecLog:
                     f"expected prev={expected_head}, got {event.prev_chain_hash}"
                 )
 
-            # Verify chain hash
-            chain_input = f"{expected_head}:{event.event_id}:{event.input_hash}:{event.output_hash}"
+            # Verify chain hash (must match log() computation: includes status + error_class)
+            chain_input = (
+                f"{expected_head}:{event.event_id}:{event.input_hash}:{event.output_hash}"
+                f":{event.status}:{event.error_class}"
+            )
             expected_chain = hashlib.sha256(chain_input.encode()).hexdigest()
             if event.chain_hash != expected_chain:
                 errors.append(

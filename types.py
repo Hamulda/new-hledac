@@ -1737,12 +1737,25 @@ class CanonicalGroundingHints:
         """
         if shim is not None:
             # Extract from Shim
+            # NOTE: _BudgetHints has stagnation_tolerance/confidence_boost, NOT budget_tier
+            # NOTE: _EvidenceHints has log_level/detail_depth, NOT evidence_required
+            # budget_hint and evidence_hint are forward-compat placeholders for future migration
             budget_hint = None
             evidence_hint = None
             if hasattr(shim, 'budget_hints') and shim.budget_hints is not None:
-                budget_hint = getattr(shim.budget_hints, 'budget_tier', None)
+                # Map budget_hints to forward-compat budget_hint string
+                bh = shim.budget_hints
+                if hasattr(bh, 'stagnation_tolerance') and bh.stagnation_tolerance > 0:
+                    budget_hint = f"stagnation_tolerance:{bh.stagnation_tolerance}"
+                elif hasattr(bh, 'confidence_boost') and bh.confidence_boost != 0.0:
+                    budget_hint = f"confidence_boost:{bh.confidence_boost}"
             if hasattr(shim, 'evidence_hints') and shim.evidence_hints is not None:
-                evidence_hint = getattr(shim.evidence_hints, 'evidence_required', None)
+                # Map evidence_hints to forward-compat evidence_hint string
+                eh = shim.evidence_hints
+                if hasattr(eh, 'detail_depth'):
+                    evidence_hint = eh.detail_depth
+                elif hasattr(eh, 'log_level'):
+                    evidence_hint = eh.log_level
             return cls(
                 topic_hints=tuple(getattr(shim, 'topic_hints', [])),
                 domain_tags=tuple(getattr(shim, 'domain_tags', [])),
