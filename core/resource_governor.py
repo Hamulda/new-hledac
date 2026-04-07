@@ -472,6 +472,10 @@ class UMAAlarmDispatcher:
         The callback must be awaitable (async def or a sync callable).
         Thread-safe: appends to list under self._lock.
 
+        F130C FIX: Store the raw callback (not a pre-invoked wrapper coroutine).
+        A fresh dispatch wrapper is created at dispatch time so the same callback
+        can fire on multiple independent alarm dispatches without coroutine reuse.
+
         Args:
             state: UMA_STATE_CRITICAL or UMA_STATE_EMERGENCY
             callback: Async callable to invoke on alarm.
@@ -479,16 +483,7 @@ class UMAAlarmDispatcher:
         if state not in (UMA_STATE_CRITICAL, UMA_STATE_EMERGENCY):
             return
 
-        # Wrap to handle both sync and async callables uniformly at dispatch time
-        async def _dispatch_wrapper(cb):
-            import asyncio as _asyncio
-            if _asyncio.iscoroutinefunction(cb):
-                await cb()  # async def — call to create coroutine object, then await
-            elif callable(cb):
-                cb()  # sync callable
-            # else: not callable, silently ignore
-
-        self._callbacks[state].append(_dispatch_wrapper(callback))
+        self._callbacks[state].append(callback)
 
     async def start_monitoring(self, interval_s: float = 5.0) -> None:
         """
@@ -555,8 +550,18 @@ class UMAAlarmDispatcher:
         # Update cooldown timestamp
         self._last_dispatch_time[current_state] = now
 
-        # B.3: Dispatch via gather with return_exceptions — fail-safe
-        await asyncio.gather(*callbacks, return_exceptions=True)
+        # F130C FIX: Create fresh wrapper coroutines at dispatch time so the same
+        # registered callback can fire on multiple independent alarms without reuse bugs.
+        async def _dispatch_one(cb):
+            if asyncio.iscoroutinefunction(cb):
+                await cb()
+            elif asyncio.iscoroutine(cb):
+                await cb
+            elif callable(cb):
+                cb()
+            # else: not callable, silently ignore
+
+        await asyncio.gather(*[_dispatch_one(cb) for cb in callbacks], return_exceptions=True)
 
 
 # =============================================================================

@@ -125,9 +125,23 @@ async def async_fetch_public_text(
         byte counts, elapsed_ms, and optional error.
     """
     t0 = time.monotonic()
-    url = url.strip()
 
-    # --- URL validation ---
+    # --- Type guard: non-string input fails fast, fail-soft ---
+    if not isinstance(url, str):
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        return FetchResult(
+            url=str(url) if url is not None else "",
+            final_url=str(url) if url is not None else "",
+            status_code=0,
+            content_type="",
+            text=None,
+            fetched_bytes=0,
+            declared_length=-1,
+            elapsed_ms=elapsed_ms,
+            error="url_empty",
+        )
+
+    # --- URL validation (strip happens inside _validate_url) ---
     validation_error = _validate_url(url)
     if validation_error is not None:
         elapsed_ms = (time.monotonic() - t0) * 1000

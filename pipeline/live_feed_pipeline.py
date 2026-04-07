@@ -1374,12 +1374,18 @@ async def async_run_default_feed_batch(
     Run a one-shot batch over the default curated feed seeds (8AJ).
 
     Unchanged signature from 8AL.
+
+    Runtime RSS/Atom enforcement (Sprint F025A.1):
+        Only ``curated_seed`` sources are routed to the feed pipeline.
+        ``topology_candidate`` sources are excluded from the default batch path.
     """
     from hledac.universal.discovery.rss_atom_adapter import get_default_feed_seeds
 
     seeds = get_default_feed_seeds()
+    # Sprint F025A.1: filter to curated_seed only (topology_candidates are non-feed endpoints)
+    runtime_seeds = tuple(s for s in seeds if s.source == "curated_seed")
     return await async_run_feed_source_batch(
-        sources=seeds,
+        sources=runtime_seeds,
         store=store,
         max_entries_per_feed=max_entries_per_feed,
         feed_concurrency=feed_concurrency,
