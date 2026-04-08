@@ -13,9 +13,8 @@ Optimized for M1 MacBook with 8GB RAM:
 - NumPy-based calculations with optional PyTorch/MPS acceleration (lazy import)
 - Aggressive garbage collection after heavy operations
 
-Performance Targets:
-- Chi-square: 1000+ images/second
-- RS analysis: 500+ images/second
+Note: Per-image analysis time varies by hardware and image size.
+Streaming mode and size limits protect M1 8GB RAM.
 """
 
 from __future__ import annotations
@@ -166,8 +165,8 @@ class StatisticalStegoDetector:
     """Statistical steganography detector for images.
 
     Implements three analysis methods:
-    1. Chi-square test for LSB detection (1000+ img/s)
-    2. RS analysis with message length estimation (500 img/s)
+    1. Chi-square test for LSB detection
+    2. RS analysis with message length estimation
     3. DCT coefficient analysis for JPEG steganography
 
     Memory-optimized for M1 8GB with streaming mode support.
@@ -185,9 +184,11 @@ class StatisticalStegoDetector:
 
     This module ONLY:
     - Performs statistical analysis on image bytes (pixels)
-    - Returns StegoResult with has_stego + confidence + method_used
-    - Emits findings as append-only list entries
-    - Operates as a conditional augmentation signal (budget-approved only note)
+    - Returns bounded signal: dict from detect() or StegoResult from analyze_image()
+
+    RESULT SURFACES:
+    - detect(image_bytes): lightweight dict with score + chi_square_flag + method
+    - analyze_image(image_path): full StegoResult with chi_square + rs + dct sub-results
 
     Downstream orchestrator decides what to do with has_stego=True findings.
     StatisticalStegoDetector has NO content rejection authority.
@@ -828,8 +829,6 @@ def create_stego_detector(config: Optional[StegoConfig] = None) -> Optional[Stat
         ...     result = await detector.analyze_image("image.png")
     """
     try:
-        from PIL import Image
-
         return StatisticalStegoDetector(config or StegoConfig())
     except ImportError:
         logger.warning("PIL/Pillow not available, stego detector disabled")

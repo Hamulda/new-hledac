@@ -281,7 +281,7 @@ class TestUnloadOrder:
 
     def test_unload_order_is_explicit(self):
         from hledac.universal.brain.model_lifecycle import _unload_model_legacy
-        from hledac.universal.brain.model_lifecycle import _get_mlx
+        from hledac.universal.brain.model_lifecycle import _get_mlx_safe
 
         gc_collect_calls: list[int] = []
         mx_eval_calls: list[int] = []
@@ -303,20 +303,20 @@ class TestUnloadOrder:
         model = FakeModel("order-test")
 
         with patch("gc.collect", mock_gc_collect), \
-             patch("hledac.universal.brain.model_lifecycle._get_mlx") as mock_get_mlx, \
-             patch.object(mock_get_mlx(), 'eval', mock_mx_eval), \
-             patch.object(mock_get_mlx(), 'clear_cache', mock_clear_cache), \
-             patch.object(mock_get_mlx(), 'metal') as mock_metal, \
+             patch("hledac.universal.brain.model_lifecycle._get_mlx_safe") as mock_get_mlx_safe, \
+             patch.object(mock_get_mlx_safe(), 'eval', mock_mx_eval), \
+             patch.object(mock_get_mlx_safe(), 'clear_cache', mock_clear_cache), \
+             patch.object(mock_get_mlx_safe(), 'metal') as mock_metal, \
              patch.object(mock_metal, 'clear_cache', mock_clear_cache):
 
-            # Make _get_mlx return our mock
+            # Make _get_mlx_safe return our mock
             mock_instance = MagicMock()
             mock_instance.eval = mock_mx_eval
             mock_instance.clear_cache = mock_clear_cache
             mock_metal_instance = MagicMock()
             mock_metal_instance.clear_cache = mock_clear_cache
             mock_instance.metal = mock_metal_instance
-            mock_get_mlx.return_value = mock_instance
+            mock_get_mlx_safe.return_value = mock_instance
 
             _unload_model_legacy(model=model, tokenizer=None, prompt_cache=None, aggressive=False)
 
@@ -350,7 +350,7 @@ class TestUnloadOrder:
             mock_cc_mx.clear_cache = mock_cc
             mock_mx.metal = mock_cc_mx
 
-            with patch("hledac.universal.brain.model_lifecycle._get_mlx", return_value=mock_mx):
+            with patch("hledac.universal.brain.model_lifecycle._get_mlx_safe", return_value=mock_mx):
                 _unload_model_legacy(model=model, tokenizer=None, prompt_cache=None, aggressive=False)
 
         # gc.collect must come before mx.eval
@@ -437,7 +437,7 @@ class TestMxlFailOpen:
     def test_unload_model_fails_open_when_mlx_unavailable(self):
         from hledac.universal.brain.model_lifecycle import _unload_model_legacy
 
-        with patch("hledac.universal.brain.model_lifecycle._get_mlx", return_value=None):
+        with patch("hledac.universal.brain.model_lifecycle._get_mlx_safe", return_value=None):
             # Must not raise
             _unload_model_legacy(model=None, tokenizer=None, prompt_cache=None, aggressive=False)
 

@@ -157,23 +157,23 @@ def get_emergency_callback() -> Optional[Callable[[], None]]:
     """Return the registered emergency callback, if any."""
     return _emergency_callback
 
-# MLX lazy import
-_MLX_AVAILABLE = False
-_mx = None
+# MLX lazy import — single shared module-level state
+_mlx: Any = None
+_MLX_AVAILABLE_SAFETY: bool = False
 
 
-def _get_mlx():
-    """Lazy MLX accessor."""
-    global _mx, _MLX_AVAILABLE
-    if _mx is None:
+def _get_mlx_safe() -> Any:
+    """Lazy MLX accessor — single MLX helper for entire module."""
+    global _mlx, _MLX_AVAILABLE_SAFETY
+    if _mlx is None:
         try:
             import mlx.core as mx
-            _mx = mx
-            _MLX_AVAILABLE = True
+            _mlx = mx
+            _MLX_AVAILABLE_SAFETY = True
         except ImportError:
-            _mx = None
-            _MLX_AVAILABLE = False
-    return _mx
+            _mlx = None
+            _MLX_AVAILABLE_SAFETY = False
+    return _mlx
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +234,7 @@ def ensure_mlx_runtime_initialized() -> bool:
         return result
     except Exception as e:
         logger.warning(f"[LIFECYCLE] MLX init failed: {e}")
-        return _MLX_AVAILABLE
+        return _MLX_AVAILABLE_SAFETY
 
 
 def load_model(
@@ -298,18 +298,27 @@ def load_model(
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    logger.warning("[LIFECYCLE] Async load in running async context, deferring")
-                else:
-                    loop.run_until_complete(model.load())
-                    _lifecycle_state["loaded"] = True
-                    _lifecycle_state["current_model"] = resolved_name
-                    _lifecycle_state["last_error"] = None
-                    _current_model_ref = model
-                    logger.info(f"[LIFECYCLE] Engine async load() completed: {resolved_name}")
+                    # F650G H2-FIX: Cannot use run_until_complete in a running loop.
+                    # Caller must await the engine.load() themselves. Do NOT claim
+                    # loaded=True since the load did NOT actually happen.
+                    logger.warning(
+                        "[LIFECYCLE] Async load() in running loop — "
+                        "caller must await engine.load() directly; "
+                        "shadow-state NOT updated (load deferred)"
+                    )
+                    _lifecycle_state["last_error"] = "async_load_deferred"
                     return
+                loop.run_until_complete(model.load())
+                _lifecycle_state["loaded"] = True
+                _lifecycle_state["current_model"] = resolved_name
+                _lifecycle_state["last_error"] = None
+                _current_model_ref = model
+                logger.info(f"[LIFECYCLE] Engine async load() completed: {resolved_name}")
+                return
             except Exception as e:
                 logger.warning(f"[LIFECYCLE] Async load failed: {e}")
                 _lifecycle_state["last_error"] = str(e)
+                return
         else:
             # Sync load
             try:
@@ -323,6 +332,7 @@ def load_model(
             except Exception as e:
                 logger.warning(f"[LIFECYCLE] Sync load failed: {e}")
                 _lifecycle_state["last_error"] = str(e)
+                return
 
     # No engine.load() — treat as already loaded (raw model)
     _lifecycle_state["loaded"] = True
@@ -375,18 +385,25 @@ def unload_model(
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    # We're in an async context — can't use run_until_complete
-                    # Fall back to legacy (no-op for async engines)
-                    logger.warning("[LIFECYCLE] Async unload in async context, deferring to caller")
-                else:
-                    loop.run_until_complete(model.unload())
-                    logger.info("[LIFECYCLE] Engine unload() completed via loop")
-                    _lifecycle_state["loaded"] = False
-                    _lifecycle_state["current_model"] = None
-                    _current_model_ref = None
+                    # F650G H3-FIX: Cannot use run_until_complete in a running loop.
+                    # Caller must await the engine.unload() themselves. Do NOT claim
+                    # unload completed via legacy fallback since that path does NOT
+                    # correctly unload async engines — it would lie about shadow-state.
+                    logger.warning(
+                        "[LIFECYCLE] Async unload() in running loop — "
+                        "caller must await engine.unload() directly; "
+                        "shadow-state NOT updated (unload deferred)"
+                    )
                     return
+                loop.run_until_complete(model.unload())
+                logger.info("[LIFECYCLE] Engine unload() completed via loop")
+                _lifecycle_state["loaded"] = False
+                _lifecycle_state["current_model"] = None
+                _current_model_ref = None
+                return
             except Exception as e:
                 logger.warning(f"[LIFECYCLE] Async unload failed: {e}")
+                return
         else:
             # Sync unload
             try:
@@ -398,6 +415,7 @@ def unload_model(
                 return
             except Exception as e:
                 logger.warning(f"[LIFECYCLE] Sync unload failed: {e}")
+                return
 
     # Legacy fallback: direct eviction (only for non-Hermes models)
     _unload_model_legacy(model, tokenizer, prompt_cache, aggressive)
@@ -522,36 +540,13 @@ def preload_model_hint(model_path: str) -> None:
 # =============================================================================
 
 import asyncio
-import gc
-import logging
 from pathlib import Path
-from typing import Any, Optional
 
-logger = logging.getLogger(__name__)
-
-# CPU executor pro synchronní MLX inference (z utils/executors.py)
 try:
     from ..utils.executors import CPU_EXECUTOR
 except Exception:
     import concurrent.futures
     CPU_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="hledac_cpu")
-
-# Lazy importy pro MLX
-_mlx: Any = None
-_MLX_AVAILABLE_SAFETY: bool = False
-
-
-def _get_mlx_safe() -> Any:
-    global _mx, _MLX_AVAILABLE_SAFETY
-    if _mx is None:
-        try:
-            import mlx.core as mx
-            _mx = mx
-            _MLX_AVAILABLE_SAFETY = True
-        except ImportError:
-            _mx = None
-            _MLX_AVAILABLE_SAFETY = False
-    return _mx
 
 
 class ModelLifecycle:

@@ -2995,10 +2995,10 @@ __all__ = [
     # It is NOT in the hot path. Admission requires F11 integration:
     #   1. Triáda: PARTIAL — analyzer + router + registry EXISTUJÍ, DeepResearch NE napojen
     #   2. Source plane: EXISTS — SourceFamily + SourcePlan + _build_source_plan()
-    #   3. Transport plane (FetchCoordinator): TBD
-    #   4. Session seams (BudgetManager, EvidenceLog): TBD
-    #   5. Security gate (SecurityGate, privacy layer): TBD
-    #   6. Minimal grounding seam (ProviderRequest/ProviderResult handoff): TBD
+    #   3. Transport plane (FetchCoordinator): exists, not wired to DeepResearch runtime
+    #   4. Session seams (BudgetManager, EvidenceLog): exists, not wired to DeepResearch
+    #   5. Security gate (SecurityGate, privacy layer): exists, not wired to DeepResearch
+    #   6. Minimal grounding seam (ProviderRequest/ProviderResult): exists, not wired to DeepResearch
     #
     # USAGE: Only via deep_research_provider_seam() after F11 activation.
     #        Direct instantiation is NON-CANONICAL.

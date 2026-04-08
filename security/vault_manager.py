@@ -34,12 +34,17 @@ class LootManager:
     Encrypted vault export manager.
 
     Canonical name: VaultManager (alias below).
-    LootManager is the operational name for historical reasons.
+    LootManager is preserved for compat only; VaultManager is the authoritative name.
 
     AUTHORITY SCOPE (this module):
         - secure_export(): encrypted ZIP archive of vault_path → .enc file
         - decrypt_export(): reverse operation
         - _shred_directory(): secure deletion after export
+
+    SECURE EXPORT PATH (priority order):
+        1. pyzipper AES (WZ_AES) — requires pyzipper
+        2. Fernet (cryptography) — requires cryptography
+        3. XOR fallback (FALLBACK_ENC:) — degraded, requires no crypto deps
 
     NON-AUTHORITY (NOT this module):
         - PII detection/sanitization (see pii_gate.py)
@@ -235,8 +240,12 @@ class LootManager:
         """
         Create encrypted ZIP archive of vault contents and shred original.
 
-        Encrypts vault_path contents using AES (pyzipper) or Fernet (cryptography)
-        into a .enc file, then securely deletes the original vault directory.
+        Encrypts vault_path contents using (in priority order):
+          1. pyzipper AES (WZ_AES) — requires pyzipper
+          2. Fernet (cryptography) — requires cryptography
+          3. XOR fallback (FALLBACK_ENC:) — degraded, requires no crypto deps
+
+        Result is a .enc file, then original vault directory is securely shredded.
 
         Args:
             output_dir: Destination directory for the encrypted archive

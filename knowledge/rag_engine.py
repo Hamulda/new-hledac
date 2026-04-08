@@ -34,13 +34,12 @@ if TYPE_CHECKING:
 
 import numpy as np
 
-# Sprint 42: CoreML support
-try:
-    from ..brain.model_manager import get_model_manager, COREML_MODEL_PATH
-    COREML_AVAILABLE = True
-except ImportError:
-    COREML_AVAILABLE = False
-    COREML_MODEL_PATH = None
+# Sprint F800C: Lazy CoreML import — contained to compat seam only.
+# RAGEngine is grounding authority, NOT model owner.
+# Model lifecycle ownership stays in brain/model_manager.py.
+# Moved from top-level to lazy to eliminate eager model-plane coupling.
+COREML_AVAILABLE = False
+COREML_MODEL_PATH = None
 
 # Optional rank_bm25 for faster BM25 (Fix 4)
 try:
@@ -708,17 +707,32 @@ class RAGEngine:
         logger.info("✓ RAGEngine initialized")
 
     async def _init_coreml_embedder(self) -> None:
-        """Initialize CoreML embedder or fallback to MLX."""
-        if not COREML_AVAILABLE:
-            logger.debug("[COREML] coremltools not available")
+        """Initialize CoreML embedder via lazy import (compat seam).
+
+        RAGEngine is grounding authority, NOT model owner.
+        CoreML model lifecycle stays in brain/model_manager.py.
+        This method is the ONLY entry point for model-plane coupling.
+        """
+        # Lazy import: attempt to resolve CoreML availability at runtime
+        try:
+            from ..brain.model_manager import get_model_manager, COREML_MODEL_PATH
+            coreml_available = COREML_MODEL_PATH is not None and COREML_MODEL_PATH.exists()
+        except ImportError:
+            coreml_available = False
+
+        if not coreml_available:
+            logger.debug("[COREML] CoreML model not available, skipping")
             return
 
         try:
             # Try to load MLX embedder
-            from ...embeddings.modernbert_embedder import ModernBERTEmbedder
-            self._mlx_embedder = ModernBERTEmbedder()
+            try:
+                from ...embeddings.modernbert_embedder import ModernBERTEmbedder
+                self._mlx_embedder = ModernBERTEmbedder()
+            except ImportError:
+                self._mlx_embedder = None
 
-            # Try to load CoreML model
+            # Try to load CoreML model via model_manager compat seam
             mm = get_model_manager()
             self._coreml_embedder = mm._load_coreml_embedder()
 
