@@ -439,13 +439,14 @@ SUPREME_INTEGRATION_AVAILABLE = False
 
 _LAZY_SUBPACKAGES = {
     # Knowledge Components (from Supreme) - pulls torch via graph_rag
-    "PersistentKnowledgeLayer": (".knowledge.persistent_layer", "PersistentKnowledgeLayer"),
-    "KnowledgeNode": (".knowledge.persistent_layer", "KnowledgeNode"),
-    "KnowledgeEdge": (".knowledge.persistent_layer", "KnowledgeEdge"),
-    "NodeType": (".knowledge.persistent_layer", "NodeType"),
-    "EdgeType": (".knowledge.persistent_layer", "EdgeType"),
-    "KuzuDBBackend": (".knowledge.persistent_layer", "KuzuDBBackend"),
-    "JSONBackend": (".knowledge.persistent_layer", "JSONBackend"),
+    # F1200B FIX: Corrected path from .knowledge.persistent_layer to .legacy.persistent_layer
+    "PersistentKnowledgeLayer": (".legacy.persistent_layer", "PersistentKnowledgeLayer"),
+    "KnowledgeNode": (".legacy.persistent_layer", "KnowledgeNode"),
+    "KnowledgeEdge": (".legacy.persistent_layer", "KnowledgeEdge"),
+    "NodeType": (".legacy.persistent_layer", "NodeType"),
+    "EdgeType": (".legacy.persistent_layer", "EdgeType"),
+    "KuzuDBBackend": (".legacy.persistent_layer", "KuzuDBBackend"),
+    "JSONBackend": (".legacy.persistent_layer", "JSONBackend"),
     "GraphRAGOrchestrator": (".knowledge.graph_rag", "GraphRAGOrchestrator"),
     "KnowledgeGraphBuilder": (".knowledge.graph_builder", "KnowledgeGraphBuilder"),
     # Supreme Tools - pulls pandas via reranker
