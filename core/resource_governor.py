@@ -335,7 +335,13 @@ def _get_metal_limits_status_8ab() -> tuple[Optional[int], Optional[int]]:
 
 def sample_uma_status() -> UMAStatus:
     """
-    Sprint 8AB: One-shot UMA status snapshot.
+    Sprint 8AB: One-shot UMA status snapshot — LOCAL POLICY INPUT (not a raw sampler).
+
+    This is a GOVERNOR-LOCAL helper that embeds raw sampling reads internally.
+    It is NOT a canonical raw sampler (those live in utils/uma_budget.py).
+    This function exists so the governor can form its policy decision (evaluate_uma_state,
+    hysteresis latch) from a consistent local snapshot, without depending on
+    an external sampler interface at evaluation time.
 
     Reads (in order):
         1. Process RSS via cached psutil.Process() — rss_gib (diagnostic)

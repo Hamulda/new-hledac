@@ -30,12 +30,11 @@ from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
-# Try to import MLX for predictive modeling
-try:
-    import mlx.core as mx
-    MLX_AVAILABLE = True
-except ImportError:
-    MLX_AVAILABLE = False
+# MLX is imported lazily inside helpers to avoid paying import tax
+# when the predictive model is never used (allocator may only recommend,
+# not predict, depending on call site). This keeps the allocator cheap
+# when idle on M1 8GB.
+MLX_AVAILABLE = False
 
 # Named fallback constant for non-MLX RAM estimation.
 # Conservative 500MB default when MLX linear regression is unavailable.
@@ -83,7 +82,7 @@ class ResourceAllocator:
 
         # History for MLX linear regression: (features, actual_ram_mb)
         self.history: List[tuple[List[float], float]] = []
-        self.coeffs: Optional[mx.array] = None
+        self.coeffs: Optional[Any] = None
         self.warmup_counter: int = 0
 
     def _extract_features(self, ctx: Any) -> List[float]:
@@ -105,6 +104,7 @@ class ResourceAllocator:
             return
 
         try:
+            import mlx.core as mx
             # Build feature matrix and target vector
             X = mx.array([f for f, _ in self.history])
             y = mx.array([a for _, a in self.history])
@@ -127,6 +127,7 @@ class ResourceAllocator:
             return _FALLBACK_RAM_ESTIMATE_MB
 
         try:
+            import mlx.core as mx
             features = mx.array(self._extract_features(ctx) + [1.0])  # +1 for bias
             prediction = float(mx.sum(features * self.coeffs))
             return max(100.0, prediction)  # Minimum 100 MB
@@ -257,15 +258,21 @@ def get_memory_pressure_level() -> str:
 
 
 def get_recommended_concurrency() -> Dict[str, int]:
-    """Return concurrency limits based on memory pressure level."""
+    """
+    Return concurrency limits based on memory pressure level.
+
+    AUTHORITY BOUNDARY: This function returns RECOMMENDATIONS only.
+    It does NOT perform model-plane operations (e.g. ANE unload).
+    Callers in the model plane are responsible for acting on critical-level
+    recommendations and performing any required unload/cleanup.
+
+    Memory pressure thresholds (percent-based, independent of uma_budget.py MB thresholds):
+      normal   → standard concurrency
+      warn     → reduced concurrency
+      critical → minimal concurrency; caller should consider model-plane cleanup
+    """
     level = get_memory_pressure_level()
     if level == "critical":
-        # Sprint 8VF §C.2: Unload ANE embedder at CRITICAL to free ~22MB
-        try:
-            from hledac.universal.brain.ane_embedder import unload_ane_embedder
-            unload_ane_embedder()
-        except Exception:
-            pass
         import gc; gc.collect()
     return {
         "normal":   {"fetch": 20, "parse_workers": 4, "ml_jobs": 1, "browser": 1},

@@ -25,6 +25,7 @@ try:
     MLX_AVAILABLE = True
 except ImportError:
     MLX_AVAILABLE = False
+    mx = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -265,12 +266,8 @@ class ModelManager:
         try:
             available = self._psutil.virtual_memory().available / 1e9
             if available < threshold_gb:
-                if MLX_AVAILABLE:
-                    try:
-                        import mlx.core as mx
-                        mx.clear_cache()
-                    except Exception:
-                        pass
+                if MLX_AVAILABLE and mx is not None:
+                    mx.clear_cache()
                 logger.warning(f"[MEMORY] Low RAM: {available:.2f}GB, MLX cache cleared")
                 return True
         except Exception:
@@ -352,9 +349,8 @@ class ModelManager:
             yield model
         finally:
             await self.release_model(model_name)
-            if MLX_AVAILABLE:
+            if MLX_AVAILABLE and mx is not None:
                 try:
-                    import mlx.core as mx
                     mx.clear_cache()
                 except Exception:
                     pass
@@ -578,10 +574,10 @@ class ModelManager:
         gc.collect()
 
         # MLX cache clear (pro M1)
-        if MLX_AVAILABLE:
+        if MLX_AVAILABLE and mx is not None:
             try:
                 mx.clear_cache()
-                logger.debug("✓ MLX cache cleared")
+                logger.debug("MLX cache cleared")
             except Exception as e:
                 logger.warning(f"Failed to clear MLX cache: {e}")
 

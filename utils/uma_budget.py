@@ -21,7 +21,7 @@ AUTHORITY BOUNDARY:
 API:
 - get_uma_snapshot() -> dict
 - get_uma_usage_mb() -> int | None
-- get_uma_pressure_level() -> tuple[int, str]  (pct, "normal"/"warn"/"critical")
+- get_uma_pressure_level() -> tuple[int, str]  (pct, "normal"/"warn"/"critical"/"emergency")
 - is_uma_critical() -> bool
 - is_uma_warn() -> bool
 - format_uma_budget_report() -> str
@@ -163,9 +163,12 @@ def get_mlx_memory_mb() -> tuple[int, int, int]:
 
 def get_uma_usage_mb() -> Optional[int]:
     """
-    Calculate total "used" UMA memory as:
+    Estimate of "used" UMA memory as:
         system_used + mlx_active
 
+    NOTE: On M1 unified memory architecture, system_used may partially
+    overlap with mlx_active allocations. This is a conservative pressure
+    estimate, not a precise accounting of physical memory pages.
     Returns None if system memory unavailable.
     """
     sys_total, sys_used, _ = get_system_memory_mb()
@@ -183,7 +186,7 @@ def get_uma_pressure_level() -> tuple[int, str]:
 
     Returns:
         (usage_pct: int, level: str)
-        level: "normal" / "warn" / "critical"
+        level: "normal" / "warn" / "critical" / "emergency"
 
     Uses total 8GB as denominator.
     Fails open to (0, "normal") if measurement unavailable.
@@ -248,9 +251,6 @@ def get_uma_snapshot() -> dict:
         "uma_used_mb": uma_total_mb if uma_total_mb is not None else 0,
         "uma_usage_pct": pressure_pct,
         "uma_pressure_level": pressure_level,
-        "is_warn": is_uma_warn(),
-        "is_critical": is_uma_critical(),
-        "is_emergency": is_uma_emergency(),
         "platform": platform.system(),
     }
 
@@ -275,8 +275,9 @@ def format_uma_budget_report() -> str:
         "",
         f"UMA Used:       {snap['uma_used_mb']:,} MB ({snap['uma_usage_pct']}%)",
         f"Pressure Level: {snap['uma_pressure_level']}",
-        f"Is Warn:        {snap['is_warn']}",
-        f"Is Critical:    {snap['is_critical']}",
+        f"Is Warn:        {is_uma_warn()}",
+        f"Is Critical:    {is_uma_critical()}",
+        f"Is Emergency:   {is_uma_emergency()}",
     ]
 
     return "\n".join(lines)

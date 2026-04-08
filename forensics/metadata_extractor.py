@@ -476,8 +476,10 @@ class MetadataCache:
         self._lock = asyncio.Lock()
 
     async def initialize(self) -> None:
-        """Initialize database tables."""
+        """Initialize database tables (idempotent: safe to call multiple times)."""
         async with self._lock:
+            if self._conn is not None:
+                return  # Already initialized
             self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS metadata_cache (
@@ -628,7 +630,7 @@ class UniversalMetadataExtractor:
             cache_path: Path to SQLite cache database
             enable_exif: Enable EXIF extraction from images
             enable_gps: Enable GPS coordinate extraction
-            enable_reverse_geocode: Enable reverse geocoding (requires internet)
+            enable_reverse_geocode: Enable reverse geocoding (no-op stub: always returns None)
             enable_audio: Enable audio metadata extraction
             enable_video: Enable video metadata extraction (requires ffmpeg)
             calculate_hashes: Calculate file hashes
@@ -661,19 +663,24 @@ class UniversalMetadataExtractor:
         self._initialized = False
 
     def _get_file_hash(self, file_path: str) -> Tuple[str, float, int]:
-        """Calculate file hash and get modification time.
+        """Calculate a partial content hash and get modification time.
+
+        For files larger than 2MB, this hashes only the first 1MB and the last 1MB.
+        For files 2MB or smaller, the full content is hashed.
+        This is a bounded strategy to avoid reading entire large files into memory.
 
         Args:
             file_path: Path to file
 
         Returns:
-            Tuple of (content_hash, mod_time, file_size)
+            Tuple of (partial_content_hash, mod_time, file_size)
+            Note: partial_content_hash is md5 of first+last 1MB for large files
         """
         stat = os.stat(file_path)
         mod_time = stat.st_mtime
         file_size = stat.st_size
 
-        # Calculate hash from first and last 1MB for large files
+        # Partial hash: first and last 1MB for large files (bounded I/O, M1-safe)
         hasher = hashlib.md5()
         with open(file_path, "rb") as f:
             if file_size <= 2 * 1024 * 1024:
