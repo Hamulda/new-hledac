@@ -1458,8 +1458,13 @@ def get_task_handler(task_type: str) -> Callable | None:
 
 
 def list_registered_tasks() -> list[str]:
-    """Return list of registered task type names."""
-    get_task_handler("__warmup__")  # trigger lazy load
+    """Return list of registered task type names.
+
+    Read-side metadata listing — does NOT trigger handler zoo load.
+    No __warmup__ trigger: __warmup__ is not a registered handler,
+    and triggering it would import ti_feed_adapter (19 @register_task
+    decorators) unnecessarily for a metadata-only listing.
+    """
     return list(_TASK_HANDLERS.keys())
 
 

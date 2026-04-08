@@ -92,12 +92,11 @@ async def _preflight_check() -> dict:
         results["memory_pct"] = vm.percent
     except Exception:
         results["free_ram_mb"] = -1
-    try:
-        import duckdb
-        duckdb.connect()
-        results["duckdb"] = True
-    except Exception:
-        results["duckdb"] = False
+    # Sprint F500J §2: REMOVED duckdb.connect() eager check.
+    # DuckDB availability is verified through store.async_initialize() in the
+    # runtime flow. duckdb_store.py lazy-imports duckdb via _get_duckdb().
+    # Calling duckdb.connect() here was a heavyweight eager import (~30-50ms)
+    # that provided no truth value since sprint always runs regardless.
     logger.info(f"[PREFLIGHT] {results}")
     return results
 

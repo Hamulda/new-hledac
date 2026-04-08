@@ -47,10 +47,10 @@ ADMISSION BLOCKERS (před F11 připojením):
 2. Source plane: EXISTS — SourceFamily (line 129) + SourcePlan (line 2348) +
    _build_source_plan() (line 2379) jsou definované
 3. Transport plane (FetchCoordinator): EXISTS (FetchCoordinator class exists),
-   but NOT wired to DeepResearch runtime path (full integration TBD)
-4. Session seams (BudgetManager, EvidenceLog): TBD
-5. Security gate (SecurityGate, privacy layer): TBD
-6. Minimal grounding seam (ProviderRequest/ProviderResult handoff): TBD
+   exists, not wired to DeepResearch runtime path
+4. Session seams (BudgetManager, EvidenceLog): exists, not wired to DeepResearch
+5. Security gate (SecurityGate, privacy layer): exists, not wired to DeepResearch
+6. Minimal grounding seam (ProviderRequest/ProviderResult handoff): exists, not wired to DeepResearch
 
 M1 8GB Optimized: Lazy loading, chunked processing, aggressive memory management
 """
@@ -2263,7 +2263,13 @@ async def enhanced_research(
     config: Optional[EnhancedResearchConfig] = None
 ) -> Dict[str, Any]:
     """
-    Quick enhanced research using all available features.
+    Convenience helper — NON-CANONICAL, backward-compat only.
+
+    This is a backward-compat convenience wrapper around EnhancedResearchOrchestrator,
+    NOT a canonical runtime entrypoint. Uses EnhancedResearchOrchestrator.research()
+    which is an orchestrator residue surface (deprecated).
+
+    For new code, prefer deep_research_provider_seam() after F11 activation.
 
     Args:
         query: Research query
@@ -2328,7 +2334,10 @@ def create_unified_research_engine(
     **kwargs
 ) -> UnifiedResearchEngine:
     """
-    Factory function for creating UnifiedResearchEngine.
+    NON-CANONICAL factory function — backward-compat only.
+
+    Creates UnifiedResearchEngine instance. For new code, prefer
+    direct instantiation with UnifiedResearchConfig after F11 activation.
 
     Args:
         depth: Default research depth

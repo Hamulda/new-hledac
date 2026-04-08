@@ -1,6 +1,6 @@
-# config/paths.py - Single Source of Truth for Runtime Paths
-# SPRINT 8AJ: RAMDISK PATH AUTHORITY + LMDB/SOCKET BOOT HYGIENE
-# ZERO-DEPENDENCY: stdlib only (os, pathlib, warnings, subprocess, typing, stat, errno, tempfile, atexit, shutil)
+# hledac/universal/paths.py - Single Source of Truth for Runtime Paths
+# SPRINT F500I: CANONICAL PATH AUTHORITY + BOOT HYGIENE + IMPORT TRUTH
+# ZERO-DEPENDENCY: stdlib only (os, pathlib, warnings, subprocess, typing, stat, errno, tempfile, shutil)
 
 from __future__ import annotations
 
