@@ -192,7 +192,7 @@ class ToolExecLog:
             run_id: Run identifier for this execution
         """
         self._run_dir = run_dir
-        self._enable_persist = enable_persist
+        self._persist_enabled = enable_persist  # Explicit persist mode flag
         self._run_id = run_id
 
         # Chain state
@@ -204,6 +204,9 @@ class ToolExecLog:
 
         # Batching state for fsync
         self._events_since_fsync = 0
+
+        # Explicit closed state — never conflated with _persist_file
+        self._closed = False
 
         # Persist file
         self._persist_file: Optional[Any] = None
@@ -264,10 +267,9 @@ class ToolExecLog:
         """
         import uuid
 
-        # Audit truth guard: after finalize() the audit trail is closed.
-        # log() must NOT silently mutate RAM chain state without persisting —
-        # that would create a false impression of a live append-only ledger.
-        if self._persist_file is None and self._seq > 0:
+        # Audit truth guard: after finalize()/close() the audit trail is closed.
+        # Explicit _closed state — not a proxy via _persist_file.
+        if self._closed:
             raise RuntimeError(
                 "ToolExecLog.log() called after finalize()/close(): "
                 "audit trail is closed, refusing to log event"
@@ -334,10 +336,10 @@ class ToolExecLog:
             except Exception as e:
                 logger.error(f"Failed to persist tool event: {e}")
 
-        # Add to ring buffer (only if still open — ring buffer is meaningful
-        # only while the ledger is open; closed logs should not accumulate RAM)
-        if self._persist_file is not None:
-            self._log.append(event)
+        # Add to ring buffer — always, while ledger is open.
+        # Ring buffer is meaningful for audit in both persist and no-persist modes.
+        # Closed logs must not accumulate RAM (enforced via _closed check at top).
+        self._log.append(event)
 
         return event
 
@@ -353,10 +355,9 @@ class ToolExecLog:
                 - first_seq: int
                 - errors: list of issues
         """
-        # Read all events from disk if persist enabled
+        # Read all events from disk if persist was enabled
         events: List[ToolExecEvent] = []
-        if self._persist_file:
-            # Re-open and read
+        if self._persist_enabled:
             log_file = self._run_dir / "logs" / "tool_exec.jsonl"
             if log_file.exists():
                 with open(log_file, 'r') as f:
@@ -417,6 +418,8 @@ class ToolExecLog:
             "ram_events": len(self._log),
             "head_hash": self._chain_head,
             "run_id": self._run_id,
+            "persist_enabled": self._persist_enabled,
+            "closed": self._closed,
         }
 
     def close(self) -> None:
@@ -424,7 +427,9 @@ class ToolExecLog:
         self.finalize()
 
     def finalize(self) -> None:
-        """Finalize log - always flush and fsync pending events for crash safety"""
+        """Finalize log - always flush and fsync pending events for crash safety."""
+        if self._closed:
+            return  # Idempotent: already closed
         if self._persist_file:
             try:
                 # Always flush remaining events (even if < N events since last fsync)
@@ -436,6 +441,7 @@ class ToolExecLog:
                 logger.error(f"Error finalizing tool exec log: {e}")
             finally:
                 self._persist_file = None
+        self._closed = True
 
     def __enter__(self) -> "ToolExecLog":
         return self

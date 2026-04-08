@@ -1677,11 +1677,15 @@ class SprintScheduler:
             # Control mode from lifecycle
             ctrl_mode = lifecycle_bundle.control_phase.mode if hasattr(lifecycle_bundle, 'control_phase') else "normal"
 
+            # Sprint F350E: registry is metadata-only deferred — never materialized in shadow path.
+            # Shadow path uses source_tier_map as lightweight heuristic (avoids cold-import cost).
+            registry_tools: Optional[list[str]] = None  # deferred: no full registry init in shadow path
+
             dispatch_preview = preview_dispatch_parity(
                 task_candidates=task_candidates,
                 available_capabilities=available_caps,
                 control_mode=ctrl_mode,
-                registry_tools=registry.list_tools() if registry else None,
+                registry_tools=registry_tools,
             )
 
             # Sprint F9: Attach execution context readiness (capability/correlation/audit separation)

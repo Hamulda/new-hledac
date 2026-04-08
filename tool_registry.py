@@ -320,47 +320,41 @@ class ToolRegistry:
         self._tools: dict[str, Tool] = {}
         self._call_counts: dict[str, int] = {}
         self._semaphores: dict[str, asyncio.Semaphore] = {}
-        # FIX 1: Register InferenceEngine as a tool
-        self._register_inference_tool()
-        # Sprint 41: Register DNS Tunnel Detector as a tool
-        self._register_dns_tunnel_tool()
+        # Sprint F600H: Deferred init — no eager heavyweight tool instantiation.
+        # _inference_engine and _dns_tunnel_detector are lazily created on first use
+        # via their respective _ensure_*() methods, not at registry construction time.
+        self._inference_engine: Optional[Any] = None
+        self._dns_tunnel_detector: Optional[Any] = None
 
-    def _register_inference_tool(self) -> None:
-        """Register InferenceEngine as a tool (lazy, no heavy init)."""
+    def _ensure_inference_tool_registered(self) -> None:
+        """Lazily register InferenceEngine tool on first use."""
+        if self._inference_engine is not None:
+            return  # Already registered
         from .brain.inference_engine import InferenceEngine, create_inference_tool
         import time
 
-        # Create engine instance (lazy - no heavy init)
         self._inference_engine = InferenceEngine()
-
-        # Define the actual execution function as a method (for test access)
         self._execute_inference = self._make_inference_executor()
-
-        # Create tool with handler passed in constructor
         infer_tool = create_inference_tool(self._inference_engine, execute_fn=self._execute_inference)
-        # Override the handler with our execute function
         infer_tool.handler = self._execute_inference
         self.register(infer_tool)
 
     def _make_inference_executor(self):
         """Create inference executor method."""
-        engine = self._inference_engine
-
         def _execute_inference(args: dict) -> dict:
+            self._ensure_inference_tool_registered()
+            engine = self._inference_engine
             mode = args.get("mode")
             max_hops = args.get("max_hops", 3)
 
             if mode == "multi_hop":
-                # Async mode - cannot be called from sync dispatcher.
                 return {"error": "multi_hop must be called via _infer_hypotheses async wrapper"}
             elif mode == "abductive":
                 obs_list = args.get("observations", [])
                 from .brain.inference_engine import Evidence
                 observations = [Evidence(fact=o, source="research", confidence=0.7, timestamp=time.time()) for o in obs_list]
-                # First add evidence to the graph
                 for obs in observations:
                     engine.add_evidence(obs)
-                # Then run abductive reasoning
                 result = engine.abductive_reasoning(observations, max_hops)
                 return {"hypotheses": [h.to_dict() for h in result]}
             elif mode == "chain":
@@ -386,22 +380,19 @@ class ToolRegistry:
 
         return _execute_inference
 
-    def _register_dns_tunnel_tool(self) -> None:
-        """Sprint 41: Register DNS Tunnel Detector as a tool."""
+    def _ensure_dns_tunnel_tool_registered(self) -> None:
+        """Sprint F600H: Lazily register DNS Tunnel Detector on first use."""
+        if self._dns_tunnel_detector is not None:
+            return  # Already registered
         if not DNS_TUNNEL_AVAILABLE:
             return
 
-        # Create detector instance (lazy - will be initialized on first use)
         self._dns_tunnel_detector = create_dns_tunnel_detector(DNSTunnelConfig(
-            enable_lstm=True,  # uses heuristic fallback - model is untrained
+            enable_lstm=True,
             entropy_threshold=4.2,
-            max_queries_per_batch=500  # bounded for M1 8GB
+            max_queries_per_batch=500
         ))
-
-        # Store executor reference for tests
         self._execute_dns_tunnel = self._make_dns_tunnel_executor()
-
-        # Create and register tool
         dns_tool = Tool(
             name="dns_tunnel_check",
             description="DNS tunneling detection: entropy+ngram+LSTM cascade for domain analysis",

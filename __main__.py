@@ -2567,7 +2567,7 @@ async def _run_sprint_mode(
             if gs:
                 logger.info(
                     f"[GRAPH] nodes={gs['nodes']} edges={gs['edges']} "
-                    f"pgq={gs['pgq_active']}"
+                    f"pgq={gs.get('pgq_available', gs.get('pgq_active'))}"
                 )
                 if _top_iocs:
                     first_ioc = _top_iocs[0].get("ioc") if isinstance(_top_iocs[0], dict) else None
@@ -2709,7 +2709,7 @@ async def _windup_synthesis(
     # Sprint 8VA D: HypothesisEngine closed loop — generate hypotheses from findings
     if findings and len(findings) > 0:
         try:
-            from brain.hypothesis_engine import HypothesisEngine
+            from hledac.universal.brain.hypothesis_engine import HypothesisEngine
             _hyp_engine = HypothesisEngine()
             finding_texts = [f.get("text", "")[:200] for f in findings[:10]]
             hypotheses = _hyp_engine.generate_sprint_hypotheses(
@@ -2869,8 +2869,8 @@ async def run_warmup(
     # 3. DuckPGQGraph init + merge předchozích dat
     if not hasattr(scheduler, "_ioc_graph") or scheduler._ioc_graph is None:
         try:
-            from graph.quantum_pathfinder import DuckPGQGraph
-            from paths import SPRINT_STORE_ROOT
+            from hledac.universal.graph.quantum_pathfinder import DuckPGQGraph
+            from hledac.universal.paths import SPRINT_STORE_ROOT
             import glob
             scheduler._ioc_graph = DuckPGQGraph()
             prev_glob = str(SPRINT_STORE_ROOT / "*" / "batch_*.parquet")
@@ -2884,7 +2884,7 @@ async def run_warmup(
     # 4. IOCScorer lazy init
     if not hasattr(scheduler, "_ioc_scorer") or scheduler._ioc_scorer is None:
         try:
-            from brain.ner_engine import IOCScorer
+            from hledac.universal.brain.ner_engine import IOCScorer
             scheduler._ioc_scorer = IOCScorer()
         except Exception as e:
             _logger.warning(f"[WARMUP] IOCScorer init: {e}")

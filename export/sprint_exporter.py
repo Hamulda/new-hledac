@@ -79,9 +79,16 @@ async def export_sprint(
             logger.info("[EXPORT] sanitize_outbound: pii_count=%s, risk=%s",
                         gate_result.get("pii_count"), gate_result.get("risk_level", "unknown"))
     except Exception as e:
-        # Fail-soft: fall back to unsanitized content, log warning
+        # Fail-soft: fall back to DEGRADED SANITIZED-SAFE structure, NOT unsanitized original.
+        # Sprint F500M §1 CRITICAL: boundary_text is UNSANITIZED — never return it.
+        # Produces a bounded degraded report structure that is safe for export.
         logger.warning("[EXPORT] sanitize_outbound failed (non-fatal): %s", e)
-        sanitized_scorecard_raw = boundary_text
+        degraded = {
+            "_sanitize_failure": True,
+            "sprint_id": _sprint_id,
+            "report": "sanitization_failed_degraded_export",
+        }
+        sanitized_scorecard_raw = json.dumps(degraded, default=str)
 
     # 1. JSON report — write via canonical path (F10 boundary applied)
     # report_path already computed via get_sprint_json_report_path() above
