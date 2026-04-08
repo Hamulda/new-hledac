@@ -182,6 +182,10 @@ class SprintLifecycleManager:
         """
         Return a JSON-serializable dict representing the current state.
 
+        DIAGNOSTIC ONLY — this is a read-only snapshot for monitoring,
+        not a second authority. The authoritative state is the live
+        _current_phase field and current_phase property.
+
         No Path objects, no open handles — recovery-safe.
         """
         return {
@@ -252,8 +256,10 @@ class SprintLifecycleManager:
         """
         COMPAT ALIAS — forwards to start().
 
-        Canonical: use start() directly. This alias exists to support
-        __main__.py cutover without rewriting call-sites in this pass.
+        Canonical: use start() directly.
+        NOTE: start() transitions BOOT→WARMUP only (not to ACTIVE).
+        Full activation requires: start() then mark_warmup_done() or transition_to(ACTIVE).
+        This alias exists to support __main__.py cutover without rewriting call-sites.
 
         F4 metadata:
           future_owner: __main__.py
@@ -272,13 +278,13 @@ class SprintLifecycleManager:
         """
         COMPAT ALIAS — transitions WARMUP→ACTIVE.
 
-        Canonical: the WARMUP→ACTIVE transition happens via start() followed by
-        mark_warmup_done() or directly via transition_to(ACTIVE).
-        This alias exists for __main__.py call-site compatibility.
+        Canonical: use transition_to(SprintPhase.ACTIVE) directly.
+        NOTE: start() goes BOOT→WARMUP only. WARMUP→ACTIVE requires this alias
+        or explicit transition_to(ACTIVE). __main__.py uses this alias directly.
 
         F4 metadata:
           future_owner: __main__.py
-          removal_condition: start() handles WARMUP→ACTIVE; or __main__.py uses transition_to(ACTIVE)
+          removal_condition: __main__.py uses transition_to(ACTIVE) directly; or start() gains WARMUP→ACTIVE
         """
         self.transition_to(SprintPhase.ACTIVE)
 
@@ -366,6 +372,11 @@ class SprintLifecycleManager:
 
         Canonical: use should_enter_windup() directly.
 
+        NOTE: This is a time-based heuristic (remaining <= windup_lead_s),
+        NOT a phase-state check. Use in_phase(SprintPhase.WINDUP) for phase-state.
+
+        DIAGNOSTIC ONLY — for read-only shadow paths only.
+
         F4 metadata:
           future_owner: synthesis_runner.py
           removal_condition: synthesis_runner uses should_enter_windup() from runtime path
@@ -384,7 +395,10 @@ class SprintLifecycleManager:
         """
         COMPAT PROPERTY — True when in ACTIVE phase.
 
-        Canonical: use _current_phase == SprintPhase.ACTIVE.
+        Canonical: use in_phase(SprintPhase.ACTIVE) or current_phase == SprintPhase.ACTIVE.
+
+        DIAGNOSTIC ONLY — this property is intended for read-only shadow paths.
+        Do NOT use for runtime dispatch or path decisions.
 
         F4 metadata:
           future_owner: callers (shadow_* modules)
@@ -404,7 +418,10 @@ class SprintLifecycleManager:
         """
         COMPAT PROPERTY — True when in WINDUP, EXPORT, or TEARDOWN.
 
-        Canonical: use _current_phase in (SprintPhase.WINDUP, SprintPhase.EXPORT, SprintPhase.TEARDOWN).
+        Canonical: use in_phase(SprintPhase.WINDUP) or current_phase in (WINDUP, EXPORT, TEARDOWN).
+
+        DIAGNOSTIC ONLY — this property is intended for read-only shadow paths.
+        Do NOT use for runtime dispatch or path decisions.
 
         F4 metadata:
           future_owner: callers (shadow_* modules)

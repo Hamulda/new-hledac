@@ -131,6 +131,7 @@ async def async_get_aiohttp_session() -> aiohttp.ClientSession:
 
 # Alias for backward compatibility
 get_aiohttp_session = async_get_aiohttp_session
+"""Alias for async_get_aiohttp_session(). Provided for backward compatibility."""
 
 
 def close_aiohttp_session() -> None:

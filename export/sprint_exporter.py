@@ -111,18 +111,18 @@ async def export_sprint(
         report_path = None
 
     # 2. Seed tasky pro příští sprint — top_nodes z ExportHandoff (typed)
-    # COMPAT SEAM (pre-8VZ): windup_engine wrote top_graph_nodes to scorecard dict.
     # Post-8VZ: __main__._print_scorecard_report() sources top_nodes directly from
     # store.get_top_seed_nodes() and passes them to ExportHandoff(...) constructor.
     # Export does NOT access scheduler._ioc_graph — store-facing seam only.
     top_nodes = eh.top_nodes if eh.top_nodes else []
 
-    # COMPAT BRIDGE: If top_nodes still empty (e.g. _windup_synthesis()
-    # ran but windup_engine.run_windup() did NOT populate scorecard), try store.
+    # COMPAT BRIDGE: When top_nodes empty (e.g. windup path bypassed
+    # _print_scorecard_report but export_sprint() still called directly),
+    # fall back to store.get_top_seed_nodes() — store-facing seam.
     # Sprint 8VX §B: switched from store._ioc_graph.get_top_nodes_by_degree()
-    # to store.get_top_seed_nodes() — store-facing seam, no graph internals.
+    # to store.get_top_seed_nodes() — no graph internals exposed.
     # Future owner: duckdb_store.get_top_seed_nodes()
-    # Removal condition: ExportHandoff.top_nodes is populated in ALL windup paths
+    # REMOVAL CONDITION: ExportHandoff.top_nodes always populated in ALL windup paths
     if not top_nodes and store is not None:
         try:
             if hasattr(store, "get_top_seed_nodes"):
@@ -162,10 +162,12 @@ def _generate_next_sprint_seeds(
       - Colocation: when report_path write succeeded, seeds land in same dir as JSON report
       - Fallback: SPRINT_STORE_ROOT.parent/"reports" if report_path is None (write failed)
 
-    Každý top IOC generuje 3 follow-up tasky:
-      - rdap_lookup (nejvyšší priorita)
-      - domain_to_ct
-      - dht_infohash_lookup
+    Type-aware seed generation (Sprint F500G §H2):
+      - domain → rdap_lookup + domain_to_ct
+      - ip/ipv4/ipv6 → rdap_lookup only
+      - url → rdap_lookup only
+      - infohash → dht_infohash_lookup only
+      - onion/cve/hash/unknown → NO seeds (truthful skip)
     """
     # Sprint F500D §3: Use canonical helper; colocation via report_path parent
     from hledac.universal.paths import get_sprint_next_seeds_path, SPRINT_STORE_ROOT

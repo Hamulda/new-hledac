@@ -466,13 +466,6 @@ _LAZY_SUBPACKAGES = {
     "quick_sanitize": (".security", "quick_sanitize"),
     "LootManager": (".security", "LootManager"),
     "RamDiskVault": (".security", "RamDiskVault"),
-    # Supreme Brain
-    "SerializedTreePlanner": (".autonomy.planner", "SerializedTreePlanner"),
-    "TreeNodeStatus": (".autonomy.planner", "TreeNodeStatus"),
-    "Thought": (".autonomy.planner", "Thought"),
-    "TreeNode": (".autonomy.planner", "TreeNode"),
-    "PlannerState": (".autonomy.planner", "PlannerState"),
-    "create_tree_planner": (".autonomy.planner", "create_tree_planner"),
 }
 
 # Also lazily export non-existent symbols that were previously in __all__ but not defined
@@ -480,10 +473,21 @@ _LAZY_SUBPACKAGES = {
 # Actual load state is tracked by the try/except block below (always False currently).
 # Adding it back here with False would be a duplicate of the runtime truth.
 _FALLBACK_ATTRS = {
+    # Availability flags (set by try/except blocks at runtime)
     "ENHANCED_ORCHESTRATOR_AVAILABLE": False,
     "INTEGRATED_ORCHESTRATOR_AVAILABLE": False,
     "BUDGET_MANAGER_AVAILABLE": False,
     "UNIFIED_RESEARCH_AVAILABLE": False,
+    # F1200B: Dead lazy exports — .autonomy.planner does NOT exist.
+    # These symbols raise AttributeError at access time (not ImportError).
+    # Moved from _LAZY_SUBPACKAGES to _FALLBACK_ATTRS to prevent
+    # ImportError when the non-existent module path is requested.
+    "SerializedTreePlanner": None,
+    "TreeNodeStatus": None,
+    "Thought": None,
+    "TreeNode": None,
+    "PlannerState": None,
+    "create_tree_planner": None,
 }
 
 
