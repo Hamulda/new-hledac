@@ -17,14 +17,41 @@ from typing import Any, Dict, Optional, Set, Callable, Awaitable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .types import AnalyzerResult
+    # Type-checker stubs only — these are NOT present at runtime so that
+    # __getattr__ can intercept access to mx and MLX_AVAILABLE lazily.
+    MLX_AVAILABLE: bool
+    mx: Any
 from dataclasses import dataclass
 
-try:
-    import mlx.core as mx
-    MLX_AVAILABLE = True
-except ImportError:
-    MLX_AVAILABLE = False
-    mx = None
+# MLX lazy import — avoid eager ~171ms tax at module load time.
+# F600D: Gate layer must be lightweight. MLX is only needed in
+# ModelLifecycleManager._release_all_models() which is runtime call,
+# not import-time. Using module-level __getattr__ for lazy mlx.core loading.
+_MLX_LOADED = False
+
+def __getattr__(name: str) -> Any:
+    global _MLX_LOADED
+    if name == "MLX_AVAILABLE":
+        if not _MLX_LOADED:
+            try:
+                import mlx.core as _mx
+                globals()["mx"] = _mx
+                _MLX_LOADED = True
+            except ImportError:
+                _MLX_LOADED = True  # Mark as loaded (failed)
+        return _MLX_LOADED and "mx" in globals()
+    if name == "mx":
+        if not _MLX_LOADED:
+            try:
+                import mlx.core as _mx
+                globals()["mx"] = _mx
+                _MLX_LOADED = True
+            except ImportError:
+                _MLX_LOADED = True
+                raise AttributeError("mlx.core not available")
+        return globals().get("mx")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 logger = logging.getLogger(__name__)
 
@@ -685,10 +712,13 @@ class ModelLifecycleManager:
         gc.collect()
 
         # Clear MLX cache if available
-        if MLX_AVAILABLE and mx:
+        # Use globals directly to avoid __getattr__ type confusion in pyright
+        global _MLX_LOADED
+        if _MLX_LOADED and "mx" in globals():
+            _mx_mod = globals()["mx"]
             try:
-                mx.eval([])
-                mx.clear_cache()
+                _mx_mod.eval([])
+                _mx_mod.clear_cache()
                 logger.debug("[MODEL] MLX cache cleared")
             except Exception:
                 pass
@@ -773,14 +803,14 @@ def create_default_registry() -> CapabilityRegistry:
     registry.register(
         capability=Capability.INSIGHT,
         available=check_module("hledac.universal.brain.insight_engine")[0],
-        reason="",
+        reason="Insight engine available" if check_module("hledac.universal.brain.insight_engine")[0] else "Insight engine not available",
         module_path="hledac.universal.brain.insight_engine"
     )
 
     registry.register(
         capability=Capability.PATTERN_MINING,
         available=check_module("hledac.universal.intelligence.pattern_mining")[0],
-        reason="",
+        reason="Pattern mining available" if check_module("hledac.universal.intelligence.pattern_mining")[0] else "Pattern mining not available",
         module_path="hledac.universal.intelligence.pattern_mining"
     )
 

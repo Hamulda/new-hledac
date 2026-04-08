@@ -23,7 +23,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
 if TYPE_CHECKING:
     from .autonomous_analyzer import AutoResearchProfile
 
-import numpy as np
+    import numpy as np
+
+else:
+    import numpy as np  # noqa: E402 — loaded lazily to reduce cold-import tax
 
 
 # =============================================================================

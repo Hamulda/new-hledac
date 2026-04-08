@@ -272,7 +272,7 @@ class GraphSummaryBundle:
     - __future_owner__: "knowledge/duckdb_store.py" — canonical owner
 
     duckdb_store public seams (Sprint 8VY/8TF):
-    - get_graph_stats() → {nodes, edges, pgq_active} or {} fail-open
+    - get_graph_stats() → {nodes, edges, pgq_available} or {} fail-open (DuckPGQGraph.stats() truth, F700E)
     - get_top_seed_nodes(n=5) → list[dict] or [] fail-open
     - get_connected_iocs(value, max_hops) → list or [] fail-open
     - get_analytics_graph_for_synthesis() → DuckPGQGraph | None
@@ -294,10 +294,13 @@ class GraphSummaryBundle:
     @classmethod
     def from_ioc_graph_stats(cls, stats: Dict[str, Any], top_nodes: Optional[List[Any]] = None) -> "GraphSummaryBundle":
         """Build from duckdb_store.get_graph_stats() dict. STABLE path."""
+        # F700E fix: DuckPGQGraph.stats() returns pgq_available (truth).
+        # Fall back to pgq_active for backward compat with older callers.
+        pgq_value = stats.get("pgq_available", stats.get("pgq_active", False))
         return cls(
             node_count=stats.get("nodes", 0),
             edge_count=stats.get("edges", 0),
-            pgq_active=stats.get("pgq_active", False),
+            pgq_active=pgq_value,
             top_nodes=top_nodes or [],
             backend="duckpgq",
             raw_stats=stats,

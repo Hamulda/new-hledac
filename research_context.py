@@ -79,11 +79,11 @@ class ContextHandoffMetadata:
         """
         Convert to RunCorrelation-compatible dict for EvidenceLog injection.
 
-        Mapping:
-          parent_run_id → run_id  (run context propagation)
-          branch_id     → branch_id (parallel branch correlation)
-          provider_id   → None     (set by provider layer, not carrier)
-          action_id     → None     (set by action layer, not carrier)
+        STABLE CORRELATION GRAMMAR (always 4 keys, values may be None):
+          run_id     = parent_run_id  (run context propagation)
+          branch_id  = branch_id      (parallel branch correlation)
+          provider_id = None          (set by provider layer, not carrier)
+          action_id  = None          (set by action layer, not carrier)
 
         NOTE: This is a one-way conversion from handoff metadata to correlation.
               The carrier owns the handoff metadata; the ledger owns correlation.
@@ -94,6 +94,37 @@ class ContextHandoffMetadata:
             "provider_id": None,
             "action_id": None,
         }
+
+    @classmethod
+    def from_dict_compat(cls, data: Dict[str, Any]) -> "ContextHandoffMetadata":
+        """
+        Reconstruct typed ContextHandoffMetadata from raw dict compat shape.
+
+        BACKWARD-COMPAT SEAM: Allows existing raw dict handoffs stored in
+        context_metadata["handoff"] to be truthfully elevated to typed form.
+
+        Supported dict shapes:
+          - {"parent_run_id": "...", "branch_id": "...", ...}  (legacy)
+          - {"phase": "...", "ttl_seconds": 300, ...}         (structured)
+
+        Args:
+            data: Raw dict from context_metadata["handoff"]
+
+        Returns:
+            ContextHandoffMetadata with fields extracted from dict
+
+        NOTE: This is a COMPATIBILITY coercion, not a general validator.
+              Fields not matching the dataclass signature are silently dropped.
+        """
+        return cls(
+            phase=data.get("phase"),
+            branch_id=data.get("branch_id"),
+            parent_run_id=data.get("parent_run_id"),
+            iteration_snapshot=data.get("iteration_snapshot"),
+            source_component=data.get("source_component"),
+            target_components=data.get("target_components"),
+            ttl_seconds=data.get("ttl_seconds"),
+        )
 
 
 class EntityType(str, Enum):
@@ -274,13 +305,20 @@ class ResearchContext(BaseModel):
         """
         Get typed handoff metadata from context_metadata dict.
 
+        BACKWARD-COMPAT: If context_metadata["handoff"] is a raw dict (legacy
+        storage format), attempt to coerce it to ContextHandoffMetadata via
+        from_dict_compat(). If coercion fails or value is not a dict, return None.
+
         Returns:
             ContextHandoffMetadata if stored in context_metadata["handoff"], else None.
-            This is a convenience accessor — carrier does NOT validate handoff.
+            Typed object or None — never a raw dict.
         """
         handoff = self.context_metadata.get("handoff")
         if isinstance(handoff, ContextHandoffMetadata):
             return handoff
+        if isinstance(handoff, dict):
+            # BACKWARD-COMPAT: coerce raw dict to typed form
+            return ContextHandoffMetadata.from_dict_compat(handoff)
         return None
 
     def set_handoff_metadata(self, metadata: ContextHandoffMetadata) -> None:
@@ -297,17 +335,23 @@ class ResearchContext(BaseModel):
         """
         Get RunCorrelation-compatible dict from stored handoff metadata.
 
-        This is a convenience accessor that combines:
-          1. get_handoff_metadata() to retrieve stored handoff
-          2. to_correlation_dict() to convert to correlation dict
+        STABLE CORRELATION GRAMMAR: Always returns exactly 4 keys:
+          run_id, branch_id, provider_id, action_id
+
+        Values may be None if no handoff metadata is stored.
 
         Returns:
             Correlation dict suitable for EvidenceLog.create_event(correlation=...)
-            Empty dict if no handoff metadata is stored.
+            Stable grammar dict (all 4 keys present) even when handoff is absent.
         """
         handoff = self.get_handoff_metadata()
         if handoff is None:
-            return {}
+            return {
+                "run_id": None,
+                "branch_id": None,
+                "provider_id": None,
+                "action_id": None,
+            }
         return handoff.to_correlation_dict()
 
     # Časové značky

@@ -255,6 +255,12 @@ def run_shadow_parity(
     # --- Windup local phase checks ---
     windup_mode = lifecycle_bundle.windup_local_phase.mode if lifecycle_bundle.windup_local_phase else None
 
+    # --- PHASE_FIELD_MERGE explicit detection ---
+    # Structural bug: if in WINDUP but windup_local_phase is None, OR if not in WINDUP
+    # but windup_local_phase is set — these are explicit phase field merge violations,
+    # NOT generic LIFECYCLE mismatches. Emit PHASE_FIELD_MERGE explicitly.
+    _check_phase_field_merge_bug(lifecycle_bundle, mismatches, mismatch_details)
+
     # --- Graph capability checks ---
     graph_backend = graph_bundle.backend
     if graph_backend == "unknown":
@@ -376,6 +382,45 @@ def _check_phase_field_merge(
     if wf != "WINDUP" and bundle.windup_local_phase is not None:
         mismatches.append("LIFECYCLE")
         mismatch_details["windup_local_phase"] = f"not WINDUP but windup_local_phase={bundle.windup_local_phase.mode}"
+
+
+def _check_phase_field_merge_bug(
+    bundle: "LifecycleSnapshotBundle",
+    mismatches: List[str],
+    mismatch_details: Dict[str, Any],
+) -> None:
+    """
+    Detect explicit PHASE_FIELD_MERGE structural bugs.
+
+    These are distinct from generic LIFECYCLE mismatches — they represent
+    a specific structural violation where phase systems that should be
+    SEPARATED have been incorrectly merged or one is missing when expected.
+
+    PHASE_FIELD_MERGE is emitted EXPLICITLY when:
+    - In WINDUP but windup_local_phase is None (windup_local missing in WINDUP)
+    - Not in WINDUP but windup_local_phase is set (windup_local leaked outside WINDUP)
+
+    This is NOT the same as LIFECYCLE which covers general phase value anomalies.
+    """
+    wf = bundle.workflow_phase.phase
+
+    # WINDUP but no windup_local_phase — explicit structural bug
+    if wf == "WINDUP" and bundle.windup_local_phase is None:
+        if "PHASE_FIELD_MERGE" not in mismatches:
+            mismatches.append("PHASE_FIELD_MERGE")
+            mismatch_details["phase_field_merge"] = (
+                "workflow_phase=WINDUP but windup_local_phase=None — "
+                "windup_local synthesis mode missing in WINDUP context"
+            )
+
+    # Not WINDUP but windup_local_phase is set — explicit structural bug
+    if wf != "WINDUP" and bundle.windup_local_phase is not None:
+        if "PHASE_FIELD_MERGE" not in mismatches:
+            mismatches.append("PHASE_FIELD_MERGE")
+            mismatch_details["phase_field_merge"] = (
+                f"workflow_phase={wf} but windup_local_phase is set to "
+                f"{bundle.windup_local_phase.mode} — windup_local leaked outside WINDUP"
+            )
 
 
 # =============================================================================
