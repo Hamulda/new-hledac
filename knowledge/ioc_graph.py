@@ -173,17 +173,22 @@ class IOCGraph:
             return {"ioc_flushed": 0, "obs_flushed": 0}
 
         # Copy and clear buffers atomically
+        # NOTE: _closed must NOT be checked here — close() calls flush_buffers()
+        # and _closed is set BEFORE flush. The atomic copy+clear below is safe
+        # because flush happens BEFORE any subsequent writes are blocked.
         ioc_copy = self._ioc_buffer[:]
         obs_copy = self._obs_buffer[:]
         self._ioc_buffer.clear()
         self._obs_buffer.clear()
 
         ioc_ids: list[str] = []
+        obs_recorded: int = 0
         try:
             if ioc_copy:
                 ioc_ids = await self.upsert_ioc_batch(ioc_copy)
             if obs_copy:
                 await self._record_observation_batch_sync_async(obs_copy)
+                obs_recorded = len(obs_copy)
         except Exception as e:
             import logging
             logging.warning(f"[IOCGraph] flush_buffers failed: {e}")
@@ -191,9 +196,9 @@ class IOCGraph:
         import logging
         logging.info(
             f"[IOCGraph] Buffer flushed: {len(ioc_ids)} IOCs, "
-            f"{len(obs_copy)} observations"
+            f"{obs_recorded} observations"
         )
-        return {"ioc_flushed": len(ioc_ids), "obs_flushed": len(obs_copy)}
+        return {"ioc_flushed": len(ioc_ids), "obs_flushed": obs_recorded}
 
     async def _record_observation_batch_sync_async(
         self, obs: list[tuple[str, str, str, float, str]]

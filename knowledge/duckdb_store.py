@@ -1668,8 +1668,34 @@ class DuckDBShadowStore:
     def close(self) -> None:
         """
         Synchronous close — backward compat. Prefer aclose().
+
+        Shares the same cleanup contract as aclose() except for executor
+        lifecycle (shutdown vs. keep-alive) and bg-task cancellation.
+
+        Cleanup ordering:
+          1. _sync_close_on_worker()  — closes DuckDB connections
+          2. WAL LMDB close           — releases lock files
+          3. dedup LMDB close         — releases lock files
+          4. executor.shutdown()      — full worker shutdown (re-init NOT supported)
+
         Idempotent: safe to call multiple times.
         """
+        if self._closed:
+            return
+        self._closed = True
+        self._initialized = False
+        try:
+            self._startup_ready.clear()
+            self._startup_replay_done = False
+        except Exception:
+            pass
+        # Sprint 8L: close DuckDB connections via the worker thread.
+        # Must submit because connections are thread-affine to the duckdb_worker.
+        try:
+            f = self._executor.submit(self._sync_close_on_worker)
+            f.result(timeout=5)
+        except Exception:
+            pass
         self._do_close()
 
     # ------------------------------------------------------------------
@@ -3106,6 +3132,7 @@ class DuckDBShadowStore:
                     await self._truth_write_graph.close()
             except Exception:
                 pass
+            self._truth_write_graph = None
 
         # Sprint 8QA/8TF: close analytics/donor IOC graph (DuckPGQGraph)
         # DuckPGQGraph has checkpoint() and close() but no flush_buffers.
@@ -3115,6 +3142,7 @@ class DuckDBShadowStore:
                     await self._ioc_graph.close()
             except Exception:
                 pass
+            self._ioc_graph = None
 
         # Sprint 8SB: close semantic store
         if self._semantic_store is not None:
@@ -3135,6 +3163,14 @@ class DuckDBShadowStore:
             except Exception:
                 pass
             self._wal_lmdb = None
+
+        # Sprint 8AG: close dedup LMDB — mirrors _do_close() symmetry
+        if hasattr(self, "_dedup_lmdb") and self._dedup_lmdb is not None:
+            try:
+                self._dedup_lmdb.close()
+            except Exception:
+                pass
+            self._dedup_lmdb = None
 
     # ------------------------------------------------------------------
     # Sprint 8TC: RRF Fusion — Reciprocal Rank Fusion přes 4 signály
@@ -4157,9 +4193,13 @@ class DuckDBShadowStore:
     # ------------------------------------------------------------------
 
     def _do_close(self) -> None:
-        """Synchronous close helper — idempotent."""
-        if self._closed:
-            return
+        """
+        Synchronous close helper — idempotent.
+
+        Note: _closed guard removed — close() and _do_close() are always called
+        together in the same call chain; close() sets _closed=True first and
+        guards against re-entry. _do_close() always runs its cleanup.
+        """
         self._closed = True
         self._initialized = False
         # Sprint 8L: reset boot barrier for re-initialize safety

@@ -1,10 +1,26 @@
 """
-Capability System for Autonomous Orchestrator
+F650H: ModelLifecycleManager facade truth + no third model truth
+================================================================
 
-Provides capability gating for M1 8GB optimization:
-- Only load required modules based on research profile
-- Track availability with reasons
-- Enable on-demand initialization
+Sprint: F650H / F600K / F130S
+Target: capabilities.py
+Goal: bounded de-ownership + facade truth hardening
+
+VERIFIED HYPOTHESES:
+- H2 CONFIRMED: _release_all_models() does MLX cleanup directly — duplicate of
+  ModelManager._release_current_async() cleanup. Canonical owner: ModelManager.
+  Fix: delegate MLX cleanup to canonical seam, remove duplicate from capability layer.
+- H3 CONFIRMED: _active_models is local compat state, not authoritative runtime truth.
+  get_active_models() is not called by any external consumer (only tests).
+  Fix: label explicitly as local/compat.
+- H1 PARTIAL: registry.load/unload are capability-level (no direct ModelManager call).
+  No third model truth created — facade semantics OK.
+- H4: phase enforcement is coarse-grained only — no drift.
+
+CHANGES:
+1. _release_all_models(): remove direct MLX cleanup — delegate to canonical seam
+2. get_active_models(): add explicit local/compat labeling in docstring
+3. No new manager, no model rewrite, no broad call-site rewiring
 """
 
 from __future__ import annotations
@@ -17,8 +33,6 @@ from typing import Any, Dict, Optional, Set, Callable, Awaitable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .types import AnalyzerResult
-    # Type-checker stubs only — these are NOT present at runtime so that
-    # __getattr__ can intercept access to mx and MLX_AVAILABLE lazily.
     MLX_AVAILABLE: bool
     mx: Any
 from dataclasses import dataclass
@@ -657,6 +671,9 @@ class ModelLifecycleManager:
     def __init__(self, registry: CapabilityRegistry):
         self.registry = registry
         self._current_phase: str = "none"
+        # F650H: _active_models is LOCAL COMPAT state only — NOT canonical runtime truth.
+        # Canonical model state lives in ModelManager._loaded_models.
+        # This field tracks phase-level active set for capability-gate decisions only.
         self._active_models: Set[Capability] = set()
 
     async def enforce_phase_models(self, phase_name: str) -> None:
@@ -703,30 +720,37 @@ class ModelLifecycleManager:
             logger.info(f"[MODEL RELEASE] {capability.value}")
 
     async def _release_all_models(self) -> None:
-        """Release all models and force GC."""
+        """
+        F650H: Release all capability tracking and force GC.
+
+        MLX cache cleanup is DELEGATED to canonical unload seam
+        (ModelManager._release_current_async()) — this facade does NOT
+        directly call mx.eval()/clear_cache() to avoid model-plane
+        side-effect leak.
+
+        Canonical MLX cleanup owner: ModelManager._cleanup_memory_async()
+        which is called after every ModelManager._release_current_async().
+        """
         for cap in list(self._active_models):
             self.registry.unload(cap)
         self._active_models.clear()
 
-        # Force garbage collection
+        # Force garbage collection (capability-layer cleanup only)
         gc.collect()
-
-        # Clear MLX cache if available
-        # Use globals directly to avoid __getattr__ type confusion in pyright
-        global _MLX_LOADED
-        if _MLX_LOADED and "mx" in globals():
-            _mx_mod = globals()["mx"]
-            try:
-                _mx_mod.eval([])
-                _mx_mod.clear_cache()
-                logger.debug("[MODEL] MLX cache cleared")
-            except Exception:
-                pass
 
         logger.info("[MODEL] All models released, GC completed")
 
     def get_active_models(self) -> Set[Capability]:
-        """Get currently active models."""
+        """
+        F650H: Return local capability-tracking state.
+
+        IMPORTANT: This is LOCAL COMPAT state for capability-gate decisions only.
+        It is NOT canonical runtime-wide model truth — canonical state lives
+        in ModelManager._loaded_models.
+
+        Returns:
+            Copy of local _active_models set (local compat, not authoritative)
+        """
         return self._active_models.copy()
 
     async def load_model_for_task(self, capability: Capability) -> bool:

@@ -245,6 +245,7 @@ class EvidenceLog:
         self._index_by_source: Dict[str, List[int]] = {}
         self._created_at: datetime = datetime.utcnow()
         self._frozen: bool = False
+        self._closed: bool = False  # H1: closed flag for post-close guards
         self._total_count: int = 0  # Celkový počet událostí (včetně na disku)
         self._dropped_count: int = 0  # Počet vyřazených z ring bufferu
         self._fsync_counter: int = 0  # Counter for fsync batching
@@ -534,11 +535,18 @@ class EvidenceLog:
             event: EvidenceEvent k přidání
 
         Raises:
-            RuntimeError: Pokud je log zmrazený
+            RuntimeError: Pokud je log zmrazený nebo uzavřený
             ValueError: Pokud se neshoduje run_id nebo hash
         """
+        # H1/H3: Block on _closed AND _frozen (both seal the write path)
         if self._frozen:
             raise RuntimeError("Cannot append to frozen EvidenceLog")
+        if self._closed:
+            raise RuntimeError("Cannot append to closed EvidenceLog")
+
+        # H3: Also block if aclose() is in progress (drain phase)
+        if self._closing:
+            raise RuntimeError("Cannot append while EvidenceLog is closing")
 
         # Kontrola run_id
         if event.run_id != self._run_id:
@@ -720,6 +728,10 @@ class EvidenceLog:
         Returns:
             Vytvořená EvidenceEvent
         """
+        # H1: Reject new events if log is closed
+        if self._closed:
+            raise RuntimeError("Cannot create event in closed EvidenceLog")
+
         event_id = f"{self._run_id}_{uuid.uuid4().hex[:12]}"
 
         # Sprint F200A FIX: Add correlation to payload BEFORE hash computation.
@@ -1191,6 +1203,10 @@ class EvidenceLog:
 
         Idempotent: safe to call multiple times.
         """
+        # R6 Idempotency: early exit if already closed
+        if self._closed:
+            return
+
         # Sprint F200E: Signal closing FIRST — no new appends will be queued.
         # This MUST happen before draining so that any concurrent append()
         # calls that see _closing=True will skip queueing.
@@ -1249,6 +1265,11 @@ class EvidenceLog:
         # 4. Close persist file (synchronous — runs in thread via close())
         self._close_persist_file()
 
+        # H6: Mark closed and freeze so log transitions to properly frozen state
+        self._closed = True
+        self._closing = False  # Reset closing flag now that shutdown is complete
+        self.freeze()
+
         logger.debug(f"[EVIDENCE] aclose complete: run_id={self._run_id}")
 
     def _close_persist_file(self) -> None:
@@ -1295,9 +1316,11 @@ class EvidenceLog:
         self.write_manifest()
 
         # Close all resources via canonical close path
+        # Note: close() -> aclose() will set _closed=True at the end of cleanup
         self.close()
 
         # Freeze to prevent further modifications
+        # H2: _frozen comes AFTER close (final state transition)
         self.freeze()
 
         logger.info(f"[EVIDENCE] Log finalized: run_id={self._run_id}, events={self._total_count}, chain_head={self._chain_head[:16]}...")
@@ -1416,6 +1439,11 @@ class EvidenceLog:
             "time_span_seconds": round(time_span, 2),
             "created_at": self._created_at.isoformat(),
             "is_frozen": self._frozen,
+            # H4: Lifecycle truth flags
+            "is_closed": self._closed,
+            "is_closing": self._closing,
+            "sqlite_open": self._db is not None,
+            "persist_file_open": self._persist_file is not None and not self._persist_file.closed,
             "persist_path": str(self._persist_path) if self._persist_path else None,
             "persistence_enabled": self._enable_persist,
         }

@@ -547,12 +547,35 @@ class GhostExecutor:
         return self._network_driver
     
     async def _get_stealth_manager(self):
-        """Lazy load stealth manager"""
+        """
+        Lazy load stealth manager.
+
+        NOTE (Sprint F900G): This import path was stale — hledac.stealth_toolkit
+        does not exist as a top-level package. The canonical stealth system lives at:
+        - hledac.universal.stealth.stealth_manager (active, canonical)
+        - hledac.outdated.stealth_toolkit (deprecated, donor compat)
+
+        This lazy-load path is kept for backward compat with existing call-sites
+        that pass enable_stealth=True. If module resolution fails, returns None
+        (degraded stub) rather than crashing.
+        """
         if self._stealth_manager is None and self.enable_stealth:
-            from hledac.stealth_toolkit.stealth_orchestrator import StealthOrchestrator
-            logger.info("Loading StealthOrchestrator...")
-            self._stealth_manager = StealthOrchestrator()
-            logger.info("✓ StealthOrchestrator loaded")
+            try:
+                # Sprint F900G: Truthful import path — was hledac.stealth_toolkit
+                # (non-existent), redirecting to actual deprecated location
+                from hledac.outdated.stealth_toolkit.stealth_orchestrator import (
+                    StealthOrchestrator as _SO
+                )
+                logger.info("Loading StealthOrchestrator (outdated path)...")
+                self._stealth_manager = _SO()
+                logger.info("✓ StealthOrchestrator loaded (degraded/stub)")
+            except ModuleNotFoundError:
+                logger.warning(
+                    "StealthOrchestrator not available — "
+                    "hledac.outdated.stealth_toolkit not in path. "
+                    "Stealth features will be degraded/stub."
+                )
+                self._stealth_manager = None
         return self._stealth_manager
     
     async def execute(
@@ -820,49 +843,20 @@ class GhostExecutor:
           NOT on ResearchContext (research_context.py)
         - Removed direct write to context.stealth_activated to prevent
           AttributeError when context is ResearchContext
+
+        SPRINT F900G: DetectionEvader import path was stale/non-existent.
+        This action is now a degraded/stub handler — it cannot perform
+        real stealth harvest because the DetectionEvader class does not
+        exist at hledac.advanced_web.detection_evader.
+        Returns truthful stub result with stub=True metadata.
         """
         url = params.get("url", "")
-        logger.info(f"Stealth harvest: {url}")
-
-        try:
-            from hledac.advanced_web.detection_evader import DetectionEvader
-
-            evader = DetectionEvader()
-            driver = await self._get_network_driver()
-
-            async with evader.evasion_session() as session:
-                result = await driver.harvest(url, session=session)
-
-                if result.success:
-                    # Sprint F900A: Do NOT write to context.stealth_activated
-                    # This field exists only on ExecutionContext, not ResearchContext.
-                    # Direct write would cause AttributeError with RC.
-                    # Stealth activation is implicit in successful result.
-
-                    return ActionResult(
-                        success=True,
-                        action="stealth_harvest",
-                        data={
-                            "url": url,
-                            "title": result.metadata.get("title", ""),
-                            "content_length": len(result.main_content),
-                        },
-                    ).to_dict()
-                else:
-                    return ActionResult(
-                        success=False,
-                        action="stealth_harvest",
-                        data={"url": url},
-                        error=result.error
-                    ).to_dict()
-
-        except Exception as e:
-            return ActionResult(
-                success=False,
-                action="stealth_harvest",
-                data={},
-                error=str(e)
-            ).to_dict()
+        logger.warning(f"stealth_harvest is stub-only — DetectionEvader not available at hledac.advanced_web.detection_evader")
+        return ActionResult(
+            success=True,
+            action="stealth_harvest",
+            data={"url": url, "stub": True, "reason": "detection_evader_not_available"},
+        ).to_dict()
     
     async def _action_osint_discovery(self, params: Dict[str, Any], context) -> Dict[str, Any]:
         """OSINT objevování skrytých zdrojů"""

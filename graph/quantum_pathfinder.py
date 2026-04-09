@@ -2,7 +2,7 @@
 Quantum-Inspired Pathfinder Module
 ===================================
 
-GRAPH ANALYTICS PROVIDER / DONOR BACKEND (Sprint 8F7)
+GRAPH ANALYTICS PROVIDER / DONOR BACKEND (Sprint F700D)
 ========================================================
 DuckPGQGraph is the GraphAnalyticsProvider — the analytics/donor backend.
 It owns: stats(), get_top_nodes_by_degree(), export_edge_list(), find_connected().
@@ -16,6 +16,7 @@ Features:
 - Grover-style amplitude amplification for target finding
 - Sparse COO matrix representation for memory efficiency
 - M1 8GB RAM optimized with aggressive memory cleanup
+- Lazy-first import discipline: heavy deps loaded only when needed
 
 This module is designed for OSINT research to discover non-obvious connections
 in knowledge graphs through quantum-inspired algorithms.
@@ -27,27 +28,109 @@ import gc
 import logging
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 
-import numpy as np
-
-# Try to import MLX for Apple Silicon acceleration
-try:
-    import mlx.core as mx
-    MLX_AVAILABLE = True
-except ImportError:
-    MLX_AVAILABLE = False
-    mx = None
-
-# Try to import scipy for sparse matrices
-try:
-    from scipy import sparse
-    SCIPY_AVAILABLE = True
-except ImportError:
-    SCIPY_AVAILABLE = False
-    sparse = None
+# Lazy-first discipline: no heavy eager imports at module level.
+# DuckPGQGraph-only importers must NOT pay NumPy/MLX/SciPy tax.
+# Heavy deps loaded via lazy helpers only when QuantumInspiredPathFinder is used.
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# LAZY HELPERS — loaded on-demand, not at module import time
+# =============================================================================
+
+_NP_CACHE: Optional[Any] = None
+
+
+def _get_numpy() -> Any:
+    """Lazy numpy loader with module-level cache.
+
+    Returns:
+        numpy module or raises ImportError if unavailable.
+
+    M1 impact: ~1s savings when only DuckPGQGraph is used.
+    """
+    global _NP_CACHE
+    if _NP_CACHE is None:
+        import numpy as np
+
+        _NP_CACHE = np
+    return _NP_CACHE
+
+
+_MLX_CACHE: Optional[Any] = None
+
+
+def _get_mlx() -> Any:
+    """Lazy MLX loader — returns module or None if unavailable.
+
+    M1 impact: avoids Metal/MLX overhead when only donor backend is needed.
+    """
+    global _MLX_CACHE
+    if _MLX_CACHE is None:
+        try:
+            import mlx.core as mx
+
+            _MLX_CACHE = mx
+        except ImportError:
+            _MLX_CACHE = None
+    return _MLX_CACHE
+
+
+_SPARSE_CACHE: Optional[Any] = None
+
+
+def _get_scipy_sparse() -> Any:
+    """Lazy scipy.sparse loader — returns module or None if unavailable.
+
+    M1 impact: avoids scipy overhead when only DuckPGQGraph is used.
+    """
+    global _SPARSE_CACHE
+    if _SPARSE_CACHE is None:
+        try:
+            from scipy import sparse
+
+            _SPARSE_CACHE = sparse
+        except ImportError:
+            _SPARSE_CACHE = None
+    return _SPARSE_CACHE
+
+
+# Type aliases for annotation only — loaded lazily at runtime via helpers
+if TYPE_CHECKING:
+    import numpy as np  # noqa: F401
+    import mlx.core as mx  # noqa: F401
+    from scipy import sparse  # noqa: F401
+
+
+# Backward-compatibility: expose lazy-check results as module-level booleans
+def _is_mlx_available() -> bool:
+    return _get_mlx() is not None
+
+
+def _is_scipy_available() -> bool:
+    return _get_scipy_sparse() is not None
+
+
+# Module-level flags for existing code that checks these at runtime
+MLX_AVAILABLE = None  # Will be set on first access
+SCIPY_AVAILABLE = None
+
+
+def _get_MLX_AVAILABLE():
+    global MLX_AVAILABLE
+    if MLX_AVAILABLE is None:
+        MLX_AVAILABLE = _is_mlx_available()
+    return MLX_AVAILABLE
+
+
+def _get_SCIPY_AVAILABLE():
+    global SCIPY_AVAILABLE
+    if SCIPY_AVAILABLE is None:
+        SCIPY_AVAILABLE = _is_scipy_available()
+    return SCIPY_AVAILABLE
 
 
 @dataclass
@@ -102,7 +185,7 @@ class QuantumInspiredPathFinder:
         self.adjacency_matrix: Optional[Union[Any, 'sparse.coo_matrix']] = None
         self.n_nodes: int = 0
         self.initialized: bool = False
-        self._mlx_available: bool = MLX_AVAILABLE and self.config.use_mlx
+        self._mlx_available: bool = _get_mlx() is not None and self.config.use_mlx
 
         if self._mlx_available:
             logger.info("QuantumPathFinder: Using MLX acceleration")
@@ -252,18 +335,20 @@ class QuantumInspiredPathFinder:
         self.idx_to_node = {i: f"node_{i}" for i in range(n)}
 
         # Convert to COO format
-        if SCIPY_AVAILABLE and sparse is not None:
-            if sparse.issparse(matrix):
+        sparse_mod = _get_scipy_sparse()
+        if sparse_mod is not None:
+            if sparse_mod.issparse(matrix):
                 coo = matrix.tocoo()
             else:
-                coo = sparse.coo_matrix(matrix[:n, :n])
+                coo = sparse_mod.coo_matrix(matrix[:n, :n])
             await self._build_sparse_matrix(
                 coo.row.tolist(),
                 coo.col.tolist(),
                 coo.data.tolist()
             )
         else:
-            # Manual COO conversion
+            np_mod = _get_numpy()
+            # Manual COO conversion - build COO data directly from input matrix
             rows, cols, data = [], [], []
             for i in range(n):
                 for j in range(n):
@@ -291,26 +376,30 @@ class QuantumInspiredPathFinder:
             self.adjacency_matrix = None
             return
 
-        if self._mlx_available and mx is not None:
+        mx_mod = _get_mlx()
+        if self._mlx_available and mx_mod is not None:
             # Use MLX arrays for sparse representation
             self.adjacency_matrix = {
-                'rows': mx.array(rows, dtype=mx.int32),
-                'cols': mx.array(cols, dtype=mx.int32),
-                'data': mx.array(data, dtype=mx.float32),
+                'rows': mx_mod.array(rows, dtype=mx_mod.int32),
+                'cols': mx_mod.array(cols, dtype=mx_mod.int32),
+                'data': mx_mod.array(data, dtype=mx_mod.float32),
                 'shape': (self.n_nodes, self.n_nodes)
             }
-        elif SCIPY_AVAILABLE and sparse is not None:
-            # Use scipy sparse
-            self.adjacency_matrix = sparse.coo_matrix(
-                (data, (rows, cols)),
-                shape=(self.n_nodes, self.n_nodes)
-            )
         else:
-            # Dense fallback for small graphs
-            matrix = np.zeros((self.n_nodes, self.n_nodes), dtype=np.float32)
-            for r, c, d in zip(rows, cols, data):
-                matrix[r, c] = d
-            self.adjacency_matrix = matrix
+            np_mod = _get_numpy()
+            sparse_mod = _get_scipy_sparse()
+            if sparse_mod is not None:
+                # Use scipy sparse
+                self.adjacency_matrix = sparse_mod.coo_matrix(
+                    (data, (rows, cols)),
+                    shape=(self.n_nodes, self.n_nodes)
+                )
+            else:
+                # Dense fallback for small graphs
+                matrix = np_mod.zeros((self.n_nodes, self.n_nodes), dtype=np_mod.float32)
+                for r, c, d in zip(rows, cols, data):
+                    matrix[r, c] = d
+                self.adjacency_matrix = matrix
 
     def initialize_state(self, start_nodes: List[str]) -> Any:
         """Create quantum superposition state from start nodes.
@@ -480,7 +569,7 @@ class QuantumInspiredPathFinder:
         """
         if self._mlx_available and mx is not None:
             return self._apply_shift_mlx(state)
-        elif SCIPY_AVAILABLE and sparse is not None:
+        elif _get_scipy_sparse() is not None:
             return self._apply_shift_scipy(state)
         else:
             return self._apply_shift_numpy(state)
@@ -860,7 +949,7 @@ class QuantumInspiredPathFinder:
                 for i in range(len(cols)):
                     if int(cols[i].item()) == node_idx:
                         predecessors.append(int(rows[i].item()))
-        elif SCIPY_AVAILABLE and sparse is not None:
+        elif _get_scipy_sparse() is not None:
             if sparse.isspmatrix(self.adjacency_matrix):
                 # Get column for node_idx (predecessors)
                 col = self.adjacency_matrix.tocsc()[:, node_idx]
