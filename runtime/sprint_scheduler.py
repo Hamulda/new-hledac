@@ -323,6 +323,22 @@ class SprintScheduler:
 
     Runs bounded feed-fetch cycles under a SprintLifecycleManager.
     Does NOT own the lifecycle — lifecycle is passed in and owned by caller.
+
+    Authority boundaries (Sprint F350M §H5):
+    - Does NOT execute tools via execute_with_limits()
+    - Does NOT activate providers via acquire() or load_model()
+    - Does NOT create new persistent state beyond in-sprint accumulators
+    - Does NOT own lifecycle phase transitions
+    - Does NOT dispatch work based on shadow pre-decision output
+
+    Runtime mode semantics (Sprint F350M §H1-H2):
+    - legacy_runtime (default): normal scheduler path — full execution
+    - scheduler_shadow: read-only diagnostic path — consume_shadow_pre_decision() only
+    - scheduler_active: NOT supported — any implied readiness is FALSE.
+      Fallback: diagnostic-only containement. Activation requires separate verified sprint.
+
+    Advisory gate: computed at WINDUP entry, DIAGNOSTIC ONLY.
+    Shadow pre-decision: read-only parity/composition, DIAGNOSTIC ONLY.
     """
 
     def __init__(self, config: SprintSchedulerConfig) -> None:
@@ -1604,7 +1620,8 @@ class SprintScheduler:
         # STABLE path would require ModelManager injection (not yet available;
         # COMPAT is sufficient for diagnostic purposes).
         try:
-            from brain.model_lifecycle import get_model_lifecycle_status
+            # Sprint F350M: Canonical import path — F350N §H4 import truth fix
+            from hledac.universal.brain.model_lifecycle import get_model_lifecycle_status
             lifecycle_status = get_model_lifecycle_status()
         except Exception:
             lifecycle_status = None

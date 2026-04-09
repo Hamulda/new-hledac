@@ -97,7 +97,7 @@ class ParityArtifact:
     - GRAPH_CAPABILITY: graph backend nebo kapacita mismatch
     - MODEL_CONTROL: model/control configuration mismatch
     - EXPORT_HANDOFF: export handoff facts mismatch
-    - PHASE_FIELD_MERGE:尝试 slít více phase do jednoho pole (BUG)
+    - PHASE_FIELD_MERGE: attempts to merge multiple phases into one field (BUG)
     """
     mode: str  # runtime mode used
     timestamp_monotonic: float
@@ -198,6 +198,111 @@ class ParityArtifact:
 
 
 # =============================================================================
+# Helper functions — must be defined before run_shadow_parity
+# =============================================================================
+
+def _check_phase_field_merge(
+    bundle: "LifecycleSnapshotBundle",
+    mismatches: List[str],
+    mismatch_details: Dict[str, Any],
+) -> None:
+    """
+    Check for phase value anomalies — generic validation only.
+
+    Structural phase-field-merge bugs (WINDUP without windup_local,
+    non-WINDUP with windup_local set) are handled exclusively by
+    _check_phase_field_merge_bug() which emits PHASE_FIELD_MERGE.
+    """
+    wf = bundle.workflow_phase.phase
+
+    # Check: workflow_phase should be one of the SprintPhase enum values
+    valid_workflow_phases = {"BOOT", "WARMUP", "ACTIVE", "WINDUP", "EXPORT", "TEARDOWN"}
+    if wf not in valid_workflow_phases:
+        mismatches.append("LIFECYCLE")
+        mismatch_details["workflow_phase"] = f"unexpected phase value: {wf}"
+
+    # Check: control_phase.mode should be one of the tool mode values
+    ctrl = bundle.control_phase.mode
+    valid_control_modes = {"normal", "prune", "panic"}
+    if ctrl not in valid_control_modes:
+        mismatches.append("LIFECYCLE")
+        mismatch_details["control_phase"] = f"unexpected control mode: {ctrl}"
+
+    # NOTE: WINDUP/windup_local consistency is handled by _check_phase_field_merge_bug()
+    # which emits PHASE_FIELD_MERGE (not LIFECYCLE) for these structural bugs.
+    # DO NOT add LIFECYCLE emission here for those conditions.
+
+
+def _check_phase_field_merge_bug(
+    bundle: "LifecycleSnapshotBundle",
+    mismatches: List[str],
+    mismatch_details: Dict[str, Any],
+) -> None:
+    """
+    Detect explicit PHASE_FIELD_MERGE structural bugs.
+
+    These are distinct from generic LIFECYCLE mismatches — they represent
+    a specific structural violation where phase systems that should be
+    SEPARATED have been incorrectly merged or one is missing when expected.
+
+    PHASE_FIELD_MERGE is emitted EXPLICITLY when:
+    - In WINDUP but windup_local_phase is None (windup_local missing in WINDUP)
+    - Not in WINDUP but windup_local_phase is set (windup_local leaked outside WINDUP)
+
+    This is NOT the same as LIFECYCLE which covers general phase value anomalies.
+    """
+    wf = bundle.workflow_phase.phase
+
+    # WINDUP but no windup_local_phase — explicit structural bug
+    if wf == "WINDUP" and bundle.windup_local_phase is None:
+        if "PHASE_FIELD_MERGE" not in mismatches:
+            mismatches.append("PHASE_FIELD_MERGE")
+            mismatch_details["phase_field_merge"] = (
+                "workflow_phase=WINDUP but windup_local_phase=None — "
+                "windup_local synthesis mode missing in WINDUP context"
+            )
+
+    # Not WINDUP but windup_local_phase is set — explicit structural bug
+    if wf != "WINDUP" and bundle.windup_local_phase is not None:
+        if "PHASE_FIELD_MERGE" not in mismatches:
+            mismatches.append("PHASE_FIELD_MERGE")
+            mismatch_details["phase_field_merge"] = (
+                f"workflow_phase={wf} but windup_local_phase is set to "
+                f"{bundle.windup_local_phase.mode} — windup_local leaked outside WINDUP"
+            )
+
+
+def _check_graph_capability(
+    graph_bundle: "GraphSummaryBundle",
+    mismatches: List[str],
+    mismatch_details: Dict[str, Any],
+) -> None:
+    """
+    Check graph capability — truthfulness gated by fact stability.
+
+    - STABLE path + unknown backend → GRAPH_CAPABILITY (actual mismatch)
+    - UNKNOWN or COMPAT path + unknown backend → INSUFFICIENT_INPUT (insufficient data)
+    """
+    graph_backend = graph_bundle.backend
+
+    if graph_backend == "unknown":
+        stability = getattr(graph_bundle, "fact_stability", "UNKNOWN")
+        if stability == "STABLE":
+            # STABLE path but backend unknown = actual capability mismatch
+            if "GRAPH_CAPABILITY" not in mismatches:
+                mismatches.append("GRAPH_CAPABILITY")
+                mismatch_details["graph_backend"] = "unknown backend — DuckPGQ not initialized"
+        else:
+            # UNKNOWN or COMPAT path = insufficient input, not capability mismatch
+            if "INSUFFICIENT_INPUT" not in mismatches:
+                mismatches.append("INSUFFICIENT_INPUT")
+                mismatch_details["graph_backend"] = (
+                    f"unknown backend (fact_stability={stability}) — "
+                    "insufficient input for capability determination"
+                )
+
+
+# =============================================================================
 # Shadow parity runner — pure function, no side effects
 # =============================================================================
 
@@ -262,10 +367,8 @@ def run_shadow_parity(
     _check_phase_field_merge_bug(lifecycle_bundle, mismatches, mismatch_details)
 
     # --- Graph capability checks ---
+    _check_graph_capability(graph_bundle, mismatches, mismatch_details)
     graph_backend = graph_bundle.backend
-    if graph_backend == "unknown":
-        mismatches.append("GRAPH_CAPABILITY")
-        mismatch_details["graph_backend"] = "unknown backend — DuckPGQ not initialized"
 
     # --- Model/Control checks ---
     mc_privacy = model_control_bundle.privacy_level
@@ -345,82 +448,6 @@ def run_shadow_parity(
     )
 
 
-def _check_phase_field_merge(
-    bundle: "LifecycleSnapshotBundle",
-    mismatches: List[str],
-    mismatch_details: Dict[str, Any],
-) -> None:
-    """
-    Check for PHASE_FIELD_MERGE bug — when multiple phase systems
-    are incorrectly merged into a single 'phase' field.
-
-    This is a structural invariant check.
-    """
-    # If workflow_phase has an unusual value that looks like it contains
-    # control or windup info, flag it
-    wf = bundle.workflow_phase.phase
-
-    # Check: workflow_phase should be one of the SprintPhase enum values
-    valid_workflow_phases = {"BOOT", "WARMUP", "ACTIVE", "WINDUP", "EXPORT", "TEARDOWN"}
-    if wf not in valid_workflow_phases:
-        mismatches.append("LIFECYCLE")
-        mismatch_details["workflow_phase"] = f"unexpected phase value: {wf}"
-
-    # Check: control_phase.mode should be one of the tool mode values
-    ctrl = bundle.control_phase.mode
-    valid_control_modes = {"normal", "prune", "panic"}
-    if ctrl not in valid_control_modes:
-        mismatches.append("LIFECYCLE")
-        mismatch_details["control_phase"] = f"unexpected control mode: {ctrl}"
-
-    # Check: if in WINDUP, windup_local_phase should be set
-    if wf == "WINDUP" and bundle.windup_local_phase is None:
-        mismatches.append("LIFECYCLE")
-        mismatch_details["windup_local_phase"] = "WINDUP but windup_local_phase is None"
-
-    # Check: if NOT in WINDUP, windup_local_phase should be None
-    if wf != "WINDUP" and bundle.windup_local_phase is not None:
-        mismatches.append("LIFECYCLE")
-        mismatch_details["windup_local_phase"] = f"not WINDUP but windup_local_phase={bundle.windup_local_phase.mode}"
-
-
-def _check_phase_field_merge_bug(
-    bundle: "LifecycleSnapshotBundle",
-    mismatches: List[str],
-    mismatch_details: Dict[str, Any],
-) -> None:
-    """
-    Detect explicit PHASE_FIELD_MERGE structural bugs.
-
-    These are distinct from generic LIFECYCLE mismatches — they represent
-    a specific structural violation where phase systems that should be
-    SEPARATED have been incorrectly merged or one is missing when expected.
-
-    PHASE_FIELD_MERGE is emitted EXPLICITLY when:
-    - In WINDUP but windup_local_phase is None (windup_local missing in WINDUP)
-    - Not in WINDUP but windup_local_phase is set (windup_local leaked outside WINDUP)
-
-    This is NOT the same as LIFECYCLE which covers general phase value anomalies.
-    """
-    wf = bundle.workflow_phase.phase
-
-    # WINDUP but no windup_local_phase — explicit structural bug
-    if wf == "WINDUP" and bundle.windup_local_phase is None:
-        if "PHASE_FIELD_MERGE" not in mismatches:
-            mismatches.append("PHASE_FIELD_MERGE")
-            mismatch_details["phase_field_merge"] = (
-                "workflow_phase=WINDUP but windup_local_phase=None — "
-                "windup_local synthesis mode missing in WINDUP context"
-            )
-
-    # Not WINDUP but windup_local_phase is set — explicit structural bug
-    if wf != "WINDUP" and bundle.windup_local_phase is not None:
-        if "PHASE_FIELD_MERGE" not in mismatches:
-            mismatches.append("PHASE_FIELD_MERGE")
-            mismatch_details["phase_field_merge"] = (
-                f"workflow_phase={wf} but windup_local_phase is set to "
-                f"{bundle.windup_local_phase.mode} — windup_local leaked outside WINDUP"
-            )
 
 
 # =============================================================================

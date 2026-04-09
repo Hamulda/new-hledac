@@ -30,15 +30,12 @@ from pydantic import BaseModel, Field, ValidationError, create_model
 if TYPE_CHECKING:
     from .tool_exec_log import ToolExecLog
 
-# Sprint 41: DNS Tunnel Detector
-try:
-    from .network.dns_tunnel_detector import DNSTunnelDetector, DNSTunnelConfig, create_dns_tunnel_detector
-    DNS_TUNNEL_AVAILABLE = True
-except ImportError:
-    DNS_TUNNEL_AVAILABLE = False
-    DNSTunnelDetector = None
-    DNSTunnelConfig = None
-    create_dns_tunnel_detector = None
+# Sprint F600I: DNS Tunnel Detector — DEFERRED import
+# Moved inside _ensure_dns_tunnel_tool_registered() to eliminate
+# cold-path numpy/scapy import tax. DNS_TUNNEL_AVAILABLE is now
+# computed on first use inside the ensure path.
+# Keeping stub constants so TYPE_CHECKING imports and module-level
+# hasattr checks don't break.
 
 
 # ============================================================================
@@ -381,10 +378,23 @@ class ToolRegistry:
         return _execute_inference
 
     def _ensure_dns_tunnel_tool_registered(self) -> None:
-        """Sprint F600H: Lazily register DNS Tunnel Detector on first use."""
+        """Sprint F600I: Lazily register DNS Tunnel Detector on first use.
+
+        Import moved INSIDE this method to eliminate cold-path numpy/scapy
+        tax that was paid unconditionally at module load time (F600H regression).
+        """
         if self._dns_tunnel_detector is not None:
             return  # Already registered
-        if not DNS_TUNNEL_AVAILABLE:
+
+        # Sprint F600I: Deferred import — only paid when tool is actually needed
+        try:
+            from .network.dns_tunnel_detector import (
+                DNSTunnelDetector,
+                DNSTunnelConfig,
+                create_dns_tunnel_detector,
+            )
+        except ImportError:
+            # DNS tunnel detector not available — graceful no-op
             return
 
         self._dns_tunnel_detector = create_dns_tunnel_detector(DNSTunnelConfig(

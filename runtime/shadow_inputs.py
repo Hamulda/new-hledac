@@ -24,7 +24,8 @@ Feature flag vocabulary (scaffold only, NOT activated):
 Inventory of shadow inputs:
 1. lifecycle_snapshot   → SprintLifecycleManager.snapshot()
 2. export_handoff       → ExportHandoff (typed) or scorecard dict (compat)
-3. graph_summary        → duckdb_store.get_graph_stats() (public seam)
+3. graph_summary        → ioc_graph.stats() + ioc_graph.get_top_nodes_by_degree() (DuckPGQGraph direct)
+                         or duckdb_store.get_graph_stats() + duckdb_store.get_top_seed_nodes() (public seam)
 4. graph_backend_caps   → which graph backend (Kuzu vs DuckPGQ)
 5. model/control_facts → AnalyzerResult / AutoResearchProfile
 6. provider_recommend   → from capabilities.py registry (future)
@@ -36,6 +37,7 @@ Future owners:
 - lifecycle_snapshot → runtime/sprint_lifecycle.py (already there)
 - export_handoff → export/COMPAT_HANDOFF.py (already there)
 - graph_summary → knowledge/duckdb_store.py (duckdb_store.get_graph_stats() public seam)
+                 DuckPGQGraph is the analytics donor via duckdb_store._ioc_graph injection
 - graph_backend_caps → knowledge/ioc_graph.py or knowledge/graph_layer.py
 - model/control_facts → autonomous_analyzer.py / capabilities.py
 - provider_recommend → capabilities.py CapabilityRegistry
@@ -101,12 +103,22 @@ class RuntimeMode:
 
     @classmethod
     def is_shadow_mode(cls) -> bool:
-        """True if running in scheduler shadow mode."""
+        """
+        True if HLEDAC_RUNTIME_MODE=scheduler_shadow is set.
+
+        This is a VOCABULARY flag only — no runtime activation is performed
+        by this scaffold. Activation requires explicit config/env wiring elsewhere.
+        """
         return cls.get_current() == cls.SCHEDULER_SHADOW
 
     @classmethod
     def is_active_mode(cls) -> bool:
-        """True if running in scheduler active mode."""
+        """
+        True if HLEDAC_RUNTIME_MODE=scheduler_active is set.
+
+        This is a VOCABULARY flag only — SCHEDULER_ACTIVE is not yet
+        implemented. Activation requires explicit future config/env wiring.
+        """
         return cls.get_current() == cls.SCHEDULER_ACTIVE
 
     @classmethod
@@ -257,14 +269,17 @@ class GraphSummaryBundle:
     """
     Bundle graph-related shadow inputs.
 
-    source: duckdb_store.get_graph_stats() (public seam)
+    source: ioc_graph.stats() + ioc_graph.get_top_nodes_by_degree() (DuckPGQGraph direct).
+            duckdb_store.get_graph_stats() and duckdb_store.get_top_seed_nodes() are the
+            store-facing public seams wrapping the injected _ioc_graph (DuckPGQGraph).
     compat source: scorecard["top_graph_nodes"]
 
     Shrouded ownership — DIAGNOSTIC SCAFFOLD, NOT a shared contract.
-    Canonical facts owned by knowledge/duckdb_store.py (public seam: get_graph_stats()).
+    Canonical facts owned by knowledge/duckdb_store.py (public seam: get_graph_stats())
+    via the injected DuckPGQGraph analytics donor.
 
     Fact stability:
-    - from_ioc_graph_stats: STABLE (from duckdb_store._ioc_graph via duckdb_store.get_graph_stats())
+    - from_ioc_graph_stats: STABLE (from DuckPGQGraph.stats() via duckdb_store.get_graph_stats() seam)
     - from_scorecard_top_nodes: COMPAT (legacy compat path)
       → future_owner: duckdb_store.get_top_seed_nodes() — already implemented, scorecard path deprecated
 
@@ -293,7 +308,7 @@ class GraphSummaryBundle:
 
     @classmethod
     def from_ioc_graph_stats(cls, stats: Dict[str, Any], top_nodes: Optional[List[Any]] = None) -> "GraphSummaryBundle":
-        """Build from duckdb_store.get_graph_stats() dict. STABLE path."""
+        """Build from DuckPGQGraph.stats() dict via duckdb_store.get_graph_stats() seam. STABLE path."""
         # F700E fix: DuckPGQGraph.stats() returns pgq_available (truth).
         # Fall back to pgq_active for backward compat with older callers.
         pgq_value = stats.get("pgq_available", stats.get("pgq_active", False))
@@ -477,7 +492,7 @@ def collect_graph_summary(
     PURE function — no side effects, no I/O.
 
     Args:
-        ioc_graph: DuckPGQGraph instance or duckdb_store.get_graph_stats() seam output; None for scorecard-only path
+        ioc_graph: DuckPGQGraph instance (from duckdb_store._ioc_graph or duckdb_store.get_analytics_graph_for_synthesis()); None for scorecard-only path
         scorecard: scorecard dict (compat path) or None
 
     Returns:
@@ -559,6 +574,11 @@ def collect_export_handoff_facts(
 
     PURE function — thin wrapper around existing typed/contract.
 
+    Fact stability:
+    - with ExportHandoff (typed): STABLE
+    - with scorecard dict: COMPAT
+    - no inputs: UNKNOWN
+
     Returns a dict with keys:
         - sprint_id
         - synthesis_engine
@@ -566,9 +586,11 @@ def collect_export_handoff_facts(
         - top_nodes_count
         - ranked_parquet_present
         - phase_durations
+        - fact_stability: STABLE | COMPAT | UNKNOWN
+        - future_owner: export/COMPAT_HANDOFF.py
     """
     if handoff is not None:
-        return {
+        result = {
             "sprint_id": handoff.sprint_id,
             "synthesis_engine": handoff.synthesis_engine,
             "gnn_predictions": handoff.gnn_predictions,
@@ -576,9 +598,12 @@ def collect_export_handoff_facts(
             "ranked_parquet_present": handoff.ranked_parquet is not None,
             "phase_durations": handoff.phase_durations,
         }
+        result["fact_stability"] = "STABLE"
+        result["future_owner"] = "export/COMPAT_HANDOFF.py"
+        return result
 
     if scorecard is not None:
-        return {
+        result = {
             "sprint_id": scorecard.get("sprint_id", sprint_id),
             "synthesis_engine": scorecard.get("synthesis_engine_used", "unknown"),
             "gnn_predictions": scorecard.get("gnn_predicted_links", 0),
@@ -586,6 +611,10 @@ def collect_export_handoff_facts(
             "ranked_parquet_present": scorecard.get("ranked_parquet") is not None,
             "phase_durations": scorecard.get("phase_duration_seconds", {}),
         }
+        result["fact_stability"] = "COMPAT"
+        result["__compat_note__"] = "scorecard dict path is legacy compat; use ExportHandoff (typed path)"
+        result["future_owner"] = "export/COMPAT_HANDOFF.py"
+        return result
 
     return {
         "sprint_id": sprint_id,
@@ -594,6 +623,9 @@ def collect_export_handoff_facts(
         "top_nodes_count": 0,
         "ranked_parquet_present": False,
         "phase_durations": {},
+        "fact_stability": "UNKNOWN",
+        "__compat_note__": "no handoff and no scorecard provided",
+        "future_owner": "export/COMPAT_HANDOFF.py",
     }
 
 

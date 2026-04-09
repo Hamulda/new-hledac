@@ -109,33 +109,51 @@ class _ShadowRecorder:
         self._flush_failures: int = 0
 
     def _ensure_worker(self) -> None:
-        """Start background worker if not yet started (thread-safe once)."""
+        """
+        Start background worker if not yet started (thread-safe once).
+
+        Prevents false-start: _worker_started is set ONLY after confirmed
+        running loop and successful task creation. If no loop exists,
+        the flag remains False so subsequent enqueue() retries.
+        """
         if self._worker_started:
             return
         with self._worker_lock:
             if self._worker_started:
                 return
-            self._worker_started = True
-            # Schedule async worker on the running loop
+            # Defensively check loop BEFORE setting _worker_started.
+            # This prevents the false-start state where the flag is True
+            # but no worker task exists (RuntimeError swallowed).
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(self._worker())
             except RuntimeError:
-                # No running loop — worker will be started on first enqueue
-                # when a loop is available
-                pass
+                # No running loop — do NOT set _worker_started.
+                # enqueue() will retry _ensure_worker() on next call
+                # when a loop is available. The enqueued item stays in queue
+                # and put_nowait failure (RuntimeError) increments counter.
+                return
+            self._worker_started = True
+            loop.create_task(self._worker())
 
     def enqueue(self, record: Dict[str, Any]) -> None:
         """
         Enqueue a finding record for shadow ingest.
 
         Non-blocking, fail-open:
+        - Closed recorder → drop record, increment failure counter
         - Queue full → drop record, increment failure counter
         - No running loop → drop record, increment failure counter
         """
         global _SHADOW_INGEST_FAILURES, _QUEUE_FULL_WARNED
 
         if not _is_shadow_enabled():
+            return
+
+        # Guard: closed recorder does not accept new work.
+        # Records enqueued after aclose() would be silently dropped
+        # without this guard, since the worker exits immediately.
+        if self._closed:
+            _SHADOW_INGEST_FAILURES += 1
             return
 
         try:
@@ -151,7 +169,8 @@ class _ShadowRecorder:
                 )
                 _QUEUE_FULL_WARNED = True
         except RuntimeError:
-            # No running event loop
+            # No running event loop — record stays in queue but worker
+            # cannot be started without a loop. Counter tracks drops.
             _SHADOW_INGEST_FAILURES += 1
 
     async def _worker(self) -> None:
@@ -240,13 +259,50 @@ class _ShadowRecorder:
 
     async def aclose(self, timeout: float = 2.0) -> None:
         """
-        Async shutdown — attempts final flush, then gives up.
+        Async shutdown — drains pending queue, attempts final flush, then gives up.
 
         Timeout is per-batch, not total.
+
+        If the worker never actually started (store is None), any items sitting
+        in the queue at this point are drained and counted as drops — they would
+        otherwise be silently lost.
         """
+        global _SHADOW_INGEST_FAILURES
+
         if self._closed:
             return
         self._closed = True
+
+        # Drain any remaining items from the queue so they are not silently lost.
+        # This is safe even if the worker is still running — it will exit its loop
+        # because _closed is now True and its queue.get() will raise CancelledError
+        # or it will drain the queue we are draining here (queue is unbounded drain).
+        # Items already taken by the worker before we set _closed=True will be flushed
+        # by the worker's own final-flush path.
+        drained: List[Dict[str, Any]] = []
+        while True:
+            try:
+                drained.append(self._queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+
+        if drained:
+            if self._store is not None:
+                try:
+                    await asyncio.wait_for(
+                        self._store.async_record_shadow_findings_batch(drained),
+                        timeout=timeout
+                    )
+                except Exception as e:
+                    _SHADOW_INGEST_FAILURES += len(drained)
+                    logger.warning(f"[SHADOW] final flush of {len(drained)} drained records failed: {e}")
+            else:
+                # Store never initialized — drained items are lost, count them
+                _SHADOW_INGEST_FAILURES += len(drained)
+                logger.warning(
+                    f"[SHADOW] store was never initialized, "
+                    f"{len(drained)} drained records lost"
+                )
 
         if self._store is not None:
             try:
