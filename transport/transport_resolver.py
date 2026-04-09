@@ -3,6 +3,17 @@ TransportResolver - Autonomous transport selection based on runtime context.
 
 Priorities: Nym > Tor > Direct > InMemory
 No config toggles - all decisions based on runtime signals.
+
+ROLE (F300P):
+  This file is a POLICY CANDIDATE, not current production transport authority.
+  - Production routing lives in FetchCoordinator._fetch_url() via get_transport_for_url()
+  - resolve_url() / is_tor_mandatory() are lightweight classification seams
+  - resolve() is DORMANT — per-request start() is not production lifecycle
+
+NOT AUTHORITY FOR:
+  - Session lifecycle management (session_manager.py, session_runtime.py)
+  - Runtime fetch truth (FetchCoordinator._fetch_url())
+  - Tor session pool management
 """
 
 import logging
@@ -11,6 +22,19 @@ from enum import Enum, auto
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_host(url: str) -> str:
+    """Extract hostname from URL. Returns lowercase host or empty string on parse failure."""
+    try:
+        netloc = url.split("://", 1)[1].split("/", 1)[0]
+        if "?" in netloc:
+            netloc = netloc.split("?", 1)[0]
+        if ":" in netloc:
+            netloc = netloc.split(":")[0]
+        return netloc.lower()
+    except Exception:
+        return ""
 
 
 class Transport(Enum):
@@ -124,44 +148,26 @@ class TransportResolver:
     def resolve_url(self, url: str) -> Transport:
         """
         B6/C.4: Resolve transport for a URL based on its domain suffix.
-        This is a fast synchronous dict lookup (<50ms for 1000 calls).
+        This is a fast synchronous classification (<50ms for 1000 calls).
 
-        Args:
-            url: URL string to analyze
+        Classification logic (shared with get_transport_for_url):
+          .onion  → Transport.TOR   (mandatory, never DIRECT)
+          .i2p    → Transport.I2P    (stub, fail-open to direct)
+          other   → Transport.DIRECT
 
         Returns:
             Transport enum: TOR for .onion, I2P for .i2p, DIRECT for everything else
         """
-        # B6: Check if host ends with .onion or .i2p directly (not just last dot suffix)
-        # This handles subdomains correctly: mirror.onion.hiddenservice.com → .com (not onion)
-        # But sub.domain.onion → .onion (correct)
-        try:
-            netloc = url.split("://", 1)[1].split("/", 1)[0]
-            if ":" in netloc:
-                host = netloc.split(":")[0]
-            else:
-                host = netloc
-            # Check for .onion / .i2p as true TLD suffixes (case-insensitive)
-            host_lower = host.lower()
-            if host_lower.endswith('.onion'):
-                return Transport.TOR
-            if host_lower.endswith('.i2p'):
-                return Transport.I2P
-        except Exception:
-            pass
+        host = _extract_host(url)
+        if host.endswith('.onion'):
+            return Transport.TOR
+        if host.endswith('.i2p'):
+            return Transport.I2P
         return Transport.DIRECT
 
     def is_tor_mandatory(self, url: str) -> bool:
         """Return True if URL must use Tor transport (cannot be overridden)."""
-        try:
-            netloc = url.split("://", 1)[1].split("/", 1)[0]
-            if ":" in netloc:
-                host = netloc.split(":")[0]
-            else:
-                host = netloc
-            return host.lower().endswith('.onion')
-        except Exception:
-            return False
+        return _extract_host(url).endswith('.onion')
 
     async def resolve(self, context: TransportContext) -> Optional['Transport']:
         """
@@ -221,9 +227,8 @@ class TransportResolver:
 
         # Low risk or fallback: use InMemory for testing/internal
         if context.allow_inmemory:
-            from .inmemory_transport import InMemoryTransport
             logger.info("Using InMemory transport (fallback)")
-            return InMemoryTransport("resolver_node")
+            return Transport.INMEMORY
 
         # No transport available - return None, caller will handle
         logger.warning("No transport available, returning None")
@@ -274,23 +279,11 @@ def get_transport_for_url(url: str) -> 'Transport':
         [4A-I2] Deterministic — same URL always returns same Transport
         [4A-I3] No side effects — pure function, thread-safe
     """
-    # Fast path: extract host and check suffix
-    try:
-        netloc = url.split("://", 1)[1].split("/", 1)[0]
-        # Strip query string from netloc (e.g. "?redirect=...")
-        if "?" in netloc:
-            netloc = netloc.split("?", 1)[0]
-        if ":" in netloc:
-            host = netloc.split(":")[0]
-        else:
-            host = netloc
-        host_lower = host.lower()
-        if host_lower.endswith('.onion'):
-            return Transport.TOR
-        if host_lower.endswith('.i2p'):
-            return Transport.I2P
-    except Exception:
-        pass
+    host = _extract_host(url)
+    if host.endswith('.onion'):
+        return Transport.TOR
+    if host.endswith('.i2p'):
+        return Transport.I2P
     return Transport.DIRECT
 
 

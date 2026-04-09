@@ -146,13 +146,18 @@ class MetricsRegistry:
         # Closed state — prevents post-close mutation drift (F200E)
         self._closed = False
 
-        # Persist file
+        # Persist state tracking for degraded mode visibility (F200K)
+        self._persist_available = True
+        self._last_persist_failure: Optional[str] = None
+
+        # Persist file — fail-soft, caller tracks degraded state
         self._persist_file = self._init_persist_file()
+        self._persist_available = self._persist_file is not None
 
         logger.info(f"MetricsRegistry initialized: run_id={run_id}")
 
     def _init_persist_file(self) -> Optional[Any]:
-        """Initialize persistence file"""
+        """Initialize persistence file. Fail-soft: returns None on failure, caller tracks degraded state."""
         metrics_dir = self._run_dir / "logs"
         metrics_dir.mkdir(parents=True, exist_ok=True)
         metrics_file = metrics_dir / "metrics.jsonl"
@@ -160,6 +165,9 @@ class MetricsRegistry:
         try:
             return open(metrics_file, "ab")
         except Exception as e:
+            # Capture failure message — caller (_persist_available, _last_persist_failure)
+            # is already initialized before this call
+            self._last_persist_failure = str(e)
             logger.warning(f"Failed to open metrics file: {e}")
             return None
 
@@ -244,6 +252,9 @@ class MetricsRegistry:
         Args:
             force: If True, always flush regardless of time/event thresholds.
         """
+        # Post-close flush guard — force=True bypasses for close() semantics
+        if getattr(self, '_closed', False) and not force:
+            return
         now = datetime.utcnow()
 
         # Check time-based flush (skip if not forced and thresholds not met)
@@ -296,12 +307,25 @@ class MetricsRegistry:
         logger.debug(f"Flushed {len(metrics)} metrics to disk")
 
     def get_summary(self) -> Dict[str, Any]:
-        """Get metrics summary (counts only, no raw data)"""
+        """
+        Get metrics summary — observer ledger truth.
+
+        Returns lightweight state snapshot for debugging and monitoring.
+        No execution authority, no policy, no audit chain.
+        """
         return {
             "run_id": self._run_id,
+            # Lifecycle truth
+            "closed": self._closed,
+            # Persistence truth
+            "persist_available": getattr(self, '_persist_available', None),
+            "degraded_ram_only": getattr(self, '_persist_available', True) is False,
+            "last_persist_failure": getattr(self, '_last_persist_failure', None),
+            # Counts
             "counter_count": len(self._counters),
             "gauge_count": len(self._gauges),
             "snapshot_count": len(self._snapshots),
+            # Live data (ring buffer contains recent snapshots)
             "counters": dict(self._counters),
             "gauges": dict(self._gauges),
         }

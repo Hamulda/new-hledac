@@ -54,7 +54,6 @@ except ImportError:
     PaywallBypass = None
     DarknetConnector = None
 
-from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -452,8 +451,11 @@ class FetchCoordinator(UniversalCoordinator):
         }
 
     def init_session_manager(self, lmdb_path: Optional[str] = None):
-        """Initialize session manager with LMDB persistence."""
+        """Initialize session manager with LMDB persistence (idempotent)."""
         if not SESSION_AVAILABLE:
+            return
+        # F300M: Idempotent — early return if already initialized (prevents repeated-init leak)
+        if self._session_manager is not None and self._session_lmdb_env is not None:
             return
         if lmdb_path is None:
             from hledac.universal.paths import LMDB_ROOT
@@ -1242,6 +1244,22 @@ class FetchCoordinator(UniversalCoordinator):
                 self._corpus_ingester.close()
             except Exception as e:
                 logger.debug(f"CorpusIngester close failed: {e}")
+
+        # F300M: Cleanup SessionManager and LMDB env — correct order:
+        # 1. SessionManager.close() first (closes ThreadPoolExecutor)
+        # 2. Then lmdb_env.close() (closes LMDB environment)
+        if self._session_manager is not None:
+            try:
+                await self._session_manager.close()
+            except Exception:
+                pass
+            self._session_manager = None
+        if self._session_lmdb_env is not None:
+            try:
+                self._session_lmdb_env.close()
+            except Exception:
+                pass
+            self._session_lmdb_env = None
 
         # Sprint 76: Cleanup Tor sessions with drain
         for session in self._tor_sessions.values():

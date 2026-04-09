@@ -39,6 +39,17 @@ class SessionManager:
 
         FetchCoordinator._fetch_url() calls SessionManager.get_session()
         to inject cookies/headers into transport-layer fetch operations.
+
+    OWNERSHIP BOUNDARY (F300K):
+        - LMDB env is INJECTED via __init__ — SessionManager does NOT own it
+        - ThreadPoolExecutor is OWNED locally, closed via close()
+        - post-close: all methods guard against use-after-close
+
+    CLOSE SEMANTICS (F300K):
+        - close() is idempotent — safe to call multiple times
+        - executor.shutdown(wait=False) — non-blocking, no event-loop stall
+        - _cache is NOT cleared (by design — remains accessible for reads)
+        - _closed flag guards all mutating operations post-close
     """
 
     def __init__(self, lmdb_env: lmdb.Environment):
@@ -46,6 +57,8 @@ class SessionManager:
         self._cache: Dict[str, Dict] = {}  # domain -> {cookies, headers, last_used}
         # S49-B: Thread pool executor for async LMDB operations
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        # F300K: explicit closed state — guards post-close truthfulness
+        self._closed: bool = False
 
     def _get_key(self, domain: str) -> bytes:
         return f"session:{domain}".encode()
@@ -75,9 +88,23 @@ class SessionManager:
         with self._env.begin(write=True) as txn:
             txn.delete(key)
 
+    # F300K: Helper to check and guard closed state for read-only methods.
+    # Returns cached data if available after close, else None.
+    def _get_from_cache_after_close(self, domain: str) -> Optional[Dict]:
+        if self._closed and domain in self._cache:
+            return self._cache[domain]
+        return None
+
     # S49-B: Async LMDB operations via executor
     async def get_session(self, domain: str) -> Optional[Dict]:
         """Vrátí uložené session pro domain."""
+        # F300K: After close, return stale cached data (read-only, no LMDB write)
+        if self._closed:
+            cached = self._cache.get(domain)
+            if cached:
+                cached['last_used'] = time.time()
+            return cached
+
         # Check RAM cache first
         if domain in self._cache:
             self._cache[domain]['last_used'] = time.time()
@@ -95,7 +122,12 @@ class SessionManager:
         return None
 
     async def save_session(self, domain: str, cookies: Dict, headers: Dict = None):
-        """Uloží session pro domain."""
+        """Uloží session pro domain. F300K: no-op after close."""
+        # F300K: Guard — mutate operations blocked after close
+        if self._closed:
+            logger.debug(f"[SESSION] save_session({domain}) — blocked, manager closed")
+            return
+
         session = {
             'cookies': cookies,
             'headers': headers or {},
@@ -117,7 +149,12 @@ class SessionManager:
             logger.warning(f"[SESSION] Failed to save {domain}: {e}")
 
     async def rotate_credentials(self, domain: str):
-        """Zahodí staré session, přiští fetch zkusí znovu přihlásit."""
+        """Zahodí staré session, přiští fetch zkusí znovu přihlásit. F300K: no-op after close."""
+        # F300K: Guard — mutate operations blocked after close
+        if self._closed:
+            logger.debug(f"[SESSION] rotate_credentials({domain}) — blocked, manager closed")
+            return
+
         if domain in self._cache:
             del self._cache[domain]
 
@@ -129,5 +166,17 @@ class SessionManager:
             pass
 
     async def close(self) -> None:
-        """S49-B: Cleanup executor on shutdown."""
-        self._executor.shutdown(wait=True)
+        """
+        F300K: Cleanup executor on shutdown.
+
+        Idempotent — safe to call multiple times.
+        Uses wait=False to avoid blocking the event loop.
+        Mutating operations (save_session, rotate_credentials) are
+        blocked after close. Read operations (get_session) continue
+        to return stale cached data.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        # F300K: wait=False — non-blocking, no event-loop stall on M1 8GB UMA
+        self._executor.shutdown(wait=False)
