@@ -620,21 +620,24 @@ class QuantumInspiredPathFinder:
         Returns:
             Shifted state.
         """
-        if sparse is None:
+        sparse_mod = _get_scipy_sparse()
+        if sparse_mod is None:
             return state
 
+        np_mod = _get_numpy()
+
         # Convert to CSR for efficient multiplication
-        if sparse.isspmatrix_coo(self.adjacency_matrix):
+        if sparse_mod.isspmatrix_coo(self.adjacency_matrix):
             adj_csr = self.adjacency_matrix.tocsr()
         else:
             adj_csr = self.adjacency_matrix
 
         # Normalize by row degrees (stochastic matrix)
-        degrees = np.array(adj_csr.sum(axis=1)).flatten()
+        degrees = np_mod.array(adj_csr.sum(axis=1)).flatten()
         degrees[degrees == 0] = 1.0  # Avoid division by zero
 
         # Create diagonal matrix for normalization
-        D_inv = sparse.diags(1.0 / degrees)
+        D_inv = sparse_mod.diags(1.0 / degrees)
         normalized = D_inv @ adj_csr
 
         # Apply shift
@@ -651,14 +654,15 @@ class QuantumInspiredPathFinder:
         Returns:
             Shifted state.
         """
+        np_mod = _get_numpy()
         adj = self.adjacency_matrix
-        if not isinstance(adj, np.ndarray):
+        if not isinstance(adj, np_mod.ndarray):
             return state
 
         # Normalize by row degrees
         degrees = adj.sum(axis=1)
         degrees[degrees == 0] = 1.0
-        normalized = adj / degrees[:, np.newaxis]
+        normalized = adj / degrees[:, np_mod.newaxis]
 
         # Apply shift
         new_state = normalized.T @ state

@@ -474,21 +474,15 @@ _LAZY_SUBPACKAGES = {
 # Actual load state is tracked by the try/except block below (always False currently).
 # Adding it back here with False would be a duplicate of the runtime truth.
 _FALLBACK_ATTRS = {
-    # Availability flags (set by try/except blocks at runtime)
+    # Availability flags — truthful state after F12G reconciliation
+    # ENHANCED: autonomous_orchestrator_enhanced.py does NOT exist → False
     "ENHANCED_ORCHESTRATOR_AVAILABLE": False,
-    "INTEGRATED_ORCHESTRATOR_AVAILABLE": False,
+    # INTEGRATED: orchestrator_integration.py EXISTS → True
+    "INTEGRATED_ORCHESTRATOR_AVAILABLE": True,
+    # BUDGET: budget_manager.py only at cache/ not root → False
     "BUDGET_MANAGER_AVAILABLE": False,
+    # UNIFIED: enhanced_research.py exists → set by try/except below
     "UNIFIED_RESEARCH_AVAILABLE": False,
-    # F1200B: Dead lazy exports — .autonomy.planner does NOT exist.
-    # These symbols raise AttributeError at access time (not ImportError).
-    # Moved from _LAZY_SUBPACKAGES to _FALLBACK_ATTRS to prevent
-    # ImportError when the non-existent module path is requested.
-    "SerializedTreePlanner": None,
-    "TreeNodeStatus": None,
-    "Thought": None,
-    "TreeNode": None,
-    "PlannerState": None,
-    "create_tree_planner": None,
 }
 
 

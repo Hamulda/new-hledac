@@ -896,33 +896,40 @@ class GhostExecutor:
                 error=str(e)
             ).to_dict()
     
-    # Placeholder akce
+    # Placeholder akce — Sprint F130F: stub metadata pro truthful distinguishability
+    STUB_METADATA = {
+        "stub": True,
+        "degraded": True,
+        "implemented": False,
+        "contract": "noop_placeholder",
+    }
+
     async def _action_scan(self, params, context):
-        return ActionResult(success=True, action="scan", data={}).to_dict()
-    
+        return ActionResult(success=True, action="scan", data=self.STUB_METADATA.copy()).to_dict()
+
     async def _action_download(self, params, context):
-        return ActionResult(success=True, action="download", data={}).to_dict()
-    
+        return ActionResult(success=True, action="download", data=self.STUB_METADATA.copy()).to_dict()
+
     async def _action_smart_search(self, params, context):
-        return ActionResult(success=True, action="smart_search", data={}).to_dict()
-    
+        return ActionResult(success=True, action="smart_search", data=self.STUB_METADATA.copy()).to_dict()
+
     async def _action_memorize(self, params, context):
-        return ActionResult(success=True, action="memorize", data={}).to_dict()
-    
+        return ActionResult(success=True, action="memorize", data=self.STUB_METADATA.copy()).to_dict()
+
     async def _action_probe(self, params, context):
-        return ActionResult(success=True, action="probe", data={}).to_dict()
-    
+        return ActionResult(success=True, action="probe", data=self.STUB_METADATA.copy()).to_dict()
+
     async def _action_track(self, params, context):
-        return ActionResult(success=True, action="track", data={}).to_dict()
-    
+        return ActionResult(success=True, action="track", data=self.STUB_METADATA.copy()).to_dict()
+
     async def _action_deep_research(self, params, context):
-        return ActionResult(success=True, action="deep_research", data={}).to_dict()
-    
+        return ActionResult(success=True, action="deep_research", data=self.STUB_METADATA.copy()).to_dict()
+
     async def _action_answer(self, params, context):
-        return ActionResult(success=True, action="answer", data={}).to_dict()
-    
+        return ActionResult(success=True, action="answer", data=self.STUB_METADATA.copy()).to_dict()
+
     async def _action_crack(self, params, context):
-        return ActionResult(success=True, action="crack", data={}).to_dict()
+        return ActionResult(success=True, action="crack", data=self.STUB_METADATA.copy()).to_dict()
 
     async def _action_error(self, params, context):
         """Error placeholder — used when an action fails to resolve."""
