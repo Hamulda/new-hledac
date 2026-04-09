@@ -146,7 +146,12 @@ class IOCGraph:
         """
         Add IOC to in-memory buffer — ZERO Kuzu I/O in ACTIVE phase.
         Flush automatically when buffer reaches _BUFFER_FLUSH_SIZE.
+
+        After close() the buffer is closed: new writes are silently dropped
+        so no buffered data can be lost or observed in an inconsistent state.
         """
+        if self._closed:
+            return
         self._ioc_buffer.append((ioc_type, value, confidence))
         if len(self._ioc_buffer) >= self._BUFFER_FLUSH_SIZE:
             await self.flush_buffers()
@@ -161,31 +166,41 @@ class IOCGraph:
     ) -> None:
         """
         Add observation to in-memory buffer — ZERO Kuzu I/O in ACTIVE phase.
+
+        After close() the buffer is closed: new writes are silently dropped.
         """
+        if self._closed:
+            return
         self._obs_buffer.append((id_a, id_b, finding_id, ts, source_type))
 
     async def flush_buffers(self) -> dict[str, int]:
         """
         Bulk flush both buffers to Kuzu — call in WINDUP or at buffer limit.
-        Returns {'ioc_flushed': N, 'obs_flushed': M}.
+
+        Returns:
+            ioc_created: count of IOC nodes NEWLY CREATED in this flush.
+                         IOCs that already existed are updated (last_seen bump)
+                         but NOT counted here. Call graph_stats() for total count.
+            obs_flushed: count of observation edges written to the graph.
         """
         if not self._ioc_buffer and not self._obs_buffer:
-            return {"ioc_flushed": 0, "obs_flushed": 0}
+            return {"ioc_created": 0, "obs_flushed": 0}
 
-        # Copy and clear buffers atomically
-        # NOTE: _closed must NOT be checked here — close() calls flush_buffers()
-        # and _closed is set BEFORE flush. The atomic copy+clear below is safe
-        # because flush happens BEFORE any subsequent writes are blocked.
+        # Copy and clear buffers atomically.
+        # _closed is NOT checked here so close()-from-WINDUP can still flush.
+        # After close() is set, buffer_ioc()/buffer_observation() will refuse
+        # to enqueue new items (see those methods), so no new writes can race
+        # in after this point.
         ioc_copy = self._ioc_buffer[:]
         obs_copy = self._obs_buffer[:]
         self._ioc_buffer.clear()
         self._obs_buffer.clear()
 
-        ioc_ids: list[str] = []
+        ioc_created: list[str] = []
         obs_recorded: int = 0
         try:
             if ioc_copy:
-                ioc_ids = await self.upsert_ioc_batch(ioc_copy)
+                ioc_created = await self.upsert_ioc_batch(ioc_copy)
             if obs_copy:
                 await self._record_observation_batch_sync_async(obs_copy)
                 obs_recorded = len(obs_copy)
@@ -195,10 +210,10 @@ class IOCGraph:
 
         import logging
         logging.info(
-            f"[IOCGraph] Buffer flushed: {len(ioc_ids)} IOCs, "
+            f"[IOCGraph] Buffer flushed: {len(ioc_created)} IOCs newly created, "
             f"{obs_recorded} observations"
         )
-        return {"ioc_flushed": len(ioc_ids), "obs_flushed": obs_recorded}
+        return {"ioc_created": len(ioc_created), "obs_flushed": obs_recorded}
 
     async def _record_observation_batch_sync_async(
         self, obs: list[tuple[str, str, str, float, str]]
@@ -254,16 +269,22 @@ class IOCGraph:
         Flushes any pending IOC and observation buffers before shutdown
         to prevent silent data loss when close() is called without
         an intervening WINDUP phase.
+
+        close() is idempotent and data-safe: pending buffered writes are
+        flushed BEFORE _closed is set to True, so no buffered IOC or
+        observation data is lost on normal shutdown.
         """
         if self._closed:
             return
-        self._closed = True
         loop = asyncio.get_running_loop()
         try:
-            # Flush pending buffers before closing — no-op if both are empty
+            # Flush pending buffers BEFORE setting _closed.
+            # This ensures buffer_ioc()/buffer_observation() calls that
+            # race with close() are still honoured.
             await self.flush_buffers()
         except Exception:
             pass
+        self._closed = True
         try:
             await loop.run_in_executor(self._executor, self._close_sync)
         except Exception:

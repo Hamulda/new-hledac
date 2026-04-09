@@ -347,7 +347,6 @@ class QuantumInspiredPathFinder:
                 coo.data.tolist()
             )
         else:
-            np_mod = _get_numpy()
             # Manual COO conversion - build COO data directly from input matrix
             rows, cols, data = [], [], []
             for i in range(n):
@@ -435,7 +434,7 @@ class QuantumInspiredPathFinder:
         n = self.n_nodes
         amplitude = 1.0 / math.sqrt(len(start_indices))
 
-        if self._mlx_available and mx is not None:
+        if self._mlx_available and _get_mlx() is not None:
             state = mx.zeros(n, dtype=mx.float32)
             for idx in start_indices:
                 # Build update indices and values
@@ -523,7 +522,7 @@ class QuantumInspiredPathFinder:
         Returns:
             State after Hadamard coin operation.
         """
-        if self._mlx_available and mx is not None:
+        if self._mlx_available and _get_mlx() is not None:
             # Normalize state
             norm = mx.sqrt(mx.sum(state * state))
             if norm > 0:
@@ -549,7 +548,7 @@ class QuantumInspiredPathFinder:
         # Grover coin: 2|s><s| - I where |s> is uniform superposition
         n = self.n_nodes
 
-        if self._mlx_available and mx is not None:
+        if self._mlx_available and _get_mlx() is not None:
             uniform = mx.ones(n, dtype=mx.float32) / math.sqrt(n)
             overlap = mx.sum(uniform * state)
             return 2 * overlap * uniform - state
@@ -567,7 +566,7 @@ class QuantumInspiredPathFinder:
         Returns:
             State after shift operation.
         """
-        if self._mlx_available and mx is not None:
+        if self._mlx_available and _get_mlx() is not None:
             return self._apply_shift_mlx(state)
         elif _get_scipy_sparse() is not None:
             return self._apply_shift_scipy(state)
@@ -721,7 +720,7 @@ class QuantumInspiredPathFinder:
         n = self.n_nodes
         strength = self.config.amplification_strength
 
-        if self._mlx_available and mx is not None:
+        if self._mlx_available and _get_mlx() is not None:
             # Create oracle (marks target states)
             oracle = mx.ones(n, dtype=mx.float32)
             for idx in target_indices:
@@ -791,7 +790,7 @@ class QuantumInspiredPathFinder:
                 # Memory cleanup every 10 steps
                 if step % 10 == 0:
                     gc.collect()
-                    if self._mlx_available and mx is not None:
+                    if self._mlx_available and _get_mlx() is not None:
                         mx.eval([])
                         mx.clear_cache()
 
@@ -807,7 +806,7 @@ class QuantumInspiredPathFinder:
         finally:
             # Always cleanup after pathfinding
             gc.collect()
-            if self._mlx_available and mx is not None:
+            if self._mlx_available and _get_mlx() is not None:
                 mx.eval([])
                 mx.clear_cache()
             gc.collect()
@@ -832,7 +831,7 @@ class QuantumInspiredPathFinder:
             List of reconstructed paths.
         """
         # Convert to numpy for path extraction
-        if self._mlx_available and mx is not None:
+        if self._mlx_available and _get_mlx() is not None:
             prob_array = np.array(probabilities.tolist())
         else:
             prob_array = np.array(probabilities)
@@ -942,7 +941,7 @@ class QuantumInspiredPathFinder:
         """
         predecessors = []
 
-        if self._mlx_available and mx is not None:
+        if self._mlx_available and _get_mlx() is not None:
             if isinstance(self.adjacency_matrix, dict):
                 rows = self.adjacency_matrix['rows']
                 cols = self.adjacency_matrix['cols']
@@ -983,7 +982,7 @@ class QuantumInspiredPathFinder:
             gc.collect()
 
             # Clear MLX cache if available
-            if self._mlx_available and mx is not None:
+            if self._mlx_available and _get_mlx() is not None:
                 mx.eval([])
                 mx.clear_cache()
             gc.collect()
@@ -1003,7 +1002,7 @@ class QuantumInspiredPathFinder:
         Returns:
             Dictionary with state statistics.
         """
-        if self._mlx_available and mx is not None:
+        if self._mlx_available and _get_mlx() is not None:
             prob_sum = float(mx.sum(state * state).item())
             max_prob = float(mx.max(state * state).item())
             entropy = float(-mx.sum(state * state * mx.log(state * state + 1e-10)).item())

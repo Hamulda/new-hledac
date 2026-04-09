@@ -1667,16 +1667,17 @@ class DuckDBShadowStore:
 
     def close(self) -> None:
         """
-        Synchronous close — backward compat. Prefer aclose().
+        Synchronous close — canonical sync cleanup path.
 
-        Shares the same cleanup contract as aclose() except for executor
-        lifecycle (shutdown vs. keep-alive) and bg-task cancellation.
+        Explicit divergence from aclose():
+          - executor is shut down (re-init NOT supported)
+          - graph slots (_truth_write_graph, _ioc_graph, _stix_graph) are NOT closed
+          - semantic_store is NOT closed
+          - bg_tasks are NOT cancelled (sync path has no bg task infrastructure)
 
         Cleanup ordering:
-          1. _sync_close_on_worker()  — closes DuckDB connections
-          2. WAL LMDB close           — releases lock files
-          3. dedup LMDB close         — releases lock files
-          4. executor.shutdown()      — full worker shutdown (re-init NOT supported)
+          1. _sync_close_on_worker()  — closes DuckDB connections + WAL LMDB
+          2. _do_close()              — executor.shutdown + dedup LMDB close
 
         Idempotent: safe to call multiple times.
         """
@@ -3080,12 +3081,27 @@ class DuckDBShadowStore:
 
     async def aclose(self) -> None:
         """
-        Async idempotent shutdown.
+        Async idempotent shutdown — canonical async cleanup path.
 
-        - Sets _closed=True immediately
-        - Closes persistent connection synchronously (direct call to worker)
-        - Shuts down the executor (wait=False, no join)
-        - Safe to call multiple times (idempotent)
+        Cleanup ordering:
+          1. Sets _closed=True + _initialized=False immediately
+          2. Clears boot barrier (_startup_ready)
+          3. Closes DuckDB connections via _sync_close_on_worker (worker thread)
+          4. Cancels bg tasks (graph ingest)
+          5. Closes truth_write_graph (flush_buffers + close)
+          6. Closes ioc_graph (DuckPGQGraph donor)
+          7. Closes semantic_store
+          8. Closes stix_graph
+          9. Closes WAL LMDB + dedup LMDB
+          10. Executor is NOT shut down — kept alive for re-init SAFETY
+
+        Executor keep-alive contract (Sprint 8L):
+          A new ThreadPoolExecutor cannot reuse the same worker thread.
+          Keeping the existing executor allows async_initialize() to re-attach
+          to the same thread on the same store instance after aclose().
+          This is the ONLY supported re-init path.
+
+        Idempotent: safe to call multiple times.
         """
         if self._closed:
             return
@@ -3151,6 +3167,15 @@ class DuckDBShadowStore:
             except Exception:
                 pass
             self._semantic_store = None
+
+        # Sprint 8VQ: close STIX-only graph slot
+        if self._stix_graph is not None:
+            try:
+                if callable(getattr(self._stix_graph, "close", None)):
+                    await self._stix_graph.close()
+            except Exception:
+                pass
+            self._stix_graph = None
 
         # Sprint 8L: Do NOT shutdown the executor — keep it alive for re-initialization.
         # A new ThreadPoolExecutor cannot reuse the same thread, so we keep the
@@ -4212,14 +4237,7 @@ class DuckDBShadowStore:
             self._executor.shutdown(wait=False)
         except Exception:
             pass
-        # Sprint 8L: close WAL LMDB to release lock files
-        if hasattr(self, "_wal_lmdb") and self._wal_lmdb is not None:
-            try:
-                self._wal_lmdb.close()
-            except Exception:
-                pass
-            self._wal_lmdb = None
-        # Sprint 8AG: close dedup LMDB
+        # Sprint 8AG: close dedup LMDB (WAL LMDB already closed via _sync_close_on_worker)
         if hasattr(self, "_dedup_lmdb") and self._dedup_lmdb is not None:
             try:
                 self._dedup_lmdb.close()
