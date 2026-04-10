@@ -31,6 +31,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from collections import OrderedDict
 from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse
 
@@ -251,6 +252,11 @@ class DarkWebCrawler:
     - Link graph analysis
     """
 
+    # Bounded memory constants (M1 8GB)
+    MAX_CONTENT_CACHE: int = 200
+    MAX_VISITED_URLS: int = 5000
+    MAX_DISCOVERED_SERVICES: int = 1000
+
     # Regex patterns
     ONION_V2_PATTERN = re.compile(r"[a-z2-7]{16}\.onion")
     ONION_V3_PATTERN = re.compile(r"[a-z2-7]{56}\.onion")
@@ -278,10 +284,11 @@ class DarkWebCrawler:
         self.request_delay = request_delay
         self.respect_robots_txt = respect_robots_txt
 
-        # State
-        self.discovered_services: Dict[str, HiddenService] = {}
-        self.visited_urls: Set[str] = set()
-        self.content_cache: Dict[str, DarkWebContent] = {}
+        # Bounded session state (M1 8GB)
+        # OrderedDict provides FIFO LRU eviction on insert beyond limit
+        self.discovered_services: OrderedDict[str, HiddenService] = OrderedDict()
+        self.visited_urls: OrderedDict[str, bool] = OrderedDict()
+        self.content_cache: OrderedDict[str, DarkWebContent] = OrderedDict()
         self.url_queue: asyncio.Queue = asyncio.Queue()
 
         # Statistics
@@ -322,7 +329,7 @@ class DarkWebCrawler:
         if url in self.visited_urls or depth > self.max_depth:
             return
 
-        self.visited_urls.add(url)
+        self._bounded_insert_visited_url(url)
 
         try:
             content = await self._fetch_page(url)
@@ -370,7 +377,18 @@ class DarkWebCrawler:
                 self.stats["monero_addresses"] += len(content.cryptocurrency_addresses.get("monero", []))
                 self.stats["pgp_keys_found"] += len(content.pgp_blocks)
 
-                self.content_cache[url] = content
+                self._bounded_insert_discovered_service(
+                    url,
+                    HiddenService(
+                        address=url,
+                        onion_type=OnionType.V3,
+                        source=DarkWebSource.TOR_ONION,
+                        is_online=True,
+                        response_time_ms=response_time,
+                    )
+                )
+
+                self._bounded_insert_content_cache(url, content)
 
                 # Respect rate limiting
                 await asyncio.sleep(self.request_delay)
@@ -530,16 +548,70 @@ class DarkWebCrawler:
                 await asyncio.sleep(interval_minutes * 60)
 
     def get_statistics(self) -> Dict[str, Any]:
-        """Get crawling statistics."""
+        """Get crawling statistics with bounded truth."""
         return {
             **self.stats,
-            "discovered_services": len(self.discovered_services),
-            "visited_urls": len(self.visited_urls),
-            "cached_content": len(self.content_cache)
+            "discovered_services_size": len(self.discovered_services),
+            "discovered_services_limit": self.MAX_DISCOVERED_SERVICES,
+            "visited_urls_size": len(self.visited_urls),
+            "visited_urls_limit": self.MAX_VISITED_URLS,
+            "content_cache_size": len(self.content_cache),
+            "content_cache_limit": self.MAX_CONTENT_CACHE,
+        }
+
+    # ------------------------------------------------------------------
+    # Bounded helpers (M1 8GB — prevent unbounded memory growth)
+    # ------------------------------------------------------------------
+
+    def _bounded_insert_content_cache(self, url: str, content: DarkWebContent) -> None:
+        """Insert into content_cache with FIFO LRU eviction at limit."""
+        if url in self.content_cache:
+            self.content_cache.move_to_end(url)
+        else:
+            if len(self.content_cache) >= self.MAX_CONTENT_CACHE:
+                self.content_cache.popitem(last=False)
+        self.content_cache[url] = content
+
+    def _bounded_insert_visited_url(self, url: str) -> None:
+        """Insert into visited_urls with FIFO LRU eviction at limit."""
+        if url in self.visited_urls:
+            self.visited_urls.move_to_end(url)
+        else:
+            if len(self.visited_urls) >= self.MAX_VISITED_URLS:
+                self.visited_urls.popitem(last=False)
+        self.visited_urls[url] = True
+
+    def _bounded_insert_discovered_service(self, url: str, service: HiddenService) -> None:
+        """Insert into discovered_services with FIFO eviction at limit."""
+        if url in self.discovered_services:
+            self.discovered_services.move_to_end(url)
+        else:
+            if len(self.discovered_services) >= self.MAX_DISCOVERED_SERVICES:
+                self.discovered_services.popitem(last=False)
+        self.discovered_services[url] = service
+
+    def reset_session(self) -> None:
+        """Clear all session state (bounded structures + queues)."""
+        self.discovered_services.clear()
+        self.visited_urls.clear()
+        self.content_cache.clear()
+        while not self.url_queue.empty():
+            try:
+                self.url_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        self.stats = {
+            "pages_crawled": 0,
+            "services_discovered": 0,
+            "bitcoin_addresses": 0,
+            "monero_addresses": 0,
+            "pgp_keys_found": 0,
+            "errors": 0
         }
 
     async def close(self):
-        """Close crawler and cleanup."""
+        """Close crawler and cleanup session state."""
+        self.reset_session()
         await self.tor_proxy.close()
 
 

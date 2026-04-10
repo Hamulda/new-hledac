@@ -91,13 +91,13 @@ class _LifecycleAdapter:
     # ── tick ──────────────────────────────────────────────────────────────
 
     def tick(self, now_monotonic: Optional[float] = None):
-        """runtime: tick() returns SprintPhase. Fallback: remaining_time."""
+        """runtime: tick() returns SprintPhase. Fallback: 'UNKNOWN' phase string."""
         lc = self._lc
         if hasattr(lc, "tick"):
             return lc.tick(now_monotonic)
-        # Fallback: return elapsed as float
-        remaining = self.remaining_time(now_monotonic)
-        return remaining
+        # Fallback: return phase-like 'UNKNOWN' string, not float.
+        # Callers (line 530) compare phase != _current_phase — requires str.
+        return "UNKNOWN"
 
     # ── remaining_time ───────────────────────────────────────────────────
 

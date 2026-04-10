@@ -867,31 +867,30 @@ class StealthCrawler:
         return results
 
     def _fetch_html(self, url: str, headers: Dict[str, str]) -> Optional[str]:
-        """Fetch HTML using available library with subprocess curl fallback (Sprint 8R)."""
+        """
+        Fetch HTML using available library with subprocess curl fallback (Sprint 8R).
+
+        Bounded fix TICKET-004:
+        - This is a SYNC method. If called from async context, it must NOT block
+          the event loop with subprocess.run().
+        - If curl_cffi fails, call the sync subprocess curl directly (this is the
+          expected path for sync callers like search()).
+        - The async path (_fetch_html_async) handles async context properly.
+        """
         try:
             if CURL_AVAILABLE:
-                # Sprint 8R: Try curl_cffi first, catch exception and fallback to subprocess curl
+                # Sprint 8R: Try curl_cffi first
                 try:
                     result = self._fetch_with_curl_cffi(url, headers)
+                    if result:
+                        return result
                 except Exception as e:
-                    logger.warning(f"curl_cffi failed, trying subprocess curl: {e}")
-                    result = None
-                # Sprint 8R: If curl_cffi returns empty/None, try subprocess curl for Brotli
-                if not result:
-                    # Sprint 8T: Check if we're in async context
-                    # Sprint 8X FIX: Use asyncio.to_thread to avoid blocking event loop
-                    try:
-                        loop = asyncio.get_running_loop()
-                        # In async context - use asyncio.to_thread for non-blocking subprocess
-                        logger.debug("async context detected, using asyncio.to_thread for subprocess curl")
-                        result = asyncio.get_event_loop().run_in_executor(
-                            None, self._fetch_with_subprocess_curl, url, headers
-                        )
-                        # Note: run_in_executor returns a Future, we need to run sync for now
-                        # For true async, use _fetch_with_subprocess_curl_async directly
-                    except RuntimeError:
-                        pass  # No async loop - normal sync path
-                    result = self._fetch_with_subprocess_curl(url, headers)
+                    logger.warning(f"curl_cffi failed: {e}")
+
+                # Sprint 8R: Fallback to subprocess curl (sync path)
+                # This is correct because _fetch_html is a sync method.
+                # Async callers should use _fetch_html_async instead.
+                result = self._fetch_with_subprocess_curl(url, headers)
                 return result if result else None
             elif self._requests_available:
                 return self._fetch_with_requests(url, headers)
