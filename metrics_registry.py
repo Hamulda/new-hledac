@@ -143,6 +143,9 @@ class MetricsRegistry:
         # Event count for flush cadence
         self._event_count = 0
 
+        # Sprint event ring buffer (telemetry handoff from runtime/telemetry.py)
+        self._sprint_events: deque = deque(maxlen=100)
+
         # Closed state — prevents post-close mutation drift (F200E)
         self._closed = False
 
@@ -325,10 +328,32 @@ class MetricsRegistry:
             "counter_count": len(self._counters),
             "gauge_count": len(self._gauges),
             "snapshot_count": len(self._snapshots),
+            "sprint_event_count": len(self._sprint_events),
             # Live data (ring buffer contains recent snapshots)
             "counters": dict(self._counters),
             "gauges": dict(self._gauges),
         }
+
+    def ingest_sprint_event(self, event: Dict[str, object]) -> None:
+        """
+        Ingest a sprint telemetry event from runtime/telemetry.py.
+
+        Fail-soft: errors are swallowed. No validation required — events
+        are already structured by SprintEvent.to_dict().
+
+        Args:
+            event: Dict with keys: session_id, phase, component, event, elapsed_ms, ts
+        """
+        try:
+            if self._closed:
+                return
+            # Validate required fields present
+            required = {"session_id", "phase", "component", "event", "elapsed_ms"}
+            if not required.issubset(event.keys()):
+                return
+            self._sprint_events.append(event)
+        except Exception:
+            pass
 
     def close(self) -> None:
         """Close and flush - force=True to prevent tail-loss of pending metrics."""

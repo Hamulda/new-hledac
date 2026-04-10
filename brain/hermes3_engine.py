@@ -1114,20 +1114,237 @@ What should be the next action?"""
         )
         return decision_model.model_dump()
     
+    # =========================================================================
+    # Sprint F150G: Runtime-Facing Wrappers
+    # =========================================================================
+
+    # Hard limits for runtime-facing wrappers (M1 8GB safe)
+    _PLAN_MAX_QUERY_CHARS = 2048
+    _PLAN_MAX_HISTORY_ITEMS = 5
+    _PLAN_MAX_CONTEXT_CHARS = 4096
+
+    _SYNTH_MAX_QUERY_CHARS = 1024
+    _SYNTH_MAX_FINDINGS = 50
+    _SYNTH_MAX_FINDING_CHARS = 800
+    _SYNTH_MAX_HYPOTHESES = 10
+    _SYNTH_MAX_OUTPUT_CHARS = 8192
+
+    async def generate_sprint_plan(
+        self,
+        query: str,
+        context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Sprint F150G: Thin runtime-facing wrapper for sprint planning.
+
+        Built on top of existing decide_next_action(), not a separate engine.
+        Lazy: model loaded on demand via existing initialize() path.
+
+        Bounds:
+        - query truncated to _PLAN_MAX_QUERY_CHARS
+        - history limited to _PLAN_MAX_HISTORY_ITEMS items
+        - context truncated to _PLAN_MAX_CONTEXT_CHARS
+
+        Args:
+            query: Sprint/research query
+            context: Optional runtime context (step, max_steps, history, goals)
+
+        Returns:
+            Stable parseable dict with keys:
+            - action, params, reasoning, complete (from decide_next_action)
+            - plan_id (generated)
+            - bounded (True if input was truncated)
+        """
+        # Fail-soft: if model not loaded, return skeleton
+        if self._model is None:
+            return {
+                "action": "initialize",
+                "params": {"reason": "model_not_loaded"},
+                "reasoning": "Hermes model not initialized",
+                "complete": False,
+                "plan_id": None,
+                "bounded": False,
+            }
+
+        ctx = context or {}
+        step = min(ctx.get("step", 0), 9999)
+        max_steps = min(ctx.get("max_steps", 20), 9999)
+        history = (ctx.get("history", []) or [])[-self._PLAN_MAX_HISTORY_ITEMS:]
+        goals = ctx.get("goals", "")
+
+        # Bound query
+        bounded_query = str(query)[:self._PLAN_MAX_QUERY_CHARS]
+        query_was_truncated = len(str(query)) > self._PLAN_MAX_QUERY_CHARS
+
+        # Bound history
+        bounded_history = []
+        for h in history:
+            entry = {
+                "action": str(h.get("action", ""))[:200],
+                "result": str(h.get("result", ""))[:300] if h.get("result") else None,
+            }
+            bounded_history.append(entry)
+
+        # Build runtime context for decide_next_action
+        runtime_ctx = {
+            "query": bounded_query,
+            "step": step,
+            "max_steps": max_steps,
+            "history": bounded_history,
+        }
+        if goals:
+            runtime_ctx["goals"] = str(goals)[:self._PLAN_MAX_CONTEXT_CHARS]
+
+        try:
+            result = await self.decide_next_action(runtime_ctx)
+
+            # Validate result structure (fail-soft)
+            if not isinstance(result, dict):
+                result = {"action": None, "params": {}, "reasoning": str(result), "complete": False}
+
+            # Ensure required keys present
+            for key in ("action", "params", "reasoning", "complete"):
+                if key not in result:
+                    result[key] = None if key != "complete" else False
+
+            result["bounded"] = query_was_truncated
+            result["plan_id"] = f"plan_{int(time.time() * 1000)}"
+
+            return result
+
+        except Exception as e:
+            logger.warning(f"[SPRINT_PLAN] Failed: {e}")
+            return {
+                "action": "error",
+                "params": {"error": str(e)[:200]},
+                "reasoning": "generate_sprint_plan failed",
+                "complete": False,
+                "plan_id": None,
+                "bounded": query_was_truncated,
+            }
+
+    async def synthesize_findings(
+        self,
+        query: str,
+        findings: List[Any],
+        hypotheses: Optional[List[str]] = None,
+        context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Sprint F150G: Thin runtime-facing wrapper for synthesis.
+
+        Built on top of existing synthesize(), not a separate engine.
+        Returns structured dict instead of raw text.
+
+        Bounds:
+        - query truncated to _SYNTH_MAX_QUERY_CHARS
+        - findings limited to _SYNTH_MAX_FINDINGS items
+        - each finding truncated to _SYNTH_MAX_FINDING_CHARS
+        - hypotheses limited to _SYNTH_MAX_HYPOTHESES
+
+        Args:
+            query: Research question
+            findings: List of finding dicts/objects
+            hypotheses: Optional list of hypothesis strings
+            context: Optional context (history, goals)
+
+        Returns:
+            Stable report-like dict with keys:
+            - report (str) - synthesized text
+            - confidence (float) - 0.0-1.0
+            - sources_count (int) - number of findings used
+            - hypotheses_evaluated (int) - number of hypotheses
+            - bounded (bool) - True if input was truncated
+            - synthesis_id (str)
+        """
+        # Fail-soft: if model not loaded, return skeleton
+        if self._model is None:
+            return {
+                "report": "Model not loaded",
+                "confidence": 0.0,
+                "sources_count": 0,
+                "hypotheses_evaluated": 0,
+                "bounded": False,
+                "synthesis_id": None,
+            }
+
+        # Bound query
+        bounded_query = str(query)[:self._SYNTH_MAX_QUERY_CHARS]
+        query_truncated = len(str(query)) > self._SYNTH_MAX_QUERY_CHARS
+
+        # Bound findings
+        bounded_findings = []
+        for f in findings[:self._SYNTH_MAX_FINDINGS]:
+            if isinstance(f, dict):
+                finding_str = json.dumps(f, ensure_ascii=False)[:self._SYNTH_MAX_FINDING_CHARS]
+            else:
+                finding_str = str(f)[:self._SYNTH_MAX_FINDING_CHARS]
+            bounded_findings.append(finding_str)
+
+        findings_truncated = len(findings) > self._SYNTH_MAX_FINDINGS
+
+        # Bound hypotheses
+        bounded_hypotheses = []
+        if hypotheses:
+            bounded_hypotheses = [str(h)[:500] for h in hypotheses[:self._SYNTH_MAX_HYPOTHESES]]
+        hypotheses_truncated = len(hypotheses or []) > self._SYNTH_MAX_HYPOTHESES
+
+        # Build context for synthesize()
+        history = (context or {}).get("history", [])
+        goals = (context or {}).get("goals", "")
+
+        runtime_ctx = {
+            "query": bounded_query,
+            "history": history[-10:] if history else [],
+            "data": bounded_findings,
+        }
+        if goals:
+            runtime_ctx["goals"] = str(goals)[:self._SYNTH_MAX_CONTEXT_CHARS]
+
+        try:
+            raw_report = await self.synthesize(runtime_ctx)
+
+            # Truncate output if needed
+            bounded_report = str(raw_report)[:self._SYNTH_MAX_OUTPUT_CHARS]
+            output_truncated = len(str(raw_report)) > self._SYNTH_MAX_OUTPUT_CHARS
+
+            # Estimate confidence based on findings coverage
+            confidence = min(1.0, len(bounded_findings) / max(1, self._SYNTH_MAX_FINDINGS))
+
+            return {
+                "report": bounded_report,
+                "confidence": confidence,
+                "sources_count": len(bounded_findings),
+                "hypotheses_evaluated": len(bounded_hypotheses),
+                "bounded": query_truncated or findings_truncated or hypotheses_truncated or output_truncated,
+                "synthesis_id": f"synth_{int(time.time() * 1000)}",
+            }
+
+        except Exception as e:
+            logger.warning(f"[SYNTHESIZE] Failed: {e}")
+            return {
+                "report": f"Synthesis failed: {str(e)[:500]}",
+                "confidence": 0.0,
+                "sources_count": len(bounded_findings),
+                "hypotheses_evaluated": len(bounded_hypotheses),
+                "bounded": True,
+                "synthesis_id": None,
+            }
+
     async def synthesize(self, context: Dict[str, Any]) -> str:
         """
         Syntetizovat výsledky výzkumu do finální odpovědi.
-        
+
         Args:
             context: Kontext s nasbíranými daty
-            
+
         Returns:
             Syntetizovaná odpověď
         """
         query = context.get("query", "")
         history = context.get("history", [])
         data = context.get("data", [])
-        
+
         system_msg = """You are a research synthesis expert. Create a comprehensive, well-structured answer based on the collected research data.
 
 Your answer should:
@@ -1141,7 +1358,7 @@ Your answer should:
         data_summary = []
         for i, item in enumerate(data[-10:], 1):  # Posledních 10 položek
             data_summary.append(f"{i}. {json.dumps(item, indent=2)[:500]}")
-        
+
         prompt = f"""Research Query: {query}
 
 Collected Data:

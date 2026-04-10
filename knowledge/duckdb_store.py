@@ -2708,6 +2708,200 @@ class DuckDBShadowStore:
                 for f in findings
             ]
 
+    # ------------------------------------------------------------------
+    # Sprint F800A: Controller-facing async seam — thin adapters
+    # ------------------------------------------------------------------
+
+    async def async_get_recent_findings(
+        self,
+        limit: int = 10,
+    ) -> list[CanonicalFinding]:
+        """
+        Sprint F800A: Controller-facing async adapter for recent findings.
+
+        Thin wrapper around async_query_recent_findings — converts raw dict rows
+        to CanonicalFinding instances so callers receive typed DTOs.
+
+        Thread-safe, non-blocking — runs on duckdb_worker via run_in_executor.
+        Returns empty list if store is closed or uninitialized.
+
+        Args:
+            limit: Maximum number of findings to return (ordered by ts DESC).
+
+        Returns:
+            List[CanonicalFinding] — ordered by ts descending, most recent first.
+        """
+        if not self._initialized or self._closed:
+            return []
+
+        loop = asyncio.get_running_loop()
+        try:
+            rows: list[dict] = await loop.run_in_executor(
+                self._executor,
+                self._sync_query_findings,
+                limit,
+            )
+        except Exception:
+            return []
+
+        findings: list[CanonicalFinding] = []
+        for row in rows:
+            try:
+                # Reconstruct provenance tuple from stored JSON string
+                provenance: tuple[str, ...] = ()
+                raw_prov = row.get("provenance_json") or row.get("provenance")
+                if raw_prov:
+                    if isinstance(raw_prov, str):
+                        try:
+                            decoded = msgspec.json.decode(raw_prov.encode())
+                            if isinstance(decoded, list):
+                                provenance = tuple(str(v) for v in decoded)
+                        except Exception:
+                            provenance = ()
+                    elif isinstance(raw_prov, list):
+                        provenance = tuple(str(v) for v in raw_prov)
+
+                finding = CanonicalFinding(
+                    finding_id=str(row.get("id", row.get("finding_id", ""))),
+                    query=str(row.get("query", "")),
+                    source_type=str(row.get("source_type", "")),
+                    confidence=float(row.get("confidence", 0.0)),
+                    ts=float(row.get("ts", 0.0)),
+                    provenance=provenance,
+                    payload_text=row.get("payload_text"),
+                )
+                findings.append(finding)
+            except Exception:
+                # Malformed row — skip, do not crash
+                continue
+
+        return findings
+
+    def _finding_id_of(self, f: CanonicalFinding | dict) -> str:
+        """Extract finding_id from CanonicalFinding or dict, safely."""
+        if isinstance(f, CanonicalFinding):
+            return f.finding_id
+        return str(f.get("finding_id", f.get("id", "")))
+
+    async def async_bulk_insert_findings(
+        self,
+        findings: list[CanonicalFinding | dict],
+    ) -> list[ActivationResult]:
+        """
+        Sprint F800A: Controller-facing async adapter for bulk findings insert.
+
+        Accepts CanonicalFinding instances OR plain dicts (controller dict format).
+        Dicts are converted to CanonicalFinding before delegating to the existing
+        async_record_canonical_findings_batch truth path.
+
+        Thread-safe, non-blocking — delegates to async_record_canonical_findings_batch
+        which uses the single-worker executor.
+
+        Args:
+            findings: List of CanonicalFinding or dict with keys:
+                      finding_id, query, source_type, confidence, ts, provenance.
+
+        Returns:
+            List[ActivationResult] — 1:1 mapping, len(results) == len(findings).
+            Empty list if input is empty or store is closed.
+        """
+        if not findings:
+            return []
+
+        if not self._initialized or self._closed:
+            return [
+                ActivationResult(
+                    finding_id=self._finding_id_of(f),
+                    lmdb_success=False,
+                    duckdb_success=None,
+                    lmdb_key=f"finding:{self._finding_id_of(f)}",
+                    desync=False,
+                    error="store closed or not initialized",
+                    accepted=False,
+                )
+                for f in findings
+            ]
+
+        # Normalize dicts → CanonicalFinding
+        canonical_findings: list[CanonicalFinding] = []
+        for f in findings:
+            if isinstance(f, CanonicalFinding):
+                canonical_findings.append(f)
+            elif isinstance(f, dict):
+                try:
+                    provenance: tuple[str, ...] = ()
+                    raw_prov = f.get("provenance")
+                    if raw_prov:
+                        if isinstance(raw_prov, (list, tuple)):
+                            provenance = tuple(str(v) for v in raw_prov)
+                        elif isinstance(raw_prov, str):
+                            try:
+                                decoded = msgspec.json.decode(raw_prov.encode())
+                                if isinstance(decoded, list):
+                                    provenance = tuple(str(v) for v in decoded)
+                            except Exception:
+                                provenance = ()
+                    canonical_findings.append(CanonicalFinding(
+                        finding_id=str(f.get("finding_id", f.get("id", ""))),
+                        query=str(f.get("query", "")),
+                        source_type=str(f.get("source_type", "")),
+                        confidence=float(f.get("confidence", 0.0)),
+                        ts=float(f.get("ts", 0.0)),
+                        provenance=provenance,
+                        payload_text=f.get("payload_text"),
+                    ))
+                except Exception:
+                    continue
+            else:
+                continue
+
+        if not canonical_findings:
+            return [
+                ActivationResult(
+                    finding_id=self._finding_id_of(f),
+                    lmdb_success=False,
+                    duckdb_success=None,
+                    lmdb_key=f"finding:{self._finding_id_of(f)}",
+                    desync=False,
+                    error="unconvertible input",
+                    accepted=False,
+                )
+                for f in findings
+            ]
+
+        # Delegate to truth path — returns list[ActivationResult]
+        raw_results = await self.async_record_canonical_findings_batch(canonical_findings)
+
+        # Normalize: async_record_canonical_findings_batch returns list[ActivationResult]
+        # async_record_canonical_findings_batch returns list[ActivationResult] at type level,
+        # but TypedDict is erased to dict at runtime. Normalize all results.
+        normalized: list[ActivationResult] = []
+        for r in raw_results:
+            # r is dict at runtime (TypedDict erasure); convert if not already ActivResult
+            if isinstance(r, dict) and "finding_id" in r:
+                # Already a properly-shaped ActivationResult dict — pass through
+                normalized.append(ActivationResult(
+                    finding_id=str(r.get("finding_id", "")),
+                    lmdb_success=bool(r.get("lmdb_success")),
+                    duckdb_success=r.get("duckdb_success"),
+                    lmdb_key=str(r.get("lmdb_key", "")),
+                    desync=bool(r.get("desync")),
+                    error=r.get("error"),
+                    accepted=bool(r.get("accepted", r.get("lmdb_success", False))),
+                ))
+            else:
+                # Fallback — shouldn't happen with truth path
+                normalized.append(ActivationResult(
+                    finding_id="",
+                    lmdb_success=False,
+                    duckdb_success=None,
+                    lmdb_key="",
+                    desync=False,
+                    error="unexpected result type",
+                    accepted=False,
+                ))
+        return normalized
+
     def _canonical_findings_batch_to_activation_results(
         self,
         findings: list[CanonicalFinding],
@@ -3040,6 +3234,7 @@ class DuckDBShadowStore:
             return 0
 
         try:
+            # Guard: both file and persistent connections must be available
             if self._db_path and self._file_conn is not None:
                 self._prewarm_file_conn()
                 self._file_conn.execute("BEGIN TRANSACTION")
@@ -3056,7 +3251,7 @@ class DuckDBShadowStore:
                 except Exception:
                     self._file_conn.execute("ROLLBACK")
                     return 0
-            else:
+            elif self._persistent_conn is not None:
                 self._persistent_conn.execute("BEGIN TRANSACTION")
                 try:
                     self._persistent_conn.executemany(
