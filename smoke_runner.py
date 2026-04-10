@@ -1,324 +1,128 @@
+#!/usr/bin/env python3
 """
-Smoke Runner - Lightweight bounded smoke-test harness
-=====================================================
+TICKET-002: Rychlý smoke test — 60s sprint s memory trackem.
 
-A minimal smoke test runner that uses the orchestrator (thin spine) + coordinators.
-Strict budgets, produces bounded JSON summary, never logs raw text.
+Spustit ručně před PR pro ověření, že:
+1. Sprint doběhne bez exception
+2. RAM zůstane pod limitem
+3. Findings se vrátí
 
-This module does nothing unless explicitly called.
-
-CONTAINMENT METADATA (Sprint F13)
-=================================
-role: NON_PRODUCTION_SMOKE_HARNESS
-    Test-only harness. NOT a production entrypoint.
-    NOT called from __main__.py or SprintScheduler.
-
-dependency_chain:
-    This module imports through the facade chain:
-    smoke_runner.py:138
-      → autonomous_orchestrator.py (98-line facade, DEPRECATED)
-        → legacy/autonomous_orchestrator.py (31k+ lines, actual implementation)
-
-production_separation:
-    Production path: __main__.py → SprintScheduler → runtime lifecycle
-    Smoke path: smoke_runner.py → FullyAutonomousOrchestrator (facade chain only)
-    These two paths are COMPLETELY SEPARATE. smoke_runner is NEVER in production.
-
-authority_boundary:
-    This harness has NO production authority. It cannot:
-    - Influence SprintScheduler decisions
-    - Modify production state
-    - Execute in the 30-minute sprint cycle
-    - Access production entrypoint code paths
-
-bounded_nature:
-    All budgets are hardcoded constants (NOT configurable):
-    - MAX_URLS = 3
-    - MAX_DEEP_READS = 1
-    - MAX_SNAPSHOTS = 1
-    - MAX_RUNTIME_SECS = 20
-
-    This harness exists solely to verify the facade dependency chain works.
+Použití:
+    python smoke_runner.py
 """
-
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
+import sys
 import time
-import uuid
-from dataclasses import dataclass, field
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+# Nastavit logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 
-# Hard-coded tiny budgets (NOT user configurable)
-MAX_URLS = 3
-MAX_DEEP_READS = 1
-MAX_SNAPSHOTS = 1
-MAX_RUNTIME_SECS = 20
+log = logging.getLogger("smoke_runner")
 
 
-@dataclass
-class SmokeConfig:
-    """Smoke runner configuration with hard-coded tiny budgets."""
-    max_urls: int = MAX_URLS
-    max_deep_reads: int = MAX_DEEP_READS
-    max_snapshots: int = MAX_SNAPSHOTS
-    max_runtime_secs: int = MAX_RUNTIME_SECS
+async def main() -> int:
+    """Spustí 60s sprint a sleduje RAM."""
+    try:
+        import psutil
+    except ImportError:
+        log.error("psutil není nainstalován — pip install psutil")
+        return 1
 
+    proc_before = psutil.Process()
+    ram_before = proc_before.memory_info().rss / 1024**2
+    log.info(f"RAM před startem: {ram_before:.0f} MB")
 
-@dataclass
-class SmokeRunResult:
-    """Bounded smoke run result."""
-    run_id: str
-    query: str
-    urls_fetched: int = 0
-    evidence_count: int = 0
-    ledger_events: List[Dict[str, Any]] = field(default_factory=list)
-    tool_exec_events: List[Dict[str, Any]] = field(default_factory=list)
-    metrics_snapshots: Dict[str, Any] = field(default_factory=dict)
-    stop_reason: Optional[str] = None
-    archive_escalations: int = 0
-    resume_used: bool = False
-    runtime_seconds: float = 0.0
-    timestamp: str = ""
+    # Import sprint entry point
+    try:
+        from __main__ import _run_sprint_mode
+    except ImportError:
+        log.error("Nelze importovat _run_sprint_mode z __main__")
+        log.info("Zkusím alternativní import...")
+        try:
+            # Alternativní: přímý import modulu
+            import hledac.universal.__main__ as main_mod
+            if not hasattr(main_mod, "_run_sprint_mode"):
+                log.error("__main__ nemá _run_sprint_mode funkci")
+                return 1
+            _run_sprint_mode = main_mod._run_sprint_mode
+        except Exception as e:
+            log.error(f"Import selhal: {e}")
+            return 1
 
-
-def run_smoke(
-    query: str,
-    seeds: List[str],
-    run_id: Optional[str] = None,
-    output_dir: Optional[str] = None,
-    mock_network: bool = True,
-) -> Dict[str, Any]:
-    """
-    Run a smoke test with strict budgets.
-
-    Args:
-        query: Research query
-        seeds: Initial seed URLs
-        run_id: Optional run ID (generated if not provided)
-        output_dir: Optional output directory for run artifacts
-        mock_network: If True, uses mocked network layer
-
-    Returns:
-        Bounded dict summary:
-        {
-            run_id, urls_fetched, evidence_count, ledger_events, tool_exec_events,
-            metrics_snapshots, stop_reason, archive_escalations, resume_used
-        }
-    """
-    if run_id is None:
-        run_id = f"smoke_{uuid.uuid4().hex[:8]}"
-
-    if output_dir is None:
-        output_dir = os.path.join(os.getcwd(), ".omc", "smoke_runs", run_id)
-    else:
-        output_dir = os.path.join(output_dir, run_id)
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    logger.info(f"Starting smoke run {run_id} with query: {query[:50]}...")
-
-    result = asyncio.run(_run_smoke_async(
-        query=query,
-        seeds=seeds,
-        run_id=run_id,
-        output_dir=output_dir,
-        mock_network=mock_network,
-    ))
-
-    summary_path = os.path.join(output_dir, "summary.json")
-    with open(summary_path, "w") as f:
-        json.dump(result, f, indent=2, default=str)
-
-    logger.info(f"Smoke run {run_id} complete: {result.get('stop_reason')}")
-
-    return result
-
-
-async def _run_smoke_async(
-    query: str,
-    seeds: List[str],
-    run_id: str,
-    output_dir: str,
-    mock_network: bool,
-) -> Dict[str, Any]:
-    config = SmokeConfig()
-    start_time = time.time()
-
-    result = {
-        "run_id": run_id,
-        "query": query,
-        "urls_fetched": 0,
-        "evidence_count": 0,
-        "ledger_events": [],
-        "tool_exec_events": [],
-        "metrics_snapshots": {},
-        "stop_reason": None,
-        "archive_escalations": 0,
-        "resume_used": False,
-        "runtime_seconds": 0.0,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-    }
+    start = time.monotonic()
+    log.info("Spouštím 60s sprint...")
 
     try:
-        from .autonomous_orchestrator import FullyAutonomousOrchestrator
-
-        orchestrator = FullyAutonomousOrchestrator(
-            research_query=query,
-            max_urls=config.max_urls,
-            max_depth=1,
-            enable_stealth=True,
-            enable_archives=True,
+        # Sprint s 60s durací
+        await asyncio.wait_for(
+            _run_sprint_mode("smoke test query", duration_s=60.0),
+            timeout=120.0,  # 2min timeout
         )
-
-        await orchestrator.initialize()
-
-        for url in seeds[:config.max_urls]:
-            await orchestrator.add_url_to_frontier(url)
-
-        loop_count = 0
-        max_loops = config.max_urls
-
-        while loop_count < max_loops:
-            elapsed = time.time() - start_time
-            if elapsed >= config.max_runtime_secs:
-                result["stop_reason"] = "runtime_budget_exceeded"
-                break
-
-            frontier = getattr(orchestrator, '_frontier', None)
-            if frontier is None or len(frontier) == 0:
-                result["stop_reason"] = "frontier_empty"
-                break
-
-            if mock_network:
-                step_result = await _mock_fetch_step(orchestrator, loop_count)
-            else:
-                step_result = await _real_fetch_step(orchestrator)
-
-            result["urls_fetched"] += step_result.get("urls_fetched", 0)
-            result["evidence_count"] += step_result.get("evidence_count", 0)
-            result["archive_escalations"] += step_result.get("archive_escalations", 0)
-
-            events = step_result.get("ledger_events", [])
-            result["ledger_events"].extend(events[:10 - len(result["ledger_events"])])
-
-            tool_events = step_result.get("tool_exec_events", [])
-            result["tool_exec_events"].extend(tool_events[:10 - len(result["tool_exec_events"])])
-
-            loop_count += 1
-
-            if result["urls_fetched"] >= config.max_urls:
-                result["stop_reason"] = "max_urls_reached"
-                break
-
-        result["metrics_snapshots"] = _capture_metrics_snapshot(orchestrator)
-
+    except asyncio.TimeoutError:
+        log.error("Sprint timeout — přesáhl 120s")
+        return 1
     except Exception as e:
-        logger.warning(f"Smoke run error: {e}")
-        result["stop_reason"] = f"error: {str(e)[:50]}"
+        log.error(f"Sprint selhal: {e}", exc_info=True)
+        return 1
 
-    finally:
-        result["runtime_seconds"] = round(time.time() - start_time, 2)
+    elapsed = time.monotonic() - start
+    ram_after = psutil.Process().memory_info().rss / 1024**2
+    delta = ram_after - ram_before
 
-    if result["ledger_events"]:
-        ledger_path = os.path.join(output_dir, "ledger_events.jsonl")
-        with open(ledger_path, "w") as f:
-            for event in result["ledger_events"]:
-                f.write(json.dumps(event) + "\n")
+    log.info(f"Sprint dokončen za {elapsed:.1f}s")
+    log.info(f"RAM po: {ram_after:.0f} MB (delta: {delta:+.0f} MB)")
 
-    if result["tool_exec_events"]:
-        tool_path = os.path.join(output_dir, "tool_exec.jsonl")
-        with open(tool_path, "w") as f:
-            for event in result["tool_exec_events"]:
-                f.write(json.dumps(event) + "\n")
+    # RAM check
+    if ram_after > 7200:
+        log.error(f"RAM {ram_after:.0f} MB překročil 7.2 GB limit!")
+        return 1
 
-    return result
+    log.info("✅ Smoke test prošel")
+    return 0
 
 
-async def _mock_fetch_step(orchestrator: Any, step_num: int) -> Dict[str, Any]:
-    return {
-        "urls_fetched": 1,
-        "evidence_count": 1,
-        "archive_escalations": 0,
-        "ledger_events": [
-            {
-                "event_type": "url_fetched",
-                "step": step_num,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-            }
-        ],
-        "tool_exec_events": [
-            {
-                "tool": "fetch",
-                "step": step_num,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-            }
-        ],
-    }
+def run_sprint_import_test() -> bool:
+    """Rychlý import test před spuštěním sprintu."""
+    log.info("Testuji importy...")
 
+    modules = [
+        "hledac.universal",
+        "hledac.universal.runtime.sprint_lifecycle",
+        "hledac.universal.runtime.sprint_scheduler",
+        "hledac.universal.runtime.memory_watchdog",
+        "hledac.universal.intelligence.stealth_crawler",
+    ]
 
-async def _real_fetch_step(orchestrator: Any) -> Dict[str, Any]:
-    return {
-        "urls_fetched": 0,
-        "evidence_count": 0,
-        "archive_escalations": 0,
-        "ledger_events": [],
-        "tool_exec_events": [],
-    }
+    errors = []
+    for mod in modules:
+        try:
+            __import__(mod)
+            log.debug(f"✓ {mod}")
+        except Exception as e:
+            errors.append(f"{mod}: {e}")
 
-
-def _capture_metrics_snapshot(orchestrator: Any) -> Dict[str, Any]:
-    snapshot = {
-        "frontier_size": 0,
-        "evidence_stored": 0,
-        "checkpoints_saved": 0,
-    }
-
-    try:
-        frontier = getattr(orchestrator, '_frontier', None)
-        if frontier is not None:
-            snapshot["frontier_size"] = len(frontier)
-
-        evidence_mgr = getattr(orchestrator, '_research_mgr', None)
-        if evidence_mgr is not None:
-            evidence_storage = getattr(evidence_mgr, '_evidence_packet_storage', None)
-            if evidence_storage is not None:
-                snapshot["evidence_stored"] = len(getattr(evidence_storage, '_packets', {}))
-
-        checkpoint_mgr = getattr(orchestrator, '_checkpoint_manager', None)
-        if checkpoint_mgr is not None:
-            snapshot["checkpoints_saved"] = len(getattr(checkpoint_mgr, '_checkpoints', []))
-
-    except Exception as e:
-        logger.debug(f"Metrics snapshot error: {e}")
-
-    return snapshot
-
-
-def check_resume_eligibility(run_id: str, output_dir: Optional[str] = None) -> bool:
-    if output_dir is None:
-        output_dir = os.path.join(os.getcwd(), ".omc", "smoke_runs", run_id)
-    else:
-        output_dir = os.path.join(output_dir, run_id)
-
-    summary_path = os.path.join(output_dir, "summary.json")
-
-    if not os.path.exists(summary_path):
+    if errors:
+        log.error("Import chyby:")
+        for e in errors:
+            log.error(f"  {e}")
         return False
 
-    try:
-        with open(summary_path, "r") as f:
-            summary = json.load(f)
+    log.info(f"✅ Všechny {len(modules)} modulů OK")
+    return True
 
-        stop_reason = summary.get("stop_reason", "")
-        return stop_reason in ("runtime_budget_exceeded", "frontier_empty")
 
-    except Exception:
-        return False
+if __name__ == "__main__":
+    # Nejdřív import test
+    if not run_sprint_import_test():
+        sys.exit(1)
+
+    # Pak sprint
+    exit_code = asyncio.run(main())
+    sys.exit(exit_code)

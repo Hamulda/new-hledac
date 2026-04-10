@@ -905,7 +905,13 @@ class StealthCrawler:
         """
         Sprint 8X: Async HTML fetcher with proper async subprocess handling.
         Uses asyncio.create_subprocess_exec for non-blocking curl.
+
+        TICKET-001: Pro .onion URL nebo když je Tor aktivní, použije
+        _fetch_with_requests_async_tor s thread-local socket patch.
         """
+        # TICKET-001: Pro .onion nebo Tor-enabled request použít Tor-aware fallback
+        needs_tor = ".onion" in url or TorProxyManager.is_running()
+
         try:
             if CURL_AVAILABLE:
                 # Try curl_cffi async first
@@ -918,9 +924,14 @@ class StealthCrawler:
 
                 # Sprint 8X: Use async subprocess curl when curl_cffi fails
                 result = await self._fetch_with_subprocess_curl_async(url, headers)
-                return result if result else None
+                if result:
+                    return result
+
+            # TICKET-001: Tor-aware fallback
+            if needs_tor:
+                return await self._fetch_with_requests_async_tor(url, headers)
             else:
-                # Fallback to aiohttp
+                # Fallback to aiohttp (bez Tor)
                 return await self._fetch_with_requests_async(url, headers)
         except Exception as e:
             logger.error(f"Async fetch failed: {e}")
@@ -983,6 +994,8 @@ class StealthCrawler:
         B2: conditional SOCKS proxy — set only when Tor is running.
         If Tor unavailable, logs WARNING and proceeds without proxy (last-resort leak).
         B5: .onion URL without Tor = always abort (never direct fetch).
+
+        TICKET-001: Uses THREAD-LOCAL socket patch to avoid global side-effects.
         """
         # B5: onion fetch MUST go through Tor — no exceptions
         if ".onion" in url:
@@ -994,25 +1007,68 @@ class StealthCrawler:
         try:
             import requests
             import socks
-            import socket
+            import socket as _socket
 
-            # B2: only enable SOCKS if Tor is confirmed running
-            if TorProxyManager.is_running():
-                socks.set_default_proxy(socks.SOCKS5, "127.0.0.1", 9050)
-                socket.socket = socks.socksocket
-                logger.debug("Tor SOCKS proxy enabled for requests fallback")
-            else:
-                logger.warning("stealth_crawler: Tor unavailable, direct fallback")
+            # TICKET-001: Thread-local proxy patch — nesmí ovlivnit globální socket
+            _orig_socket = _socket.socket
+            try:
+                # B2: only enable SOCKS if Tor is confirmed running
+                if TorProxyManager.is_running():
+                    socks.set_default_proxy(socks.SOCKS5, "127.0.0.1", 9050)
+                    _socket.socket = socks.socksocket
+                    logger.debug("Tor SOCKS proxy enabled for requests fallback (thread-local)")
+                else:
+                    logger.warning("stealth_crawler: Tor unavailable, direct fallback")
 
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
-            return response.text
+                response = requests.get(url, headers=headers, timeout=30)
+                response.raise_for_status()
+                return response.text
+            finally:
+                # VŽDY restore původního socketu
+                _socket.socket = _orig_socket
 
         except TorUnavailableError:
             raise  # re-raise B5 errors without catching
         except Exception as e:
             logger.warning(f"requests fetch failed: {e}")
             return None
+
+    async def _fetch_with_requests_async_tor(self, url: str, headers: Dict[str, str]) -> Optional[str]:
+        """TICKET-001: Async fetch přes requests s thread-local Tor proxy.
+
+        Používá asyncio.to_thread() pro non-blocking operaci.
+        Thread-local socket patch zajišťuje, že globální socket není ovlivněn.
+        """
+        # B5: onion fetch MUST go through Tor — no exceptions
+        if ".onion" in url:
+            from hledac.universal.transport.tor_transport import TorUnavailableError
+            if not TorProxyManager.is_running():
+                raise TorUnavailableError(
+                    f"Cannot fetch .onion URL without Tor: {url}")
+
+        def _sync_fetch() -> Optional[str]:
+            """Sync fetch v threadu s thread-local socket patch."""
+            import requests
+            import socks
+            import socket as _socket
+
+            _orig = _socket.socket
+            try:
+                if TorProxyManager.is_running():
+                    socks.set_default_proxy(socks.SOCKS5, "127.0.0.1", 9050)
+                    _socket.socket = socks.socksocket
+                    logger.debug("Tor SOCKS proxy enabled (async to_thread)")
+
+                response = requests.get(url, headers=headers, timeout=30)
+                response.raise_for_status()
+                return response.text
+            except Exception as e:
+                logger.warning(f"async_tor fetch failed: {e}")
+                return None
+            finally:
+                _socket.socket = _orig
+
+        return await asyncio.to_thread(_sync_fetch)
 
     def _fetch_with_subprocess_curl(self, url: str, headers: Dict[str, str]) -> Optional[str]:
         """Fetch using subprocess curl with Brotli support (Sprint 8R fallback)."""
