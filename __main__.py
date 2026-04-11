@@ -248,9 +248,33 @@ async def _run_async_main(stop_flag: Callable[[], bool]) -> None:
     benchmark_mode = os.environ.get("HLEDAC_BENCHMARK", "0") == "1"
 
     if benchmark_mode:
-        logger.info("[BENCHMARK] Sprint 0B probe starting...")
-        results = await _run_benchmark_probe()
-        logger.info(f"[BENCHMARK] Results: {results}")
+        # E0-T5A: Redirect benchmark to bounded observed-default-feed-batch path.
+        # This exercises the real feed pipeline (async_run_live_feed_pipeline per source)
+        # with M1-safe limits: 2 concurrency, 10 entries/feed, 25s per feed, 120s batch.
+        # Produces a structured ObservedRunReport with runtime truth taxonomy.
+        logger.info("[BENCHMARK] Running bounded observed-default-feed-batch probe...")
+        try:
+            report: ObservedRunReport = await _run_observed_default_feed_batch_once(
+                feed_concurrency=2,
+                max_entries_per_feed=10,
+                per_feed_timeout_s=25.0,
+                batch_timeout_s=120.0,
+            )
+            verdict = classify_runtime_truth(
+                elapsed_s=report.elapsed_ms / 1000.0,
+                active_iterations=report.active_pipeline_iterations,
+            )
+            logger.info(
+                f"[BENCHMARK] verdict={verdict} elapsed={report.elapsed_ms/1000:.1f}s "
+                f"completed={report.completed_sources}/{report.total_sources} "
+                f"accepted={report.accepted_findings} stored={report.stored_findings} "
+                f"error={report.batch_error}"
+            )
+            # Print human-readable summary
+            summary = format_observed_run_summary(msgspec.structs.asdict(report))
+            logger.info(f"\n{summary}")
+        except Exception as e:
+            logger.error(f"[BENCHMARK] Probe failed: {e}", exc_info=True)
         return
 
     _boot_record("async_main_start", "entered")

@@ -20,6 +20,12 @@ Sprint F150J: Enhanced next-seed derivation driven by product_value_summary:
   - cb_open_domains → source_revisit with backoff
   - depleted signal → retry_known_sources or new_approach
   - Bounded output: max 12 seeds total, sorted by priority
+Sprint F150K: Next-action package — praktický follow-up balíček:
+  - hypothesis_engine.suggest_next_queries() jako bounded seam (fail-soft, lazy load)
+  - human-readable sprint_summary block (co found / co nevyšlo / co dělat dál)
+  - priority-based next actions (max 10, deduped, signal-derived)
+  - focus/expand recommendations derived from signal_quality
+  - NO new persistence, NO new planner, NO new write-back path
 """
 
 from __future__ import annotations
@@ -172,10 +178,19 @@ async def export_sprint(
     # Sprint F150J: pvs drives enhanced seed derivation — signal_quality + reject_breakdown + cb state
     seeds_path = _generate_next_sprint_seeds(top_nodes, _sprint_id, report_path, pvs)
 
+    # Sprint F150K: build sprint_summary for human use
+    try:
+        seeds_data = json.loads(seeds_path.read_text()) if seeds_path.exists() else []
+        seeds_count = len(seeds_data) if isinstance(seeds_data, list) else 0
+    except Exception:
+        seeds_count = 0
+    sprint_summary = _build_sprint_summary(pvs, seeds_count) if pvs else None
+
     return {
         "report_json": str(report_path) if report_path else "",
         "seeds_json": str(seeds_path),
         "product_value_summary": pvs,
+        "sprint_summary": sprint_summary,
     }
 
 
@@ -253,8 +268,18 @@ def _generate_next_sprint_seeds(
             low_signal_seeds = _derive_low_signal_seeds(pvs)
             seeds.extend(low_signal_seeds)
 
+        # 5. Sprint F150K: hypothesis_engine.suggest_next_queries() seam
+        if pvs:
+            hyp_queries = _derive_hypothesis_queries(pvs, max_queries=2)
+            seeds.extend(hyp_queries)
+
+        # 6. Sprint F150K: focus/expand recommendations
+        if pvs:
+            focus_expand = _derive_focus_expand(pvs)
+            seeds.extend(focus_expand)
+
         # Bounded output — keep total seed count manageable
-        MAX_SEEDS = 12
+        MAX_SEEDS = 15
         if len(seeds) > MAX_SEEDS:
             # Sort by priority descending, keep top N
             seeds.sort(key=lambda s: s.get("priority", 0.5), reverse=True)
@@ -641,6 +666,244 @@ def _build_product_value_summary(
 
     # Remove None fields for cleaner output (keep 0 as valid)
     return {k: v for k, v in summary.items() if v is not None}
+
+
+def _derive_hypothesis_queries(
+    pvs: dict[str, Any],
+    max_queries: int = 3,
+) -> list[dict[str, Any]]:
+    """
+    Sprint F150K: Lazy hypothesis_engine.suggest_next_queries() seam.
+
+    Bounded helper — only used to enrich query_followup seeds.
+    Fails soft: if hypothesis_engine not available or call fails, returns [].
+    Never blocks on MLX model loading.
+
+    Args:
+        pvs: product_value_summary (provides findings context)
+        max_queries: hard cap on returned queries (default 3)
+
+    Returns:
+        List of query dicts with keys: query, rationale, type
+    """
+    try:
+        from hledac.universal.brain.hypothesis_engine import HypothesisEngine
+    except ImportError:
+        return []
+
+    try:
+        # Lightweight instance — no inference engine, no MLX
+        engine = HypothesisEngine(
+            inference_engine=None,
+            max_hypotheses=20,
+            enable_adversarial_verification=False,
+        )
+    except Exception:
+        return []
+
+    # Build findings string from pvs signal
+    findings: list[str] = []
+    signal = pvs.get("signal_quality", "unknown")
+
+    if signal == "high_density":
+        accepted = pvs.get("accepted", 0)
+        ioc_density = pvs.get("ioc_density", 0.0)
+        findings.append(f"high_value_findings: {accepted} entities at density {ioc_density:.2f}")
+    elif signal == "medium_density":
+        findings.append(f"mixed_results: investigate_correlations")
+    elif signal == "slow_novelty":
+        findings.append(f"slow_but_real: verify_and_expand")
+    elif signal == "depleted":
+        findings.append(f"exhausted_space: new_approach_needed")
+
+    # Dedup status context
+    dedup = pvs.get("reject_breakdown")
+    if dedup:
+        low_info = dedup.get("low_information", 0)
+        total = pvs.get("total_rejected", 1)
+        if total > 0 and low_info / total > 0.5:
+            findings.append(f"low_info_rejects: narrow_scope_recommended")
+
+    try:
+        queries = engine.suggest_next_queries(
+            findings=findings,
+            context={"known_iocs": set()},
+            max_queries=max_queries,
+        )
+        # Convert to export format
+        result = []
+        for q in queries[:max_queries]:
+            result.append({
+                "task_type": "query_suggestion",
+                "suggested_action": q.get("type", "entity_expansion"),
+                "value": q.get("query", ""),
+                "priority": 0.60,
+                "reason": q.get("rationale", "hypothesis_engine_suggestion"),
+            })
+        return result
+    except Exception:
+        return []
+
+
+def _derive_focus_expand(pvs: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Sprint F150K: Focus/expand recommendations based on sprint signal.
+
+    Derived purely from pvs signal_quality — no new data sources.
+    Returns max 2 recommendations (one focus, one expand if both apply).
+
+    Args:
+        pvs: product_value_summary
+
+    Returns:
+        List of recommendation dicts with keys: task_type, suggested_action, priority, reason
+    """
+    signal = pvs.get("signal_quality", "unknown")
+    accepted = pvs.get("accepted", 0)
+    ioc_density = pvs.get("ioc_density", 0.0)
+    dedup_effective = pvs.get("dedup_effective", False)
+
+    recs: list[dict[str, Any]] = []
+
+    if signal == "high_density":
+        # Good results — focus on what works
+        recs.append({
+            "task_type": "focus_recommendation",
+            "suggested_action": "focus_on_high_density",
+            "priority": 0.80,
+            "reason": f"signal=high_density/accepted={accepted}/ioc_density={ioc_density:.2f}",
+        })
+        recs.append({
+            "task_type": "expand_recommendation",
+            "suggested_action": "expand_sources",
+            "priority": 0.70,
+            "reason": "high_density_means_room_to_broaden",
+        })
+    elif signal == "medium_density":
+        recs.append({
+            "task_type": "focus_recommendation",
+            "suggested_action": "narrow_scope",
+            "priority": 0.75,
+            "reason": "medium_density_mixed_signal_narrow_focus",
+        })
+    elif signal == "slow_novelty":
+        recs.append({
+            "task_type": "focus_recommendation",
+            "suggested_action": "accelerate_existing",
+            "priority": 0.65,
+            "reason": "slow_novelty_means_queries_work_just_slow",
+        })
+        recs.append({
+            "task_type": "expand_recommendation",
+            "suggested_action": "new_timing_strategy",
+            "priority": 0.60,
+            "reason": "temporal_patterns_may_unlock_findings",
+        })
+    elif signal == "depleted":
+        recs.append({
+            "task_type": "focus_recommendation",
+            "suggested_action": "abandon_current_approach",
+            "priority": 0.85,
+            "reason": "depleted_signal_switch_approach",
+        })
+        if dedup_effective:
+            recs.append({
+                "task_type": "expand_recommendation",
+                "suggested_action": "completely_new_sources",
+                "priority": 0.75,
+                "reason": "dedup_effective_sources_exhausted",
+            })
+
+    return recs[:2]
+
+
+def _build_sprint_summary(pvs: dict[str, Any], seeds_count: int) -> dict[str, Any]:
+    """
+    Sprint F150K: Human-readable sprint_summary block.
+
+    DERIVED ONLY — reads from pvs, no new data sources.
+    NO write-back. NO new persistence.
+
+    Structure:
+      - what_found: co sprint našel (high-level)
+      - what_didnt_work: co nevyšlo (reject breakdown, depleted signal)
+      - what_to_do_next: co dělat dál (top priority action)
+      - priority_reason: proč tohle je priorita (derived from signal)
+
+    Args:
+        pvs: product_value_summary
+        seeds_count: počet vygenerovaných seeds (pro kontext)
+
+    Returns:
+        sprint_summary dict
+    """
+    signal = pvs.get("signal_quality", "unknown")
+    accepted = pvs.get("accepted", 0)
+    total_rejected = pvs.get("total_rejected", 0)
+    dedup_effective = pvs.get("dedup_effective", False)
+    cb_open = pvs.get("cb_open_domains", [])
+    ioc_density = pvs.get("ioc_density", 0.0)
+    findings_per_minute = pvs.get("findings_per_minute", 0.0)
+    dedup = pvs.get("reject_breakdown")
+
+    # --- what_found ---
+    if signal == "high_density":
+        what_found = f"dobrý sprint: {accepted} accept IOCs při density {ioc_density:.2f}"
+    elif signal == "medium_density":
+        what_found = f"smíšený sprint: {accepted} accept IOCs, ioc_density={ioc_density:.2f}"
+    elif signal == "slow_novelty":
+        what_found = f"pomalý aleexistující signál: {accepted} finds, {findings_per_minute:.2f} fpm"
+    elif signal == "depleted":
+        what_found = "sprint nic nepřinesl — vyčerpaný prostor nebo špatné zdroje"
+    else:
+        what_found = f"nedefinovaný stav: accepted={accepted}"
+
+    # --- what_didnt_work ---
+    didnt_work: list[str] = []
+    if total_rejected > 0 and dedup:
+        low_info = dedup.get("low_information", 0)
+        in_mem = dedup.get("in_memory_duplicate", 0)
+        persistent = dedup.get("persistent_duplicate", 0)
+        if low_info > 0:
+            ratio = low_info / total_rejected
+            didnt_work.append(f"low_info rejects: {ratio:.0%} (příliš široké dotazy)")
+        if in_mem > 0:
+            didnt_work.append(f"in-memory duplikáty: {in_mem} (příliš mnoho podobných výsledků)")
+        if persistent > 0 and not dedup_effective:
+            didnt_work.append("persistent duplikáty ale dedup nepomohl")
+    if signal == "depleted":
+        didnt_work.append("signál vyčerpaný — žádné nové IOCs")
+    if cb_open:
+        didnt_work.append(f"circuit breaker open: {len(cb_open)} domains")
+
+    if not didnt_work:
+        didnt_work.append("nic podstatného — sprint byl čistý")
+
+    # --- what_to_do_next (top priority) ---
+    if signal == "high_density":
+        next_action = "rozšířit úspěšné dotazy o nové zdroje"
+        priority_reason = f"{accepted} kvalitních nálezů = prostor expandovat"
+    elif signal == "medium_density":
+        next_action = "zúžit scope dotazů"
+        priority_reason = "příliš mnoho low-info rejectů"
+    elif signal == "slow_novelty":
+        next_action = "urychlit stávající přístup (rychlejší zdroje)"
+        priority_reason = "signál existuje ale je pomalý"
+    elif signal == "depleted":
+        next_action = "úplně nový přístup — nové seed zdroje"
+        priority_reason = "vyčerpaný prostor — continuation nepomůže"
+    else:
+        next_action = "zjistit více o stavu sprintu"
+        priority_reason = "nedefinovaný stav"
+
+    return {
+        "what_found": what_found,
+        "what_didnt_work": didnt_work,
+        "what_to_do_next": next_action,
+        "priority_reason": priority_reason,
+        "seeds_generated": seeds_count,
+        "signal_derived": signal,
+    }
 
 
 def _make_serializable(obj: Any) -> Any:

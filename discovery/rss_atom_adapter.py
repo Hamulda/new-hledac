@@ -77,6 +77,12 @@ class FeedEntryHit(msgspec.Struct, frozen=True, gc=False):
     entry_hash: str = ""  # Sprint 8AN: xxhash of title|published_raw for dedup
     # Sprint 8BE: rich feed content field (content:encoded / entry.content[0].value)
     rich_content: str = ""
+    # Sprint F150H: author field — key for downstream relevance/quality signal
+    entry_author: str = ""
+    # Sprint F150H: feed-level title extracted at parse time (not a network call)
+    feed_title: str = ""
+    # Sprint F150H: language hint from feed metadata (ISO 639-1 or similar)
+    feed_language: str = ""
 
 
 class FeedBatchResult(msgspec.Struct, frozen=True, gc=False):
@@ -504,10 +510,20 @@ def _parse_rss(root, feed_url: str, retrieved_ts: float) -> list[FeedEntryHit]:
     if channel is None:
         return []
 
+    # ---- Extract channel-level metadata once ----
+    channel_children = list(channel)
+    channel_title = ""
+    channel_language = ""
+    for ch in channel_children:
+        local = _local_name(ch.tag)
+        if local == "title" and not channel_title:
+            channel_title = (ch.text or "").strip()
+        elif local == "language" and not channel_language:
+            channel_language = (ch.text or "").strip()
+
     entries: list[FeedEntryHit] = []
     seen_keys: set[str] = set()
 
-    channel_children = list(channel)
     for child in channel_children:
         if child.tag != "item":
             continue
@@ -522,6 +538,7 @@ def _parse_rss(root, feed_url: str, retrieved_ts: float) -> list[FeedEntryHit]:
         pub_date_raw = ""
         guid_raw = ""
         is_permalink = None
+        entry_author = ""
         for ic in item_children:
             ln = ic.tag
             # Sprint 8BE: use _local_name for namespace-safe matching
@@ -544,6 +561,11 @@ def _parse_rss(root, feed_url: str, retrieved_ts: float) -> list[FeedEntryHit]:
                 attr = ic.get("isPermaLink")
                 if attr is not None:
                     is_permalink = attr.lower() == "true"
+            # Sprint F150H: author/dc:creator — key quality signal for downstream
+            elif local == "author" and not entry_author:
+                entry_author = (ic.text or "").strip()
+            elif local == "creator" and not entry_author:
+                entry_author = (ic.text or "").strip()
         # Sprint 8BE: fallback for title if it was never set (item had no <title> element)
         if not title and item_children:
             title = (item_children[0].text or "").strip()
@@ -580,6 +602,10 @@ def _parse_rss(root, feed_url: str, retrieved_ts: float) -> list[FeedEntryHit]:
                 entry_hash=_entry_hash(title or "", pub_date_raw or ""),
                 # Sprint 8BE: rich_content = content:encoded if present, else ""
                 rich_content=content_encoded or "",
+                # Sprint F150H: feed-level + author metadata
+                entry_author=entry_author,
+                feed_title=channel_title,
+                feed_language=channel_language,
             )
         )
 
@@ -593,6 +619,10 @@ def _parse_atom(root, feed_url: str, retrieved_ts: float) -> list[FeedEntryHit]:
     Atom 1.0 structure:
       feed/entry/title/link[@href][@rel=alternate or no rel]/summary/published/updated
     """
+    # ---- Extract feed-level metadata once ----
+    feed_title = _text_of(_find_first_child(root, "title"))
+    feed_language = _text_of(_find_first_child(root, "language")) or ""
+
     entries: list[FeedEntryHit] = []
     seen_keys: set[str] = set()
 
@@ -606,6 +636,11 @@ def _parse_atom(root, feed_url: str, retrieved_ts: float) -> list[FeedEntryHit]:
             _find_first_child(entry, "published")
         ) or _text_of(_find_first_child(entry, "updated"))
         published_ts = _parse_published_ts(published_raw)
+        # Sprint F150H: author — key quality signal for downstream
+        author_el = _find_first_child(entry, "author")
+        entry_author = ""
+        if author_el is not None:
+            entry_author = _text_of(_find_first_child(author_el, "name")) or ""
 
         # Find entry URL: rel="alternate" or no rel attribute, with href
         entry_url = ""
@@ -643,6 +678,10 @@ def _parse_atom(root, feed_url: str, retrieved_ts: float) -> list[FeedEntryHit]:
                 entry_hash=_entry_hash(title or "", published_raw or ""),
                 # Sprint 8BE: rich_content = content element if present, else ""
                 rich_content=rich_content or "",
+                # Sprint F150H: feed-level + author metadata
+                entry_author=entry_author,
+                feed_title=feed_title,
+                feed_language=feed_language,
             )
         )
 
@@ -733,7 +772,7 @@ def _parse_feed_xml(
 
 async def async_fetch_feed_entries(
     feed_url: str,
-    max_entries: int = 20,
+    max_entries: int = 25,  # F150H: 20→25: more signal per fetch without extra network cost
     timeout_s: float = 35.0,
     max_bytes: int = 2_000_000,
 ) -> FeedBatchResult:
@@ -829,6 +868,10 @@ async def async_fetch_feed_entries(
                 entry_hash=entry.entry_hash,
                 # Sprint 8BE: preserve rich_content from original entry
                 rich_content=getattr(entry, "rich_content", "") or "",
+                # Sprint F150H: preserve enriched metadata
+                entry_author=getattr(entry, "entry_author", "") or "",
+                feed_title=getattr(entry, "feed_title", "") or "",
+                feed_language=getattr(entry, "feed_language", "") or "",
             )
         )
 
@@ -1179,12 +1222,19 @@ def get_default_feed_seeds() -> tuple[FeedSeed, ...]:
             source="curated_seed",
             priority=10,
         ),
-        # The Hacker News
+        # The Hacker News — direct feedburner (F150H: already optimal, keep)
         FeedSeed(
             feed_url="https://feeds.feedburner.com/TheHackersNews",
             label="The Hacker News",
             source="curated_seed",
-            priority=5,
+            priority=4,  # F150H: 5→4: general-sec news, not primary OSINT
+        ),
+        # Krebs on Security — independent investigative security journalism (F150H: new)
+        FeedSeed(
+            feed_url="https://krebsonsecurity.com/feed/",
+            label="Krebs on Security",
+            source="curated_seed",
+            priority=7,  # F150H: high-quality independent voice
         ),
         # Abuse.ch URLhaus — malware URL blocklist (RSS)
         FeedSeed(
@@ -1206,6 +1256,13 @@ def get_default_feed_seeds() -> tuple[FeedSeed, ...]:
             label="BleepingComputer",
             source="curated_seed",
             priority=4,
+        ),
+        # SANS Internet Storm Center — threat intel diary (F150H: new)
+        FeedSeed(
+            feed_url="https://isc.sans.edu/rssfeed.xml",
+            label="SANS ISC",
+            source="curated_seed",
+            priority=6,  # F150H: solid community-driven threat intel
         ),
         # ---- Topology/intelligence candidates (non-feed endpoints) ----
         # CISA KEV — Known Exploited Vulnerabilities catalog (JSON, not RSS/Atom)

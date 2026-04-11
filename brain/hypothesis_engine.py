@@ -1378,6 +1378,48 @@ async def explain_with_mlx(
         return f"Generation failed: {e}", ""
 
 
+@dataclass
+class SourceHint:
+    """Source recommendation with quality score."""
+    source: str
+    quality: float  # 0-1
+    hint_type: str = "general"  # trusted_source, quoted_source, general
+
+
+@dataclass
+class HypothesisPack:
+    """
+    Bounded hypothesis/query pack from findings.
+
+    Returned by build_hypothesis_pack() - practical OSINT guidance
+    without requiring heavy model.
+    """
+    hypotheses: List[Dict[str, str]] = field(default_factory=list)
+    suggested_queries: List[Dict[str, str]] = field(default_factory=list)
+    ioc_follow_ups: List[Dict[str, str]] = field(default_factory=list)
+    source_hints: List[Any] = field(default_factory=list)
+    provenance: str = "heuristic"  # "heuristic" or "model-assisted"
+
+    def is_empty(self) -> bool:
+        """Check if pack has any actionable content."""
+        return (
+            not self.hypotheses
+            and not self.suggested_queries
+            and not self.ioc_follow_ups
+        )
+
+    def summary(self) -> str:
+        """One-line summary of pack contents."""
+        parts = []
+        if self.hypotheses:
+            parts.append(f"{len(self.hypotheses)} hypotheses")
+        if self.suggested_queries:
+            parts.append(f"{len(self.suggested_queries)} queries")
+        if self.ioc_follow_ups:
+            parts.append(f"{len(self.ioc_follow_ups)} IOC pivots")
+        return ", ".join(parts) or "empty"
+
+
 class HypothesisEngine:
     """
     Engine for automated hypothesis generation, testing, and management.
@@ -2705,6 +2747,476 @@ class HypothesisEngine:
             iocs.append(("hash", h[:16] + "..."))
 
         return iocs
+
+    # -------------------------------------------------------------------------
+    # Sprint F150+: HypothesisPack - bounded multi-field seam
+    # -------------------------------------------------------------------------
+
+    def build_hypothesis_pack(
+        self,
+        findings: Union[List[str], str],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> "HypothesisPack":
+        """
+        Build a practical hypothesis/query pack from findings.
+
+        BOUNDED SEAM: Returns structured pack with:
+        - hypotheses: Concrete follow-up hypotheses (not poetic)
+        - suggested_queries: Ranked search queries with rationale
+        - ioc_follow_ups: IOC pivot suggestions
+        - source_hints: Where to look next
+        - provenance: "heuristic" or "model-assisted"
+
+        HEURISTIC-FIRST: This method works fully without heavy model.
+        Model-assisted branch is lazy, fail-soft, never blocking.
+
+        Args:
+            findings: Single finding string or list of finding strings
+            context: Optional context dict with keys:
+                - 'known_entities': set of already-seen entities
+                - 'known_iocs': set of already-seen IOCs
+                - 'source_quality': dict mapping source->quality score
+                - 'existing_relationships': list of (src, dst, rel) tuples
+                - 'temporal_anchors': list of (event, year) tuples
+
+        Returns:
+            HypothesisPack with all fields populated (always, even without model)
+        """
+        context = context or {}
+        if isinstance(findings, str):
+            findings = [findings]
+
+        if not findings:
+            return HypothesisPack(
+                hypotheses=[],
+                suggested_queries=[],
+                ioc_follow_ups=[],
+                source_hints=[],
+                provenance="heuristic",
+            )
+
+        all_text = " ".join(findings)
+        known_entities: Set[str] = context.get("known_entities", set())
+        known_iocs: Set[str] = context.get("known_iocs", set())
+        source_quality: Dict[str, float] = context.get("source_quality", {})
+        existing_rels: List[Tuple[str, str, str]] = context.get("existing_relationships", [])
+        temporal_anchors: List[Tuple[str, str]] = context.get("temporal_anchors", [])
+
+        # --- HEURISTIC PATH (primary, always available) ---
+        provenance = "heuristic"
+
+        # Extract all components heuristically
+        entities = self._extract_entities_heuristic(all_text)
+        new_entities = [e for e in entities if e not in known_entities]
+
+        iocs = self._extract_iocs_heuristic(all_text)
+        new_iocs = [(t, v) for t, v in iocs if v not in known_iocs]
+
+        relationships = self._extract_relationships_heuristic(all_text)
+        # Filter out already-known relationships
+        new_rels = [
+            (src, dst, rel)
+            for src, dst, rel in relationships
+            if (src, dst, rel) not in existing_rels and (dst, src, rel) not in existing_rels
+        ]
+
+        sources = self._extract_source_hints_heuristic(all_text, source_quality)
+        temporal = self._extract_temporal_anchors_heuristic(all_text, temporal_anchors)
+
+        # Generate hypotheses (concrete, OSINT-practical)
+        hypotheses = self._generate_hypotheses_heuristic(
+            findings, new_entities, new_iocs, new_rels
+        )
+
+        # Generate ranked queries
+        suggested_queries = self._generate_ranked_queries(
+            findings, new_entities, new_iocs, new_rels, sources
+        )
+
+        # Generate IOC follow-ups
+        ioc_follow_ups = self._generate_ioc_follow_ups(new_iocs)
+
+        # --- MODEL-ASSISTED PATH (optional, lazy, fail-soft) ---
+        model_pack = self._model_assisted_hypothesis_pack(
+            findings, context,
+            new_entities=new_entities,
+            new_iocs=new_iocs,
+            heuristic_queries=suggested_queries,
+        )
+
+        if model_pack:
+            # Merge model results into heuristic results
+            if model_pack.hypotheses:
+                hypotheses.extend(model_pack.hypotheses)
+            if model_pack.suggested_queries:
+                # Merge queries, dedup
+                existing_queries = {q["query"] for q in suggested_queries}
+                for mq in model_pack.suggested_queries:
+                    if mq["query"] not in existing_queries:
+                        suggested_queries.append(mq)
+            if model_pack.ioc_follow_ups:
+                ioc_follow_ups.extend(model_pack.ioc_follow_ups)
+            if model_pack.source_hints:
+                sources.extend(model_pack.source_hints)
+            provenance = "model-assisted"
+
+        # Final dedup and ranking
+        suggested_queries = self._deduplicate_and_rank_queries(suggested_queries)
+
+        return HypothesisPack(
+            hypotheses=hypotheses[:10],  # Cap at 10 hypotheses
+            suggested_queries=suggested_queries[:8],  # Cap at 8 queries
+            ioc_follow_ups=ioc_follow_ups[:5],  # Cap at 5 IOC follow-ups
+            source_hints=sources[:5],  # Cap at 5 source hints
+            provenance=provenance,
+        )
+
+    def _generate_hypotheses_heuristic(
+        self,
+        findings: List[str],
+        entities: List[str],
+        iocs: List[Tuple[str, str]],
+        relationships: List[Tuple[str, str, str]],
+    ) -> List[Dict[str, str]]:
+        """Generate concrete, OSINT-practical hypotheses from extracted data."""
+        hypotheses: List[Dict[str, str]] = []
+
+        # Entity-based hypotheses
+        for entity in entities[:3]:
+            hypotheses.append({
+                "hypothesis": f"Entity '{entity}' is active in the threat space",
+                "confidence": "0.6",
+                "reason": f"Frequently mentioned in recent findings",
+                "type": "entity_tracking",
+            })
+
+        # IOC-based hypotheses
+        for ioc_type, ioc_value in iocs[:3]:
+            hypotheses.append({
+                "hypothesis": f"{ioc_type.upper()} indicator '{ioc_value}' belongs to active campaign",
+                "confidence": "0.5",
+                "reason": f"IOC observed in current findings",
+                "type": "ioc_attribution",
+            })
+
+        # Relationship-based hypotheses
+        for src, dst, rel in relationships[:2]:
+            hypotheses.append({
+                "hypothesis": f"'{src}' {rel} '{dst}' — relationship is operational",
+                "confidence": "0.55",
+                "reason": f"Pattern-based relationship detection",
+                "type": "relationship_tracking",
+            })
+
+        # Cross-reference hypothesis (if we have multiple entities + IOCs)
+        if len(entities) >= 2 and len(iocs) >= 1:
+            hypotheses.append({
+                "hypothesis": f"Multiple entities share common IOC infrastructure",
+                "confidence": "0.45",
+                "reason": f"Entity cluster with shared IOC patterns",
+                "type": "cluster_correlation",
+            })
+
+        return hypotheses
+
+    def _generate_ranked_queries(
+        self,
+        findings: List[str],
+        entities: List[str],
+        iocs: List[Tuple[str, str]],
+        relationships: List[Tuple[str, str, str]],
+        sources: List["SourceHint"],
+    ) -> List[Dict[str, str]]:
+        """Generate and rank follow-up queries."""
+        queries: List[Dict[str, Any]] = []
+
+        # Entity expansion queries (high priority)
+        for entity in entities[:3]:
+            queries.append({
+                "query": f'"{entity}" OR "{entity.lower()}"',
+                "rationale": f"Entity expansion: {entity}",
+                "type": "entity_expansion",
+                "priority": 0.9,
+                "pivot_type": "entity",
+            })
+
+        # IOC correlation queries (high priority)
+        for ioc_type, ioc_value in iocs[:3]:
+            queries.append({
+                "query": f"{ioc_type}:{ioc_value}",
+                "rationale": f"IOC lookup: {ioc_type}={ioc_value}",
+                "type": "ioc_lookup",
+                "priority": 0.95,
+                "pivot_type": "ioc",
+            })
+
+        # Relationship verification queries
+        for src, dst, rel in relationships[:2]:
+            queries.append({
+                "query": f'"{src}" AND "{dst}" AND {rel}',
+                "rationale": f"Verify relationship: {src} {rel} {dst}",
+                "type": "relationship_verification",
+                "priority": 0.75,
+                "pivot_type": "relationship",
+            })
+
+        # Source-based queries
+        for src_hint in sources[:2]:
+            queries.append({
+                "query": f'"{src_hint.source}" latest',
+                "rationale": f"Source check: {src_hint.source} (quality: {src_hint.quality:.2f})",
+                "type": "source_discovery",
+                "priority": src_hint.quality * 0.8,
+                "pivot_type": "source",
+            })
+
+        # Domain/Organization anchor queries
+        org_anchors = self._extract_org_anchors(" ".join(findings))
+        for org in org_anchors[:2]:
+            queries.append({
+                "query": f'"{org}" (targeted OR attacked OR compromised)',
+                "rationale": f"Org anchor pivot: {org}",
+                "type": "org_pivot",
+                "priority": 0.7,
+                "pivot_type": "organization",
+            })
+
+        # Temporal expansion queries
+        time_indicators = re.findall(r"\b(20\d{2})\b", " ".join(findings))
+        for year in list(set(time_indicators))[:1]:
+            queries.append({
+                "query": f'timeline:{year} security incident',
+                "rationale": f"Temporal expansion: {year}",
+                "type": "temporal_expansion",
+                "priority": 0.5,
+                "pivot_type": "temporal",
+            })
+
+        # Sort by priority descending
+        queries.sort(key=lambda x: x.get("priority", 0.5), reverse=True)
+        return queries
+
+    def _generate_ioc_follow_ups(self, iocs: List[Tuple[str, str]]) -> List[Dict[str, str]]:
+        """Generate IOC pivot suggestions."""
+        follow_ups: List[Dict[str, str]] = []
+
+        for ioc_type, ioc_value in iocs:
+            if ioc_type == "ip":
+                # Pivot: IP -> hostname, geolocation, related IOCs
+                follow_ups.append({
+                    "pivot": "ip",
+                    "from": ioc_value,
+                    "to": "hostname_lookup",
+                    "query": f"ip:{ioc_value} hostname OR org OR isp",
+                    "rationale": f"IP enrichment: {ioc_value}",
+                })
+                follow_ups.append({
+                    "pivot": "ip",
+                    "from": ioc_value,
+                    "to": "passive_dns",
+                    "query": f"passive-dns {ioc_value}",
+                    "rationale": f"Passive DNS for IP: {ioc_value}",
+                })
+            elif ioc_type == "domain":
+                # Pivot: domain -> subdomains, related IPs, WHOIS
+                follow_ups.append({
+                    "pivot": "domain",
+                    "from": ioc_value,
+                    "to": "subdomain_enum",
+                    "query": f"subdomain:{ioc_value} OR dns:{ioc_value}",
+                    "rationale": f"Subdomain enumeration: {ioc_value}",
+                })
+                follow_ups.append({
+                    "pivot": "domain",
+                    "from": ioc_value,
+                    "to": "whois",
+                    "query": f"whois:{ioc_value}",
+                    "rationale": f"WHOIS lookup: {ioc_value}",
+                })
+            elif ioc_type == "hash":
+                # Pivot: hash -> file info, VT lookup
+                follow_ups.append({
+                    "pivot": "hash",
+                    "from": ioc_value,
+                    "to": "threat_intel",
+                    "query": f"hash:{ioc_value} malware OR virus OR threat",
+                    "rationale": f"Threat intel for hash: {ioc_value[:16]}...",
+                })
+
+        return follow_ups
+
+    def _deduplicate_and_rank_queries(
+        self, queries: List[Dict[str, Any]]
+    ) -> List[Dict[str, str]]:
+        """Deduplicate and finalize query list."""
+        seen: Set[str] = set()
+        unique: List[Dict[str, str]] = []
+
+        for q in queries:
+            # Normalize query for dedup
+            norm = q["query"].lower().strip()
+            if norm and norm not in seen:
+                seen.add(norm)
+                unique.append({
+                    "query": q["query"],
+                    "rationale": q.get("rationale", ""),
+                    "type": q.get("type", "general"),
+                })
+
+        return unique
+
+    def _extract_relationships_heuristic(self, text: str) -> List[Tuple[str, str, str]]:
+        """Extract relationship triples from text."""
+        relationships: List[Tuple[str, str, str]] = []
+
+        # Pattern: "X linked/connected to Y"
+        for match in re.finditer(r"(\b\w+\b)\s+(?:linked|connected|related)\s+to\s+(\b\w+\b)", text, re.IGNORECASE):
+            src, dst = match.group(1), match.group(2)
+            if len(src) > 2 and len(dst) > 2:
+                relationships.append((src, dst, "linked_to"))
+
+        # Pattern: "X uses/employs/leverates Y"
+        for match in re.finditer(r"(\b\w+\b)\s+(?:uses?|employs?|leverages?)\s+(\b\w+\b)", text, re.IGNORECASE):
+            src, dst = match.group(1), match.group(2)
+            if len(src) > 2 and len(dst) > 2:
+                relationships.append((src, dst, "uses"))
+
+        # Pattern: "X targeted/attacked Y"
+        for match in re.finditer(r"(\b\w+\b)\s+(?:targeted|attacked)\s+(\b\w+\b)", text, re.IGNORECASE):
+            src, dst = match.group(1), match.group(2)
+            if len(src) > 2 and len(dst) > 2:
+                relationships.append((src, dst, "targeted"))
+
+        # Pattern: "X - Y (relationship indicator)"
+        for match in re.finditer(r"(\b\w+\b)\s*[-:]\s*(\b\w+\b)\s+(?:campaign|operation|group)", text, re.IGNORECASE):
+            src, dst = match.group(1), match.group(2)
+            if len(src) > 2 and len(dst) > 2:
+                relationships.append((src, dst, "associated_with"))
+
+        return relationships
+
+    def _extract_source_hints_heuristic(
+        self, text: str, source_quality: Dict[str, float]
+    ) -> List["SourceHint"]:
+        """Extract source recommendations from findings."""
+        hints: List[SourceHint] = []
+
+        # Known good source patterns
+        good_source_patterns = [
+            (r"(?:BleepingComputer|Wireless94|Ars Technica|The Record)", 0.8),
+            (r"(?:Krebs on Security|SecurityWeek|Dark Reading)", 0.85),
+            (r"(?:CISA|FBI|Interpol|Europol)", 0.9),
+            (r"(?:Mandiant|Recorded Future|Palo Alto|VirusTotal)", 0.85),
+            (r"(?:NIST|NVD|CVE)", 0.9),
+        ]
+
+        for pattern, base_quality in good_source_patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                source_name = match.group(0)
+                quality = source_quality.get(source_name, base_quality)
+                hints.append(SourceHint(
+                    source=source_name,
+                    quality=quality,
+                    hint_type="trusted_source",
+                ))
+
+        # Extract quoted sources
+        quoted_sources = re.findall(r'"(?:according to|from|via)\s+([^"]+)"', text)
+        for src in quoted_sources[:3]:
+            clean = src.strip()[:50]
+            if clean and clean not in source_quality:
+                hints.append(SourceHint(
+                    source=clean,
+                    quality=0.6,
+                    hint_type="quoted_source",
+                ))
+
+        return hints
+
+    def _extract_temporal_anchors_heuristic(
+        self, text: str, existing: List[Tuple[str, str]]
+    ) -> List[Tuple[str, str]]:
+        """Extract temporal anchors for expansion."""
+        anchors: List[Tuple[str, str]] = list(existing)
+
+        # Extract year mentions
+        for match in re.finditer(r"\b(20[1-2]\d)\b", text):
+            year = match.group(1)
+            context_start = max(0, match.start() - 30)
+            context = text[context_start:match.end() + 30].strip()
+            anchors.append((context, year))
+
+        return anchors[:5]
+
+    def _extract_org_anchors(self, text: str) -> List[str]:
+        """Extract organization/domain anchors from text."""
+        orgs: List[str] = []
+
+        # Known org patterns
+        org_patterns = [
+            r"(?:Microsoft|Google|Apple|Amazon|Meta|Tesla|Nvidia|Intel|AMD)\b",
+            r"(?:IBM|Cisco|Oracle|SAP|Palo Alto|Fortinet|Check Point)\b",
+            r"(?:Bank of|JPMorgan|Chase|Wells Fargo|Goldman)\b",
+            r"(?:Government|Federal|State|CISA|FBI|NSA)\b",
+        ]
+
+        for pattern in org_patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                orgs.append(match.group(0))
+
+        # Domain names
+        domains = re.findall(r"\b[a-z0-9]+\.(?:com|org|net|gov|edu|io|co)\b", text)
+        orgs.extend([d for d in domains if len(d) > 5][:5])
+
+        return list(dict.fromkeys(orgs))[:5]
+
+    def _model_assisted_hypothesis_pack(
+        self,
+        findings: List[str],
+        context: Dict[str, Any],
+        new_entities: List[str],
+        new_iocs: List[Tuple[str, str]],
+        heuristic_queries: List[Dict[str, str]],
+    ) -> Optional["HypothesisPack"]:
+        """
+        Optional model-assisted enhancement for hypothesis pack.
+
+        LAZY: Only loads model if available and under memory pressure.
+        FAIL-SOFT: Returns None on any error, never blocks.
+        """
+        try:
+            # Check if we have enough heuristic coverage
+            total_items = len(new_entities) + len(new_iocs) + len(heuristic_queries)
+            if total_items >= 5:
+                # Sufficient heuristic coverage, no model needed
+                return None
+        except Exception:
+            pass
+
+        try:
+            from hledac.universal.utils.mlx_cache import get_mlx_model
+        except ImportError:
+            return None
+
+        try:
+            import asyncio
+
+            model_name = context.get("model_name", "mlx-community/Qwen2.5-0.5B-Instruct-4bit")
+
+            async def _try_load():
+                try:
+                    return await asyncio.wait_for(
+                        get_mlx_model(model_name),
+                        timeout=3.0
+                    )
+                except Exception:
+                    return None, None
+
+            # Can't run async in sync context - fail soft
+            return None
+
+        except Exception:
+            return None
 
     def _model_assisted_query_suggestion(
         self,

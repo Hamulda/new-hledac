@@ -31,6 +31,9 @@ if TYPE_CHECKING:
 MAX_EXTRACTED_TEXT_CHARS: int = 200_000
 """Hard cap on extracted text size per page."""
 
+MAX_METADATA_PREPEND_CHARS: int = 500
+"""Max chars of title+snippet prepended to extracted text for pattern scan context."""
+
 _SOURCE_TYPE: str = "live_public_pipeline"
 """source_type value for all findings produced by this pipeline."""
 
@@ -54,6 +57,7 @@ class PipelinePageResult(msgspec.Struct, frozen=True, gc=False):
     accepted_findings: int
     stored_findings: int
     error: str | None = None
+    quality_reason: str | None = None  # why page was good/weak/skipped
 
 
 class PipelineRunResult(msgspec.Struct, frozen=True, gc=False):
@@ -203,6 +207,138 @@ def _pattern_context(
 
 
 # -----------------------------------------------------------------------------
+# Text enrichment with discovery metadata (Sprint F150I)
+# Prepend title/snippet to extracted text so pattern scanner gets better signal.
+# Hard-capped, M1-safe, no new dependency.
+# -----------------------------------------------------------------------------
+
+
+def _enrich_text_with_metadata(
+    title: str,
+    snippet: str,
+    extracted_text: str,
+) -> str:
+    """
+    Build a bounded scan text from: [title] [snippet] [extracted_content].
+
+    Rationale: title + snippet contain query-aware signal that raw HTML→text
+    loses (e.g. search engine bolded terms). Prepending them gives pattern
+    matcher better context without any LLM or external call.
+
+    The result is hard-capped at MAX_EXTRACTED_TEXT_CHARS.
+    """
+    # Build metadata prefix bounded to MAX_METADATA_PREPEND_CHARS
+    meta_parts: list[str] = []
+    remaining_meta = MAX_METADATA_PREPEND_CHARS
+
+    if title:
+        title_trunc = title[:remaining_meta]
+        meta_parts.append(title_trunc)
+        remaining_meta -= len(title_trunc)
+
+    if snippet and remaining_meta > 20:
+        snippet_trunc = snippet[:remaining_meta]
+        meta_parts.append(snippet_trunc)
+
+    meta_prefix = "\n".join(meta_parts) + "\n---\n"
+
+    # Hard cap: meta_prefix + extracted_text capped at MAX_EXTRACTED_TEXT_CHARS
+    max_content = MAX_EXTRACTED_TEXT_CHARS - len(meta_prefix)
+    if max_content < 0:
+        # meta_prefix alone exceeds cap — truncate it
+        meta_prefix = meta_prefix[:MAX_EXTRACTED_TEXT_CHARS]
+        max_content = 0
+
+    content = extracted_text[:max_content] if max_content > 0 else ""
+
+    return meta_prefix + content
+
+
+# -----------------------------------------------------------------------------
+# Page quality scoring (Sprint F150I)
+# Query-aware heuristic for fetch budget prioritization.
+# Bounded, no ML, no external calls.
+# -----------------------------------------------------------------------------
+
+
+def _score_page_quality(
+    *,
+    hit_url: str,
+    hit_title: str,
+    hit_snippet: str,
+    hit_rank: int,
+    query: str,
+    extracted_text: str,
+) -> str:
+    """
+    Return a short quality reason string for a discovered page.
+
+    Scoring signals (compositional, no ML):
+    - query-term density in title/snippet (query-aware)
+    - URL signal strength (structured URL > bare domain)
+    - rank priority (top results get benefit of doubt)
+    - text richness (content length vs noise ratio)
+    - pre-filter: skip extremely weak candidates
+
+    Returns one of:
+      SKIP_WEAK: below minimum threshold — skip
+      weak_low_text: fetched but very little text
+      low_signal: title/snippet missing query terms
+      ok: acceptable page
+      good: strong signals across multiple dimensions
+      very_good: exceptional title + URL + text quality
+    """
+    query_lower = query.lower()
+    query_terms = frozenset(query_lower.split())
+
+    # --- Pre-filter: skip pages with almost no content ------------
+    if len(extracted_text) < 200:
+        return "SKIP_WEAK:very_low_text"
+
+    # --- Title query-term density --------------------------------
+    title_words = frozenset(hit_title.lower().split())
+    title_query_hits = len(query_terms & title_words)
+    title_has_query = title_query_hits > 0
+
+    # --- Snippet query-term density -----------------------------
+    snippet_words = frozenset(hit_snippet.lower().split())
+    snippet_query_hits = len(query_terms & snippet_words)
+    snippet_has_query = snippet_query_hits > 0
+
+    # --- URL structural signal -----------------------------------
+    url_has_path = "/" in hit_url and len(hit_url.split("/")) > 3
+
+    # --- Text richness: content chars / total chars ratio -------
+    # Very low ratio = mostly boilerplate/nav, not useful
+    text_len = len(extracted_text)
+    word_count = len(extracted_text.split())
+    # rough noise proxy: avg word len < 3.5 suggests heavy markup/boilerplate
+    avg_word_len = text_len / max(word_count, 1)
+    text_is_meaningful = avg_word_len >= 3.5 and word_count >= 50
+
+    # --- Composite scoring --------------------------------------
+    signals_good = sum([
+        title_has_query,
+        snippet_has_query,
+        url_has_path,
+        text_is_meaningful,
+    ])
+
+    rank_bonus = hit_rank < 5  # top-5 gets benefit of doubt
+
+    if signals_good >= 3 and rank_bonus:
+        return "very_good"
+    elif signals_good >= 2:
+        return "good"
+    elif signals_good >= 1:
+        return "ok"
+    elif text_is_meaningful and text_len > 1000:
+        return "ok:no_query_signal"
+    else:
+        return "weak_low_signal"
+
+
+# -----------------------------------------------------------------------------
 # PatternMatcher helpers
 # -----------------------------------------------------------------------------
 
@@ -343,15 +479,40 @@ async def _fetch_and_process_page(
         if len(extracted_text) > MAX_EXTRACTED_TEXT_CHARS:
             extracted_text = extracted_text[:MAX_EXTRACTED_TEXT_CHARS]
 
+        # Build quality signal from discovery metadata + text metrics
+        # Sprint F150I: query-aware page selection, bounded signal scoring
+        quality_reason = _score_page_quality(
+            hit_url=hit_url,
+            hit_title=hit_title or "",
+            hit_snippet=hit_snippet or "",
+            hit_rank=hit_rank,
+            query=query,
+            extracted_text=extracted_text,
+        )
+
+        # Skip very-low-quality pages early — preserve fetch budget
+        if quality_reason.startswith("SKIP_WEAK"):
+            return PipelinePageResult(
+                url=hit_url, fetched=True, matched_patterns=0,
+                accepted_findings=0, stored_findings=0,
+                error=None, quality_reason=quality_reason,
+            )
+
+        # Sprint F150I: enrich extracted text with discovery metadata
+        # This gives pattern scanner better signal (title/snippet hints present)
+        scan_text = _enrich_text_with_metadata(
+            hit_title or "", hit_snippet or "", extracted_text
+        )
+
         # Free raw HTML reference early
         del fetched_text
 
         # ---- Pattern scan ----------------------------------------------------
-        # 8X surface — run in thread executor
+        # 8X surface — run in thread executor; use enriched text
         try:
             loop = asyncio.get_running_loop()
             hits: list = await loop.run_in_executor(
-                None, _SYNC_MATCH_TEXT, extracted_text
+                None, _SYNC_MATCH_TEXT, scan_text
             )
         except Exception:
             hits = []
@@ -415,6 +576,7 @@ async def _fetch_and_process_page(
             matched_patterns=matched_count,
             accepted_findings=accepted_count,
             stored_findings=stored_count,
+            quality_reason=quality_reason,
         )
 
 
@@ -532,8 +694,9 @@ async def async_run_live_public_pipeline(
         elif isinstance(discovery_result, dict):
             hits = discovery_result.get("hits", ())
 
-        if hasattr(discovery_result, "error") and discovery_result.error:
-            discovery_error = discovery_result.error
+        err_val = discovery_result.get("error") if isinstance(discovery_result, dict) else getattr(discovery_result, "error", None)
+        if err_val:
+            discovery_error = str(err_val)
     except asyncio.CancelledError:
         raise  # [I6]
     except Exception as exc:

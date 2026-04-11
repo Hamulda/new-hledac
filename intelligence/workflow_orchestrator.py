@@ -971,6 +971,189 @@ class WorkflowOrchestrator:
             return "HIGH_RISK"
 
 
+# =============================================================================
+# STANDALONE POST-FINDINGS CORRELATION SEAM
+# Bounded, fail-soft, no dependencies, M1 8GB safe
+# =============================================================================
+
+HIGH_RISK_PATTERNS: Dict[Tuple[str, str], float] = {
+    ("scrubbed_metadata", "steganography_detected"): 0.5,
+    ("dns_tunneling", "encoded_payload"): 0.4,
+    ("zero_width_unicode", "base64_hidden"): 0.3,
+    ("future_timestamp", "gps_mismatch"): 0.2,
+}
+
+SEVERITY_WEIGHTS = {"critical": 1.0, "high": 0.75, "medium": 0.5, "low": 0.25}
+
+
+@dataclass
+class CorrelationResult:
+    """Lightweight correlation result from findings analysis.
+
+    Attributes:
+        themes: Grouped findings by correlation theme
+        risk_score: Overall risk score (0.0-1.0)
+        risk_buckets: Findings bucketed by risk level
+        top_themes: Top 5 most significant themes sorted by weight
+        anomaly_count: Number of detected anomalies
+        verdict: Risk verdict string
+    """
+    themes: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    risk_score: float = 0.0
+    risk_buckets: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    top_themes: List[Tuple[str, float]] = field(default_factory=list)
+    anomaly_count: int = 0
+    verdict: str = "CLEAN"
+
+
+def correlate_findings(
+    findings: List[Dict[str, Any]],
+    *,
+    risk_thresholds: Optional[Dict[str, float]] = None,
+    max_themes: int = 10,
+) -> CorrelationResult:
+    """Correlate findings and produce grouped themes with risk scoring.
+
+    Pure function - no side effects, no storage, no orchestrator dependency.
+    Works with finding-like dicts, IOC dicts, or any dict with:
+        - type / finding_type / indicator_type
+        - severity (critical/high/medium/low)
+        - confidence (0.0-1.0)
+        - description / description_text
+        - source / module / tag / tags
+
+    Args:
+        findings: List of finding dictionaries
+        risk_thresholds: Optional custom risk thresholds
+        max_themes: Maximum number of themes to return (default 10)
+
+    Returns:
+        CorrelationResult with themes, risk_score, buckets, top_themes
+
+    Example:
+        findings = [
+            {"type": "ioc", "severity": "high", "confidence": 0.9,
+             "description": "Malicious domain found", "source": "dns"},
+            {"type": "pattern", "severity": "medium", "confidence": 0.7,
+             "description": "Suspicious encoding", "source": "encoding"},
+        ]
+        result = correlate_findings(findings)
+        # result.themes, result.risk_score, result.risk_buckets, result.top_themes
+    """
+    if not findings:
+        return CorrelationResult()
+
+    thresholds = risk_thresholds or {"clean": 0.3, "suspicious": 0.7}
+
+    # --- Normalize findings to canonical form ---
+    normalized: List[Dict[str, Any]] = []
+    for f in findings:
+        nf: Dict[str, Any] = {
+            "type": f.get("type") or f.get("finding_type") or f.get("indicator_type", "unknown"),
+            "severity": f.get("severity", "medium"),
+            "confidence": float(f.get("confidence", 0.5)),
+            "description": f.get("description") or f.get("description_text", ""),
+            "source": f.get("source") or f.get("module") or f.get("tag") or f.get("tags", ["unknown"]),
+        }
+        if isinstance(nf["source"], list):
+            nf["source"] = nf["source"][0] if nf["source"] else "unknown"
+        normalized.append(nf)
+
+    # --- Risk scoring ---
+    risk_score = 0.0
+    for f in normalized:
+        severity = f["severity"].lower()
+        weight = SEVERITY_WEIGHTS.get(severity, 0.25)
+        risk_score += weight * f["confidence"]
+    risk_score = min(risk_score / max(len(normalized), 1), 1.0)
+
+    # --- Theme grouping ---
+    themes: Dict[str, List[Dict[str, Any]]] = {}
+    for f in normalized:
+        theme_key = _derive_theme_key(f)
+        if theme_key not in themes:
+            themes[theme_key] = []
+        themes[theme_key].append(f)
+
+    # --- Theme weights ---
+    theme_weights: Dict[str, float] = {}
+    for theme, theme_findings in themes.items():
+        weights = [SEVERITY_WEIGHTS.get(x["severity"].lower(), 0.25) * x["confidence"]
+                   for x in theme_findings]
+        theme_weights[theme] = sum(weights) / max(len(weights), 1)
+
+    # --- Risk buckets ---
+    buckets: Dict[str, List[Dict[str, Any]]] = {
+        "critical": [], "high": [], "medium": [], "low": []
+    }
+    for f in normalized:
+        sev = f["severity"].lower()
+        if sev in buckets:
+            buckets[sev].append(f)
+
+    # --- Anomaly detection ---
+    anomaly_count = _count_anomalies(normalized)
+
+    # --- Top themes ---
+    sorted_themes = sorted(theme_weights.items(), key=lambda x: -x[1])
+    top_themes = sorted_themes[:max_themes]
+
+    # --- Verdict ---
+    verdict = "CLEAN"
+    if risk_score >= thresholds.get("suspicious", 0.7):
+        verdict = "HIGH_RISK"
+    elif risk_score >= thresholds.get("clean", 0.3):
+        verdict = "SUSPICIOUS"
+
+    return CorrelationResult(
+        themes=themes,
+        risk_score=risk_score,
+        risk_buckets=buckets,
+        top_themes=top_themes,
+        anomaly_count=anomaly_count,
+        verdict=verdict,
+    )
+
+
+def _derive_theme_key(finding: Dict[str, Any]) -> str:
+    """Derive theme key from finding for grouping."""
+    ftype = finding.get("type", "unknown").lower()
+    source = str(finding.get("source", "unknown")).lower()
+
+    # Known patterns → canonical themes
+    if any(k in ftype for k in ("malware", "ransomware", "trojan", "virus")):
+        return "malware_activity"
+    if any(k in ftype for k in ("phishing", "social_engineering", "spoof")):
+        return "phishing_campaign"
+    if any(k in ftype for k in ("domain", "dns", "c2", "command_control")):
+        return "infrastructure"
+    if any(k in ftype for k in ("url", "uri", "link")):
+        return "url_analysis"
+    if any(k in ftype for k in ("file", "hash", "md5", "sha", "sample")):
+        return "file_intel"
+    if any(k in ftype for k in ("ip", "addr", "asn", "bgp")):
+        return "network_intel"
+    if any(k in ftype for k in ("leak", "breach", "exposed", "credentials")):
+        return "data_breach"
+    if any(k in ftype for k in ("vuln", "cve", "exploit", "patch")):
+        return "vulnerability"
+    if any(k in ftype for k in ("pattern", "correlation", "anomaly")):
+        return f"pattern_{source}"
+    return ftype
+
+
+def _count_anomalies(findings: List[Dict[str, Any]]) -> int:
+    """Count simple anomalies in findings."""
+    count = 0
+    for f in findings:
+        desc = f.get("description", "").lower()
+        if any(k in desc for k in ("future_timestamp", "clock_skew", "temporal", "anomaly")):
+            count += 1
+        if f.get("confidence", 0) < 0.3:
+            count += 1
+    return count
+
+
 def create_workflow_orchestrator(
     orchestrator: Any,
     config: Optional[IntelligenceConfig] = None
