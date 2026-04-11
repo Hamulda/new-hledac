@@ -2539,7 +2539,13 @@ async def _run_sprint_mode(
             # Sprint 8UF B.2: Skip pipeline if UMA emergency stopped frontier
             if _sprint_frontier_stopped:
                 await asyncio.sleep(5)
-                continue
+                # E1-T1: ACTIVE runaway guard — if frontier stopped but >3min remain,
+                # force windup to prevent the continue-loop from running forever.
+                if lifecycle.remaining_time() > 180.0:
+                    logger.warning("[SPRINT] _sprint_frontier_stopped=True with >3min "
+                                   "remaining — forcing windup to prevent runaway")
+                    lifecycle.request_windup()
+                break
 
             # Run pipelines every 60s — both in parallel via TaskGroup
             now = time.monotonic()
