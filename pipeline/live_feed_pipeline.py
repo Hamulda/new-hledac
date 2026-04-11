@@ -1054,7 +1054,7 @@ async def async_run_live_feed_pipeline(
 
                 accepted_findings = sum(
                     1 for r in results
-                    if getattr(r, "activated", False) or getattr(r, "success", False)
+                    if (r["accepted"] if isinstance(r, dict) else getattr(r, "accepted", False))
                 )
                 stored_findings = accepted_findings
 

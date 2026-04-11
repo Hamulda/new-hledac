@@ -353,10 +353,17 @@ class SynthesisRunner:
         # B.7: WINDUP guard
         if not self._is_windup_allowed(force_synthesis):
             logger.debug("Synthesis skipped: not in WINDUP phase (force=%s)", force_synthesis)
+            # Structured degradation state already set by _is_windup_allowed
             return None
 
         # B.7: UMA RSS > 5.5GiB guard
         if not self._check_uma_guard():
+            # SPRINT E1-T2: UMA guard skip must also carry structured state
+            self._stix_status = "unavailable"
+            self._stix_reason = "UMA guard blocked synthesis — RSS > 5.5GiB or EMERGENCY"
+            self._stix_backend = ""
+            self._lifecycle_gate_source = getattr(self, "_lifecycle_gate_source", "unknown")
+            self._lifecycle_gate_mode = "blocked"
             return None
 
         # Sprint 8SB: ensure model is available (discovery + optional download)
@@ -885,6 +892,9 @@ class SynthesisRunner:
         except Exception:
             self._lifecycle_gate_source = "unavailable"
             self._lifecycle_gate_mode = "blocked"
+            self._stix_status = "unavailable"
+            self._stix_reason = "lifecycle unavailable — all lookup paths failed"
+            self._stix_backend = ""
             return False
 
     def _check_uma_guard(self) -> bool:

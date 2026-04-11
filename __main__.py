@@ -613,6 +613,32 @@ _store_counters_reset_before_run: bool = False
 _matcher_probe_rss_hits: tuple[str, ...] = ()
 _matcher_probe_sample_used: str = ""
 
+# E0-T4: Runtime truth taxonomy — ACTIVE pipeline iteration counter
+_active_pipeline_iterations: int = 0
+
+
+def classify_runtime_truth(elapsed_s: float, active_iterations: int) -> str:
+    """
+    Classify runtime truth level based on duration and ACTIVE work.
+
+    Taxonomy (E0-T4):
+      - import_probe:          elapsed < 180s (any iteration count)
+      - entrypoint_smoke:      elapsed >= 180s but active_iterations <= 1
+      - meaningful_active_probe: elapsed >= 180s AND active_iterations >= 2
+
+    Rules:
+      1. Duration < 180s → never meaningful_active_probe
+      2. 0 or 1 ACTIVE iteration → never meaningful_active_probe (regardless of duration)
+      3. Both conditions must hold: elapsed >= 180s AND active_iterations >= 2
+
+    Returns a stable, parseable string label.
+    """
+    if elapsed_s < 180.0:
+        return "import_probe"
+    if active_iterations <= 1:
+        return "entrypoint_smoke"
+    return "meaningful_active_probe"
+
 
 def _record_runtime_truth() -> None:
     """Record python3 interpreter truth at module load time."""
@@ -756,6 +782,8 @@ class ObservedRunReport(msgspec.Struct, frozen=True, gc=False):
     live_run_attempt_1_result: str = ""
     live_run_attempt_2_result: str = ""
     recommended_next_sprint: str = ""
+    # E0-T4: runtime truth taxonomy
+    active_pipeline_iterations: int = 0
 
 
 # Sprint 8BH C.6: recommendation mapping
@@ -846,6 +874,8 @@ def _build_observed_run_report(
     live_run_attempt_1_result: str = "",
     live_run_attempt_2_result: str = "",
     recommended_next_sprint: str = "",
+    # E0-T4: runtime truth taxonomy
+    active_pipeline_iterations: int = 0,
 ) -> ObservedRunReport:
     """Build the structured report from raw inputs."""
     finished_ts = time.time()
@@ -987,6 +1017,7 @@ def _build_observed_run_report(
         live_run_attempt_1_result=live_run_attempt_1_result,
         live_run_attempt_2_result=live_run_attempt_2_result,
         recommended_next_sprint=recommended_next_sprint,
+        active_pipeline_iterations=active_pipeline_iterations,
     )
 
 
@@ -1387,6 +1418,7 @@ async def _run_observed_default_feed_batch_once(
             is_network_variance=(diag == "network_variance"),
             patterns_configured_at_run=patterns_cfg,
             automaton_built_at_run=False,
+            active_pipeline_iterations=_active_pipeline_iterations,
         )
         async with _observed_run_lock:
             _last_observed_run_report = msgspec.json.decode(msgspec.json.encode(report))
@@ -1692,6 +1724,7 @@ async def _run_observed_default_feed_batch_once(
         live_run_attempt_1_result="success" if batch_error is None else f"error:{batch_error}",
         live_run_attempt_2_result="",
         recommended_next_sprint=_recommended_sprint,
+        active_pipeline_iterations=_active_pipeline_iterations,
     )
 
     async with _observed_run_lock:
@@ -2395,8 +2428,9 @@ async def _run_sprint_mode(
     from .runtime.sprint_lifecycle import SprintLifecycleManager, SprintPhase
     from .runtime.sprint_scheduler import SprintScheduler, SprintSchedulerConfig
 
-    global _sprint_frontier_stopped
+    global _sprint_frontier_stopped, _active_pipeline_iterations
     _sprint_frontier_stopped = False
+    _active_pipeline_iterations = 0
 
     # Sprint 8TA fix: install signal handlers inside asyncio.run() so we get the real loop
     if install_signal_handlers:
@@ -2526,7 +2560,9 @@ async def _run_sprint_mode(
                         _boot_record("sprint_mode", "pipeline_run_ok")
                     except Exception as e:
                         _boot_record("sprint_mode", "pipeline_run_error", error=str(e))
-                last_pipeline_time = now
+                    else:
+                        _active_pipeline_iterations += 1
+                        last_pipeline_time = now
 
         # ---- WINDUP ----
         lifecycle.request_windup()
