@@ -1394,15 +1394,24 @@ class HypothesisPack:
     Returned by build_hypothesis_pack() - practical OSINT guidance
     without requiring heavy model.
 
-    Field roles (intentional separation to avoid redundancy):
-    - hypotheses: Concrete follow-up claims to verify (what might be true)
-    - suggested_queries: Ranked search queries to execute (how to investigate)
-    - ioc_follow_ups: Structured IOC pivot trails (actionable IOC chains)
-    - source_hints: Where to look next (quality-ranked sources)
+    Field roles (STRICT separation - each field has one job):
+    - hypotheses: Concrete follow-up claims to verify (what might be true).
+      NOT search queries. NOT IOCs. Pure "X might be connected to Y" claims.
+    - suggested_queries: Ranked search queries to execute (how to investigate).
+      Structured with query/rationale/type/priority/pivot_type.
+      These are the actual search strings for the scheduler.
+    - ioc_follow_ups: Structured IOC pivot trails (actionable IOC chains).
+      Each has pivot/from/to/query/rationale/priority.
+      These are domain-specific pivot paths, not general queries.
+    - source_hints: Where to look next (quality-ranked sources).
+      Each has source/quality/hint_type - not queries or IOCs.
+    - provenance: "heuristic" or "model-assisted" (never mixed).
+
+    Priority order for ranking: IOC pivots > entity-pair > relationship > broad entity
     """
     hypotheses: List[Dict[str, Any]] = field(default_factory=list)
-    suggested_queries: List[Dict[str, Any]] = field(default_factory=list)  # Now has priority, pivot_type
-    ioc_follow_ups: List[Dict[str, Any]] = field(default_factory=list)    # Now has priority, to field
+    suggested_queries: List[Dict[str, Any]] = field(default_factory=list)  # Has priority, pivot_type
+    ioc_follow_ups: List[Dict[str, Any]] = field(default_factory=list)    # Has priority, to field
     source_hints: List[Any] = field(default_factory=list)
     provenance: str = "heuristic"  # "heuristic" or "model-assisted"
 
@@ -1439,6 +1448,289 @@ class HypothesisPack:
     def pivot_trail(self, ioc: str) -> List[Dict[str, Any]]:
         """Get all pivots starting from a specific IOC."""
         return [p for p in self.ioc_follow_ups if p.get("from") == ioc]
+
+    # -------------------------------------------------------------------------
+    # Sprint F150H.1: next_best_actions - actionable shortlist from pack
+    # -------------------------------------------------------------------------
+
+    def next_best_actions(self, max_actions: int = 4) -> List[Dict[str, Any]]:
+        """
+        Return a small, ranked shortlist of next actions.
+
+        Prioritizes: IOC pivots > entity-pair > high-priority queries > sources.
+        Returns max_actions items, never blocks, never loads models.
+
+        Each action has: action_type, query, rationale, priority, pivot_type.
+        """
+        actions: List[Dict[str, Any]] = []
+
+        # 1. IOC pivots (highest priority - actionable domain-specific paths)
+        for pivot in sorted(self.ioc_follow_ups, key=lambda x: x.get("priority", 0.5), reverse=True)[:2]:
+            actions.append({
+                "action_type": "ioc_pivot",
+                "query": pivot.get("query", ""),
+                "from_ioc": pivot.get("from", ""),
+                "to_field": pivot.get("to", ""),
+                "rationale": pivot.get("rationale", ""),
+                "priority": pivot.get("priority", 0.8),
+                "pivot_type": "ioc",
+            })
+
+        # 2. Top ranked queries (high priority, not already covered by IOC)
+        covered_queries = {a["query"] for a in actions}
+        for q in sorted(self.suggested_queries, key=lambda x: x.get("priority", 0.5), reverse=True):
+            if q["query"] not in covered_queries and len(actions) < max_actions:
+                actions.append({
+                    "action_type": "query",
+                    "query": q.get("query", ""),
+                    "rationale": q.get("rationale", ""),
+                    "priority": q.get("priority", 0.5),
+                    "pivot_type": q.get("pivot_type", "general"),
+                })
+                covered_queries.add(q["query"])
+
+        # 3. Source hints (only if we still have room)
+        for hint in self.source_hints[:2]:
+            if len(actions) >= max_actions:
+                break
+            actions.append({
+                "action_type": "source_check",
+                "query": f'"{hint.source}" latest',
+                "rationale": f"Source: {hint.source} (quality: {hint.quality:.2f})",
+                "priority": hint.quality * 0.6,
+                "pivot_type": "source",
+            })
+
+        return actions[:max_actions]
+
+    # -------------------------------------------------------------------------
+    # Sprint F150H.1: investigation_tracks - multi-pronged paths
+    # -------------------------------------------------------------------------
+
+    def investigation_tracks(self) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Group pack contents into distinct investigation tracks.
+
+        Returns dict with keys:
+        - 'ioc_pivots': all IOC follow-ups grouped
+        - 'entity_tracking': entity-based hypotheses + queries
+        - 'relationship_verification': relationship hypotheses + queries
+        - 'source_investigation': source hints + source queries
+        - 'cluster_analysis': cross-entity/cross-IOC hypotheses
+
+        Each track is a list of structured items with action_type + details.
+        """
+        tracks: Dict[str, List[Dict[str, Any]]] = {
+            "ioc_pivots": [],
+            "entity_tracking": [],
+            "relationship_verification": [],
+            "source_investigation": [],
+            "cluster_analysis": [],
+        }
+
+        # IOC pivots track
+        for pivot in self.ioc_follow_ups:
+            tracks["ioc_pivots"].append({
+                "action_type": "ioc_pivot",
+                "from_ioc": pivot.get("from", ""),
+                "pivot": pivot.get("pivot", ""),
+                "to_field": pivot.get("to", ""),
+                "query": pivot.get("query", ""),
+                "priority": pivot.get("priority", 0.5),
+            })
+
+        # Entity tracking track
+        for h in self.hypotheses:
+            if h.get("type") in ("entity_tracking", "ioc_attribution"):
+                tracks["entity_tracking"].append({
+                    "action_type": "hypothesis",
+                    "statement": h.get("hypothesis", ""),
+                    "confidence": h.get("confidence", "0.5"),
+                    "type": h.get("type", ""),
+                })
+        for q in self.suggested_queries:
+            if q.get("pivot_type") in ("entity", "entity_expansion"):
+                tracks["entity_tracking"].append({
+                    "action_type": "query",
+                    "query": q.get("query", ""),
+                    "rationale": q.get("rationale", ""),
+                    "priority": q.get("priority", 0.5),
+                })
+
+        # Relationship verification track
+        for h in self.hypotheses:
+            if h.get("type") in ("relationship_tracking", "cluster_correlation"):
+                tracks["relationship_verification"].append({
+                    "action_type": "hypothesis",
+                    "statement": h.get("hypothesis", ""),
+                    "confidence": h.get("confidence", "0.5"),
+                    "type": h.get("type", ""),
+                })
+        for q in self.suggested_queries:
+            if q.get("pivot_type") in ("relationship", "entity_pair"):
+                tracks["relationship_verification"].append({
+                    "action_type": "query",
+                    "query": q.get("query", ""),
+                    "rationale": q.get("rationale", ""),
+                    "priority": q.get("priority", 0.5),
+                })
+
+        # Source investigation track
+        for hint in self.source_hints:
+            tracks["source_investigation"].append({
+                "action_type": "source_hint",
+                "source": hint.source if hasattr(hint, "source") else str(hint),
+                "quality": hint.quality if hasattr(hint, "quality") else 0.5,
+                "hint_type": hint.hint_type if hasattr(hint, "hint_type") else "general",
+            })
+        for q in self.suggested_queries:
+            if q.get("pivot_type") == "source":
+                tracks["source_investigation"].append({
+                    "action_type": "query",
+                    "query": q.get("query", ""),
+                    "rationale": q.get("rationale", ""),
+                    "priority": q.get("priority", 0.5),
+                })
+
+        # Cluster analysis track
+        for h in self.hypotheses:
+            if h.get("type") == "cluster_correlation":
+                tracks["cluster_analysis"].append({
+                    "action_type": "hypothesis",
+                    "statement": h.get("hypothesis", ""),
+                    "confidence": h.get("confidence", "0.5"),
+                })
+
+        # Remove empty tracks
+        return {k: v for k, v in tracks.items() if v}
+
+    # -------------------------------------------------------------------------
+    # Sprint F150H.1: best_first_path - single optimal path through pack
+    # -------------------------------------------------------------------------
+
+    def best_first_path(self) -> Optional[Dict[str, Any]]:
+        """
+        Return the single best first action from the pack.
+
+        IOC pivot if available, else top priority query, else None.
+        Never returns empty - always prefers actionable IOC over noisy broad query.
+
+        Returns:
+            Dict with action_type, query, rationale, priority, pivot_type
+            or None if pack is empty.
+        """
+        if self.is_empty():
+            return None
+
+        # First choice: highest priority IOC pivot
+        if self.ioc_follow_ups:
+            best_ioc = max(self.ioc_follow_ups, key=lambda x: x.get("priority", 0.5))
+            return {
+                "action_type": "ioc_pivot",
+                "query": best_ioc.get("query", ""),
+                "from_ioc": best_ioc.get("from", ""),
+                "to_field": best_ioc.get("to", ""),
+                "rationale": best_ioc.get("rationale", "IOC pivot"),
+                "priority": best_ioc.get("priority", 0.9),
+                "pivot_type": "ioc",
+            }
+
+        # Second choice: highest priority query (but prefer entity-pair or specific over broad)
+        if self.suggested_queries:
+            sorted_qs = sorted(
+                self.suggested_queries,
+                key=lambda x: (x.get("priority", 0.5), x.get("pivot_type", "") == "entity_expansion"),
+                reverse=True,
+            )
+            # Prefer specific pivot types over general entity expansion
+            for q in sorted_qs:
+                pt = q.get("pivot_type", "")
+                if pt in ("entity_pair", "relationship", "ioc_entity", "ioc_lookup"):
+                    return {
+                        "action_type": "query",
+                        "query": q.get("query", ""),
+                        "rationale": q.get("rationale", ""),
+                        "priority": q.get("priority", 0.5),
+                        "pivot_type": pt,
+                    }
+            # Fall back to highest priority query
+            top = sorted_qs[0]
+            return {
+                "action_type": "query",
+                "query": top.get("query", ""),
+                "rationale": top.get("rationale", ""),
+                "priority": top.get("priority", 0.5),
+                "pivot_type": top.get("pivot_type", "general"),
+            }
+
+        return None
+
+    # -------------------------------------------------------------------------
+    # Sprint F150H.1: actionable_shortlist - compact sprint-ready output
+    # -------------------------------------------------------------------------
+
+    def actionable_shortlist(self, max_items: int = 5) -> List[Dict[str, Any]]:
+        """
+        Return a compact, sprint-ready shortlist.
+
+        Prioritizes: IOC pivots > entity_pair > relationship > entity > other.
+        Each item has: action_type, query, rationale, priority, pivot_type.
+        Designed for direct scheduler consumption.
+        """
+        shortlist: List[Dict[str, Any]] = []
+        seen_queries: Set[str] = set()
+
+        # Priority order for pivot_type selection
+        pivot_order = {
+            "ioc": 0,
+            "ioc_lookup": 0,
+            "entity_pair": 1,
+            "relationship": 2,
+            "ioc_entity": 3,
+            "entity": 4,
+            "entity_expansion": 5,
+            "source": 6,
+            "organization": 7,
+            "temporal": 8,
+            "general": 9,
+        }
+
+        def item_priority(item: Dict[str, Any]) -> Tuple[float, int]:
+            p = item.get("priority", 0.5)
+            pt = item.get("pivot_type", "general")
+            return (p, pivot_order.get(pt, 9))
+
+        # Collect from IOC follow-ups first
+        for pivot in sorted(self.ioc_follow_ups, key=item_priority):
+            q = pivot.get("query", "")
+            if q and q not in seen_queries:
+                shortlist.append({
+                    "action_type": "ioc_pivot",
+                    "query": q,
+                    "rationale": pivot.get("rationale", f"{pivot.get('from', '')} → {pivot.get('to', '')}"),
+                    "priority": pivot.get("priority", 0.9),
+                    "pivot_type": "ioc",
+                })
+                seen_queries.add(q)
+                if len(shortlist) >= max_items:
+                    return shortlist
+
+        # Then from suggested queries
+        for q in sorted(self.suggested_queries, key=item_priority):
+            query_str = q.get("query", "")
+            if query_str and query_str not in seen_queries:
+                shortlist.append({
+                    "action_type": "query",
+                    "query": query_str,
+                    "rationale": q.get("rationale", ""),
+                    "priority": q.get("priority", 0.5),
+                    "pivot_type": q.get("pivot_type", "general"),
+                })
+                seen_queries.add(query_str)
+                if len(shortlist) >= max_items:
+                    return shortlist
+
+        return shortlist
 
 
 class HypothesisEngine:
@@ -2944,6 +3236,9 @@ class HypothesisEngine:
         # Generate IOC follow-ups
         ioc_follow_ups = self._generate_ioc_follow_ups(new_iocs)
 
+        # --- OPTIONAL NER CAPABILITY PROBE (fail-soft, never blocks) ---
+        entities, iocs = self._ner_capability_probe(all_text, entities, iocs)
+
         # --- MODEL-ASSISTED PATH (optional, lazy, fail-soft) ---
         model_pack = self._model_assisted_hypothesis_pack(
             findings, context,
@@ -3428,6 +3723,92 @@ class HypothesisEngine:
         orgs.extend([d for d in domains if len(d) > 5][:5])
 
         return list(dict.fromkeys(orgs))[:5]
+
+    # -------------------------------------------------------------------------
+    # Sprint F150H.1: Optional NER capability probe (fail-soft, never blocks)
+    # -------------------------------------------------------------------------
+
+    def _ner_capability_probe(
+        self,
+        text: str,
+        heuristic_entities: List[str],
+        heuristic_iocs: List[Tuple[str, str]],
+    ) -> Tuple[List[str], List[Tuple[str, str]]]:
+        """
+        Optional NER capability probe - augment heuristic extraction with NER if available.
+
+        LAZY: Only imports NER engine when called.
+        FAIL-SOFT: Returns original entities/IOCs on any error.
+        HEURISTIC-FIRST: NER is only a capability probe, never blocks primary path.
+
+        Args:
+            text: Full text to analyze
+            heuristic_entities: Entities already extracted heuristically
+            heuristic_iocs: IOCs already extracted heuristically
+
+        Returns:
+            (entities, iocs) - possibly augmented with NER if available
+        """
+        try:
+            from hledac.universal.brain.ner_engine import NEREngine
+        except ImportError:
+            # NER engine not available - fail soft, return heuristic-only
+            return heuristic_entities, heuristic_iocs
+
+        try:
+            import threading
+            import time
+
+            # Use a short timeout to avoid blocking
+            result_holder = [None]  # Mutable container for thread result
+            error_holder = [None]
+
+            def _probe():
+                try:
+                    ner = NEREngine()
+                    # Quick single-shot prediction, limited text
+                    short_text = text[:5000] if len(text) > 5000 else text
+                    labels = ["threat-actor", "malware", "vulnerability", "organization", "tool"]
+                    entities_found = ner.predict_entities(short_text, labels)
+                    result_holder[0] = entities_found
+                except Exception as e:
+                    error_holder[0] = e
+
+            thread = threading.Thread(target=_probe, daemon=True)
+            thread.start()
+            thread.join(timeout=2.0)  # 2 second max
+
+            if error_holder[0] is not None:
+                # NER failed - fail soft
+                return heuristic_entities, heuristic_iocs
+
+            if result_holder[0] is None:
+                # Timeout or no result - fail soft
+                return heuristic_entities, heuristic_iocs
+
+            ner_entities = result_holder[0]
+            if not ner_entities:
+                return heuristic_entities, heuristic_iocs
+
+            # Merge NER entities with heuristic, dedup
+            existing = set(e.lower() for e in heuristic_entities)
+            merged_entities = list(heuristic_entities)
+            for ent in ner_entities:
+                if isinstance(ent, dict):
+                    name = ent.get("text", ent.get("entity", ""))
+                elif isinstance(ent, str):
+                    name = ent
+                else:
+                    continue
+                if name and name.lower() not in existing and len(name) > 2:
+                    merged_entities.append(name)
+                    existing.add(name.lower())
+
+            return merged_entities[:12], heuristic_iocs  # Keep IOC heuristic-only
+
+        except Exception:
+            # Any failure - fail soft, return original
+            return heuristic_entities, heuristic_iocs
 
     def _model_assisted_hypothesis_pack(
         self,

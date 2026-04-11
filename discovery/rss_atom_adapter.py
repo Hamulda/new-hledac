@@ -980,7 +980,7 @@ async def async_fetch_feed_entries(
         deduped.append(entry)
 
     # ---- F150J: Score + pre-filter + deterministic rerank ----
-    scored: list[tuple[FeedEntryHit, float, float, str, str]] = []
+    scored: list[tuple[FeedEntryHit, float, float, str, str, float, float, str, str]] = []
 
     for entry in deduped:
         # Light pre-filter: skip obvious noise
@@ -1000,30 +1000,61 @@ async def async_fetch_feed_entries(
         # Combined score: freshness权重0.55, quality权重0.45
         combined = freshness_score * 0.55 + quality_score * 0.45
 
+        # timestamp_reliability (additive signal #1): how trustworthy is this entry's timestamp?
+        # penalize future/missing, reward bounded-age recent entries
+        if entry.published_ts is None:
+            ts_rel = 0.1
+        elif freshness_tier == "future":
+            ts_rel = 0.15
+        elif freshness_tier == "unknown":
+            ts_rel = 0.2
+        elif freshness_score >= 1.0:
+            ts_rel = 1.0
+        elif freshness_score >= 0.85:
+            ts_rel = 0.9
+        elif freshness_score >= 0.6:
+            ts_rel = 0.6
+        else:
+            ts_rel = 0.3
+
+        # metadata_richness_band (additive signal #2): structured metadata density
+        richness = 0
+        if entry.entry_author.strip():
+            richness += 1
+        if entry.feed_title.strip():
+            richness += 1
+        if entry.feed_language.strip():
+            richness += 1
+        if rc_len > 500:
+            richness += 2
+        elif rc_len > 100:
+            richness += 1
+        if summary_len > 50:
+            richness += 1
+        if title_len > 0:
+            richness += 1
+        richness_band: str = "low" if richness <= 2 else ("medium" if richness <= 4 else "high")
+
+        # entry_usefulness_band (additive signal #3): derived from combined score quintiles
+        usefulness_band: str = (
+            "high" if combined >= 0.8
+            else ("medium" if combined >= 0.55
+                  else ("low" if combined >= 0.3 else "noise"))
+        )
+
         scored.append((
-            entry, freshness_score, quality_score, freshness_tier, ""
+            entry, freshness_score, quality_score, freshness_tier, "", combined,
+            ts_rel, richness_band, usefulness_band,
         ))
 
-    # Sort: highest combined score first; preserve-first as tie-break (stable sort)
-    scored.sort(key=lambda x: -x[2])  # secondary sort placeholder
-
-    # Stable sort: primary=combined score desc, secondary=preserve-first order desc
-    # We achieve this by sorting once with a tuple key that includes a reverse index
-    # to preserve insertion order as tie-break.
-    indexed = [
-        (i, -scored[i][2], entry)
-        for i, (entry, fs, qs, tier, reason) in enumerate(scored)
-        for entry in [scored[i][0]]
-    ]
-
-    # Sort by combined score desc, then by original index asc (preserve-first tie-break)
-    indexed.sort(key=lambda x: (x[1], x[0]))
+    # Sort: highest combined score desc; preserve-first tie-break via stable sort
+    # BUG FIX: was sorting by quality_score (x[2]) instead of combined (x[5]).
+    scored.sort(key=lambda x: (-x[5], scored.index(x)))
 
     # Clamp to max_entries and rebuild with scoring metadata
     entries: list[FeedEntryHit] = []
-    for rank, (orig_idx, _, entry) in enumerate(indexed[:max_entries]):
-        # Retrieve stored scores from original scored list
-        _, freshness_score, quality_score, freshness_tier, _ = scored[orig_idx]
+    for rank, (entry, freshness_score, quality_score, freshness_tier, _, combined,
+               ts_rel, richness_band, usefulness_band) in enumerate(scored[:max_entries]):
 
         # Determine selection_reason
         if freshness_tier == "future":
@@ -1041,7 +1072,18 @@ async def async_fetch_feed_entries(
         else:
             reason = "aged_low_quality"
 
-        # Build final entry with additive metadata
+        # Embed additive signals into selection_reason (downstream-readable)
+        # source_quality_hint baked into reason: rich metadata → "enhanced_" prefix
+        has_author = bool(entry.entry_author.strip())
+        has_lang = bool(entry.feed_language.strip())
+        is_enhanced = has_author and has_lang or richness_band == "high"
+        if is_enhanced and not reason.startswith("enhanced_"):
+            reason = "enhanced_" + reason
+
+        # Append downstream-significant bands to reason
+        reason = f"{reason}|ts_rel={ts_rel:.2f}|richness={richness_band}|usefulness={usefulness_band}"
+
+        # Build final entry with additive metadata (F150J delta)
         entries.append(
             FeedEntryHit(
                 feed_url=entry.feed_url,

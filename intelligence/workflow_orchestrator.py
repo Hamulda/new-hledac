@@ -1009,6 +1009,12 @@ class CorrelationResult:
         campaign_hints: List[Dict[str, Any]]          # findings suggesting same campaign
         coupling_pairs: List[Tuple[str, str]]          # (entity, related_entity) pairs
         so_what: str                                   # one-liner operator takeaway
+
+        # --- SECOND-ORDER CONDENSATION (sprint delta) ---
+        cross_source_confidence: float = 0.0       # 0.0-1.0: multi-source corroboration score
+        corroborated_iocs: List[Dict[str, Any]] = field(default_factory=list)  # IOCs with 2+ source evidence
+        top_priority_pivots: List[Dict[str, Any]] = field(default_factory=list)  # bounded action shortlist
+        campaign_confidence: float = 0.0            # 0.0-1.0: campaign cluster confidence
     """
     themes: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     risk_score: float = 0.0
@@ -1027,6 +1033,11 @@ class CorrelationResult:
     campaign_hints: List[Dict[str, Any]] = field(default_factory=list)
     coupling_pairs: List[Tuple[str, str]] = field(default_factory=list)
     so_what: str = ""
+    # --- SECOND-ORDER CONDENSATION (sprint delta) ---
+    cross_source_confidence: float = 0.0       # 0.0-1.0: multi-source corroboration score
+    corroborated_iocs: List[Dict[str, Any]] = field(default_factory=list)  # IOCs with 2+ source evidence
+    top_priority_pivots: List[Dict[str, Any]] = field(default_factory=list)  # bounded action shortlist
+    campaign_confidence: float = 0.0           # 0.0-1.0: campaign cluster confidence
 
 
 def correlate_findings(
@@ -1209,6 +1220,15 @@ def correlate_findings(
         campaign_hints=campaign_hints,
         coupling_pairs=coupling_pairs,
         so_what=so_what,
+        # Second-order condensation
+        cross_source_confidence=_calc_cross_source_confidence(
+            normalized, theme_source_overlap, campaign_hints
+        ),
+        corroborated_iocs=_get_corroborated_iocs(normalized, repeated_iocs),
+        top_priority_pivots=_get_top_priority_pivots(
+            normalized, dominant_cluster, high_risk_branch, repeated_domains
+        ),
+        campaign_confidence=_calc_campaign_confidence(campaign_hints, theme_source_overlap),
     )
 
 
@@ -1428,6 +1448,225 @@ def _count_anomalies(findings: List[Dict[str, Any]]) -> int:
         if f.get("confidence", 0) < 0.3:
             count += 1
     return count
+
+
+# =============================================================================
+# SECOND-ORDER CONDENSATION HELPERS
+# Bounded, fail-soft, cheap heuristics only
+# =============================================================================
+
+def _calc_cross_source_confidence(
+    findings: List[Dict[str, Any]],
+    theme_source_overlap: Dict[str, List[str]],
+    campaign_hints: List[Dict[str, Any]],
+) -> float:
+    """Calculate 0.0-1.0 multi-source corroboration confidence.
+
+    Signal: same IOC/indicator seen across multiple independent sources.
+    """
+    if not findings:
+        return 0.0
+
+    # Source diversity bonus
+    sources = {f["source"] for f in findings}
+    source_diversity = min(len(sources) / max(len(findings), 1), 1.0)
+
+    # Theme overlap bonus (themes with 2+ sources)
+    multi_source_themes = sum(1 for srcs in theme_source_overlap.values() if len(srcs) >= 2)
+    theme_coverage = min(multi_source_themes / max(len(theme_source_overlap), 1), 1.0)
+
+    # Campaign hints bonus
+    campaign_bonus = 0.2 if campaign_hints else 0.0
+
+    # Repeated IOC bonus (has corroboration)
+    has_repeated = any(
+        f.get("description", "") for f in findings
+        if any(ioc in f.get("description", "").lower()
+               for ioc in ("domain", "ip", "hash", "url"))
+    )
+    ioc_bonus = 0.15 if has_repeated else 0.0
+
+    confidence = (
+        source_diversity * 0.35 +
+        theme_coverage * 0.30 +
+        campaign_bonus +
+        ioc_bonus
+    )
+    return round(min(confidence, 1.0), 2)
+
+
+def _get_corroborated_iocs(
+    findings: List[Dict[str, Any]],
+    repeated_iocs: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return IOCs that appear with 2+ source evidence.
+
+    Corroborated = repeated across findings + high severity + high confidence.
+    """
+    if not repeated_iocs:
+        return []
+
+    corroborated: List[Dict[str, Any]] = []
+    for ioc in repeated_iocs[:10]:  # bounded to 10
+        value = ioc.get("value", "")
+        ioc_type = ioc.get("type", "unknown")
+        count = ioc.get("count", 1)
+
+        # Find matching findings
+        matching = [
+            f for f in findings
+            if value.lower() in f.get("description", "").lower()
+        ]
+
+        if len(matching) >= 2:
+            avg_conf = sum(f.get("confidence", 0.5) for f in matching) / max(len(matching), 1)
+            max_sev = max(
+                SEVERITY_WEIGHTS.get(f.get("severity", "medium").lower(), 0.25)
+                for f in matching
+            )
+            corroborated.append({
+                "value": value,
+                "type": ioc_type,
+                "source_count": len(matching),
+                "confidence": round(avg_conf, 2),
+                "severity_weight": round(max_sev, 2),
+                "actionable": avg_conf >= 0.7 and max_sev >= 0.5,
+            })
+
+    # Sort by source_count desc, then confidence desc
+    corroborated.sort(key=lambda x: (-x["source_count"], -x["confidence"]))
+    return corroborated[:8]  # hard cap
+
+
+def _get_top_priority_pivots(
+    findings: List[Dict[str, Any]],
+    dominant_cluster: Optional[str],
+    high_risk_branch: List[Dict[str, Any]],
+    repeated_domains: List[str],
+) -> List[Dict[str, Any]]:
+    """Build bounded priority shortlist for operator.
+
+    Max 5 pivots. Prioritizes: infra-heavy, corroborated, high-severity.
+    """
+    pivots: List[Dict[str, Any]] = []
+
+    # 1. Dominant cluster gets first slot
+    if dominant_cluster:
+        pivots.append({
+            "pivot_type": "dominant_cluster",
+            "description": f"Primary cluster: {dominant_cluster}",
+            "priority": 1,
+        })
+
+    # 2. High-risk findings with infra
+    for f in high_risk_branch[:2]:
+        if len(pivots) >= 5:
+            break
+        pivots.append({
+            "pivot_type": "high_risk_infra",
+            "value": _extract_primary_entity(f),
+            "description": f.get("description", "")[:120],
+            "severity": f.get("severity", "medium"),
+            "priority": 2,
+        })
+
+    # 3. Repeated domains (infra signal)
+    for domain in repeated_domains[:2]:
+        if len(pivots) >= 5:
+            break
+        pivots.append({
+            "pivot_type": "repeated_domain",
+            "value": domain,
+            "description": f"Domain seen across multiple findings",
+            "priority": 3,
+        })
+
+    # 4. High-confidence IOCs
+    for f in findings:
+        if len(pivots) >= 5:
+            break
+        if f.get("confidence", 0) >= 0.85 and f.get("severity", "").lower() in ("high", "critical"):
+            entity = _extract_primary_entity(f)
+            if entity and not any(p.get("value") == entity for p in pivots):
+                pivots.append({
+                    "pivot_type": "high_conf_ioc",
+                    "value": entity,
+                    "description": f.get("description", "")[:120],
+                    "confidence": f.get("confidence"),
+                    "priority": 4,
+                })
+
+    return pivots[:5]
+
+
+def _calc_campaign_confidence(
+    campaign_hints: List[Dict[str, Any]],
+    theme_source_overlap: Dict[str, List[str]],
+) -> float:
+    """Calculate 0.0-1.0 campaign cluster confidence.
+
+    Evidence: multi_source_cluster hints + overlapping themes across sources.
+    """
+    if not campaign_hints:
+        return 0.0
+
+    # Multi-source cluster evidence
+    multi_source_signals = [
+        h for h in campaign_hints
+        if h.get("type") == "multi_source_cluster"
+    ]
+
+    # High-confidence cluster evidence
+    high_conf_signals = [
+        h for h in campaign_hints
+        if h.get("type") == "high_confidence_cluster"
+    ]
+
+    # Theme overlap factor
+    overlapping_themes = sum(
+        1 for srcs in theme_source_overlap.values()
+        if len(srcs) >= 2
+    )
+    overlap_factor = min(overlapping_themes / 3.0, 0.4)  # cap at 0.4
+
+    # Calculate
+    multi_source_score = min(len(multi_source_signals) * 0.25, 0.4)
+    high_conf_score = min(len(high_conf_signals) * 0.15, 0.2)
+
+    confidence = multi_source_score + high_conf_score + overlap_factor
+    return round(min(confidence, 1.0), 2)
+
+
+def _extract_primary_entity(finding: Dict[str, Any]) -> str:
+    """Extract primary IOC entity from finding description."""
+    import re
+
+    text = finding.get("description", "") + " " + finding.get("type", "")
+
+    # Try domain first (infra signal)
+    domain_match = re.search(
+        r'\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b',
+        text, re.IGNORECASE
+    )
+    if domain_match:
+        return domain_match.group(0)
+
+    # Try IP
+    ip_match = re.search(
+        r'\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d{1,2})\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d{1,2})\b',
+        text
+    )
+    if ip_match:
+        return ip_match.group(0)
+
+    # Try hash
+    hash_match = re.search(
+        r'\b[a-f0-9]{32,}\b', text, re.IGNORECASE
+    )
+    if hash_match:
+        return hash_match.group(0)[:32]
+
+    return ""
 
 
 def create_workflow_orchestrator(

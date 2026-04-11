@@ -1723,6 +1723,179 @@ class EvidenceLog:
             "recent_high_conf_decisions": recent_high_conf_decisions,
         }
 
+    def get_retrospective_bundle(self) -> Dict[str, Any]:
+        """
+        Single-call retrospective seam for private sprint retro.
+
+        Composes get_sprint_health_summary() as primary source.
+        Bounded raw scan only for signals that helpers don't provide directly.
+
+        Answers in one call:
+        - jaký sprint byl (verdict)
+        - kde se lámal (breakdown)
+        - co fungovalo (what_worked)
+        - největší slabina (biggest_weakness)
+        - pokračovat / pivotnout / inspectnout (continue_or_pivot)
+
+        Operator-facing fields:
+        - operator_takeaway: one-line bottom line
+        - top_retro_actions: 2-3 condensed action items
+
+        Bounded, fail-soft, read-only. Works on empty log.
+
+        Returns:
+            Dict ready for export or local diagnostics
+        """
+        # ---- Primary composition: sprint health ----
+        health = self.get_sprint_health_summary()
+
+        # ---- Secondary bounded raw scan: only where helpers don't suffice ----
+        # Scan last 200 events for "what_worked" and "breakdown" signals
+        recent = list(self._log)[-200:] if self._log else []
+
+        # What worked: event types with high avg_conf and high count
+        what_worked: List[str] = []
+        funnel = health.get("event_funnel") or {}
+        for et, data in funnel.items():
+            if data.get("avg_conf", 0) >= 0.85 and data.get("count", 0) >= 2:
+                label = f"{et} (conf={data['avg_conf']:.2f}, n={data['count']})"
+                what_worked.append(label)
+        what_worked = what_worked[:4]  # Cap at 4
+
+        # Breakdown: low-conf event types and error weak spots
+        breakdown: List[str] = []
+        for break_item in health.get("quality_breaks", []):
+            breakdown.append(
+                f"{break_item['event_type']} conf={break_item['avg_conf']:.2f}"
+            )
+        for spot in list(health.get("top_weak_spots", {}).keys())[:3]:
+            breakdown.append(f"error: {spot}")
+        breakdown = breakdown[:5]  # Cap at 5
+
+        # Biggest weakness: single most impactful issue
+        biggest_weakness = ""
+        weak_spots = health.get("top_weak_spots", {})
+        if weak_spots:
+            biggest_weakness = next(iter(weak_spots.keys()), "")
+        elif breakdown:
+            biggest_weakness = breakdown[0]
+        else:
+            # Fallback: degraded quality signal
+            quality_breaks = health.get("quality_breaks", [])
+            if quality_breaks:
+                biggest_weakness = f"{quality_breaks[0]['event_type']} quality gap"
+
+        # ---- Verdict: one-liner sprint characterization ----
+        posture = health.get("posture", "unknown")
+        total = health.get("total_events", 0)
+        health_status = health.get("health", "unknown")
+        error_rate = health.get("error_rate_pct", 0.0)
+        decision_count = health.get("decision_count", 0)
+
+        if total == 0:
+            verdict = "empty log — no events recorded"
+        elif health_status == "healthy":
+            verdict = f"clean sprint: {posture}, {total} events, {decision_count} decisions"
+        elif health_status == "warning":
+            verdict = f"warning sprint: {posture}, {total} events, {error_rate:.1f}% errors"
+        elif health_status == "degraded":
+            verdict = f"degraded sprint: {posture}, {total} events, {error_rate:.1f}% errors"
+        elif health_status == "noisy":
+            verdict = f"noisy sprint: {posture}, {total} events, {error_rate:.1f}% errors — signal hard to trust"
+        else:
+            verdict = f"{posture} sprint: {total} events, health={health_status}"
+
+        # ---- Continue / Pivot / Inspect recommendation ----
+        continue_or_pivot = "continue"
+        if health_status == "noisy":
+            continue_or_pivot = "pivot"
+        elif health_status == "degraded" and error_rate > 15:
+            continue_or_pivot = "pivot"
+        elif health_status == "degraded":
+            continue_or_pivot = "inspect"
+        elif health_status == "warning":
+            continue_or_pivot = "inspect"
+        elif health.get("low_conf_pressure") == "high":
+            continue_or_pivot = "inspect"
+        elif total < 10:
+            continue_or_pivot = "inspect"  # Not enough data to trust verdict
+
+        # ---- Operator takeaway: one-line bottom line ----
+        if total == 0:
+            operator_takeaway = "no data — sprint not started or all events dropped"
+        elif health_status == "healthy":
+            operator_takeaway = f"sprint healthy, {decision_count} decisions made, continue"
+        elif health_status == "warning":
+            operator_takeaway = f"sprint has warnings: {biggest_weakness[:60] if biggest_weakness else 'see breakdown'}"
+        elif health_status == "degraded":
+            operator_takeaway = f"sprint degraded: {biggest_weakness[:60] if biggest_weakness else 'errors above threshold'}"
+        elif health_status == "noisy":
+            operator_takeaway = f"sprint noisy: {biggest_weakness[:60] if biggest_weakness else 'too many errors to trust'}"
+        else:
+            operator_takeaway = f"sprint status={health_status}, verdict={verdict[:80]}"
+
+        # ---- Top retro actions: 2-3 condensed items ----
+        top_retro_actions: List[str] = []
+
+        if continue_or_pivot == "pivot":
+            top_retro_actions.append("pivot: root-cause errors blocking progress — investigate before continuing")
+        elif continue_or_pivot == "inspect":
+            if biggest_weakness:
+                top_retro_actions.append(f"inspect: {biggest_weakness[:80]}")
+            if error_rate > 5:
+                top_retro_actions.append(f"review error_rate={error_rate:.1f}% — identify top failure modes")
+            if health.get("low_conf_pressure") != "none":
+                top_retro_actions.append(f"review low-conf decisions ({health.get('low_conf_pressure')} pressure)")
+
+        if health.get("low_conf_pressure") == "high" and continue_or_pivot != "pivot":
+            top_retro_actions.append("address decision confidence — >30% decisions below 0.7 conf")
+
+        if what_worked and continue_or_pivot == "continue":
+            top_retro_actions.append(f"leverage what worked: {what_worked[0][:60]}")
+
+        # Deduplicate and cap
+        seen = set()
+        deduped = []
+        for a in top_retro_actions:
+            normalized = a[:60]
+            if normalized not in seen:
+                seen.add(normalized)
+                deduped.append(a)
+        top_retro_actions = deduped[:3]
+
+        # ---- Health confidence note ----
+        health_confidence_note = ""
+        if total < 10:
+            health_confidence_note = f"low confidence: only {total} events — treat verdict as indicative"
+        elif health_status == "noisy":
+            health_confidence_note = "low confidence: error_rate >20% — signal integrity compromised"
+        elif health.get("low_conf_pressure") == "high":
+            health_confidence_note = "moderate confidence: high low-conf decision pressure"
+        else:
+            health_confidence_note = "confident verdict: sufficient data and low noise"
+
+        return {
+            # Identity
+            "run_id": self._run_id,
+            "total_events": total,
+            # Sprint character
+            "verdict": verdict,
+            "posture": posture,
+            "health": health_status,
+            # Breakdown
+            "breakdown": breakdown,
+            "what_worked": what_worked,
+            "biggest_weakness": biggest_weakness,
+            # Recommendation
+            "continue_or_pivot": continue_or_pivot,
+            # Operator-facing
+            "operator_takeaway": operator_takeaway,
+            "top_retro_actions": top_retro_actions,
+            "health_confidence_note": health_confidence_note,
+            # Underlying signals (for deep dive)
+            "_health": health,
+        }
+
     def get_chain(self, event_id: str) -> List[EvidenceEvent]:
         """
         Získá řetězec událostí vedoucí k dané události.

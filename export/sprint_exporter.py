@@ -200,7 +200,9 @@ async def export_sprint(
 
     # Sprint F150L: operator brief — derived from all available seams
     source_leaderboard = _get_source_leaderboard(store, days=7)
-    operator_brief = _build_operator_brief(pvs, branch_value, sprint_trend, source_leaderboard, seeds_count) if pvs else None
+    # Sprint F150M: correlation from handoff + store fallback (fail-soft)
+    correlation = _get_correlation_from_handoff(eh)
+    operator_brief = _build_operator_brief(pvs, branch_value, sprint_trend, source_leaderboard, seeds_count, correlation) if pvs else None
 
     return {
         "report_json": str(report_path) if report_path else "",
@@ -1000,6 +1002,56 @@ def _get_source_leaderboard(store: Any, days: int = 7) -> list[dict]:
     return []
 
 
+def _get_correlation_from_handoff(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
+    """
+    Sprint F150M: Extract correlation dict from ExportHandoff.
+
+    Correlation flows: workflow_orchestrator.correlate_findings() → scorecard dict
+    (via compute_sprint_intelligence in sprint_scheduler or __main__ windup path).
+
+    Seam: scorecard["correlation"] — primary source.
+    Fallback: scorecard["so_what"], scorecard["dominant_cluster"] etc. directly.
+    Fail-soft: returns None when correlation unavailable (older sprints).
+
+    NO new store reads. NO new persistence. NO new planner.
+    """
+    scorecard = eh.scorecard if eh.scorecard else {}
+    if not scorecard:
+        return None
+
+    # Primary: correlation dict from scorecard["correlation"]
+    corr = scorecard.get("correlation") or scorecard.get("run_correlation")
+    if corr and isinstance(corr, dict):
+        return corr
+
+    # Fallback: individual correlation fields at scorecard root
+    # (older sprint builds that put so_what/dominant_cluster directly in scorecard)
+    so_what = scorecard.get("so_what") or ""
+    dominant_cluster = scorecard.get("dominant_cluster") or scorecard.get("cluster") or ""
+    campaign_hints = scorecard.get("campaign_hints") or []
+    high_risk = scorecard.get("high_risk_branch") or scorecard.get("high_risk") or []
+    risk_score = scorecard.get("risk_score")
+    verdict = scorecard.get("verdict") or scorecard.get("risk_verdict") or ""
+
+    if so_what or dominant_cluster or campaign_hints or high_risk:
+        result: dict[str, Any] = {}
+        if so_what:
+            result["so_what"] = so_what
+        if dominant_cluster:
+            result["dominant_cluster"] = dominant_cluster
+        if campaign_hints:
+            result["campaign_hints"] = campaign_hints if isinstance(campaign_hints, list) else []
+        if high_risk:
+            result["high_risk_branch"] = high_risk if isinstance(high_risk, list) else []
+        if risk_score is not None:
+            result["risk_score"] = risk_score
+        if verdict:
+            result["verdict"] = verdict
+        return result if result else None
+
+    return None
+
+
 def _get_branch_value(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
     """
     Sprint F150L: branch_value z scorecard — feed vs public branch analysis.
@@ -1015,16 +1067,24 @@ def _build_operator_brief(
     sprint_trend: list[dict],
     source_leaderboard: list[dict],
     seeds_count: int,
+    correlation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Sprint F150L: Praktický operator brief — co sprint našel, která branch nesla signál,
     co bylo slabé místo, jaký je nejbližší další krok, 2-5 nejzajímavějších follow-upů.
+
+    Sprint F150M: Correlation integration — correlation-derived fields surface here:
+      - so_what: one-liner operator takeaway (from CorrelationResult)
+      - dominant_cluster: theme with most high-severity findings
+      - campaign_hints: findings suggesting same campaign
+      - high_risk_branch: critical/high findings with infra hints
 
     DERIVED ONLY — skládá z existujících truth/derived dat:
       - pvs.signal_quality + accepted + ioc_density
       - branch_value (feed vs public)
       - sprint_trend (poslední sprinty)
       - source_leaderboard (top zdroje)
+      - correlation fields (so_what, dominant_cluster, campaign_hints, high_risk_branch)
 
     Žádný nový business engine. Žádné nové persistence.
     """
@@ -1033,6 +1093,25 @@ def _build_operator_brief(
     ioc_density = pvs.get("ioc_density", 0.0)
     dedup = pvs.get("reject_breakdown")
     total_rejected = pvs.get("total_rejected", 0)
+
+    # --- Correlation-derived operator intelligence (F150M) ---
+    # Correlation fields flow: workflow_orchestrator.correlate_findings() → scorecard
+    # Fail-soft: correlation may not be present in older sprints (scorecard built before F150M)
+    so_what = ""
+    dominant_cluster: str | None = None
+    campaign_hints: list[dict] = []
+    high_risk_branch: list[dict] = []
+    if correlation:
+        so_what = correlation.get("so_what") or ""
+        dominant_cluster = correlation.get("dominant_cluster") or correlation.get("cluster") or None
+        # campaign_hints: list of dicts with campaign signals
+        raw_hints = correlation.get("campaign_hints") or []
+        if isinstance(raw_hints, list):
+            campaign_hints = [h for h in raw_hints if isinstance(h, dict)]
+        # high_risk_branch: list of critical/high findings with infra hints
+        raw_risks = correlation.get("high_risk_branch") or correlation.get("high_risk") or []
+        if isinstance(raw_risks, list):
+            high_risk_branch = [r for r in raw_risks if isinstance(r, dict)]
 
     # --- Co sprint pravděpodobně našel ---
     if signal == "high_density":
@@ -1085,15 +1164,18 @@ def _build_operator_brief(
         weaknesses.append("žádné výrazné slabiny — sprint byl čistý")
 
     # --- Co dělat dál: akční next step ---
-    next_step = _derive_next_step(signal, branch_value)
+    next_step = _derive_next_step(signal, branch_value, correlation)
 
     # --- 2-5 nejzajímavějších follow-up bodů ---
-    follow_ups = _derive_follow_ups(signal, branch_value, sprint_trend, source_leaderboard, pvs)
+    follow_ups = _derive_follow_ups(signal, branch_value, sprint_trend, source_leaderboard, pvs, correlation)
 
     # --- Rozhraní branch recommendation ---
     branch_recommendation = None
     if branch_value:
         branch_recommendation = branch_value.get("recommendation")
+
+    # --- F150M: trust_note — operator confidence flag ---
+    trust_note = _derive_trust_note(pvs, correlation, so_what, campaign_hints, high_risk_branch)
 
     return {
         "finding_summary": finding_summary,
@@ -1103,14 +1185,29 @@ def _build_operator_brief(
         "follow_ups": follow_ups,
         "branch_recommendation": branch_recommendation,
         "seeds_generated": seeds_count,
+        # F150M: correlation-derived fields
+        "so_what": so_what,
+        "dominant_cluster": dominant_cluster,
+        "campaign_hints": campaign_hints,
+        "high_risk_branch": high_risk_branch,
+        # F150M: trust note
+        "trust_note": trust_note,
     }
 
 
 def _derive_next_step(
     signal: str,
     branch_value: dict[str, Any] | None,
+    correlation: dict[str, Any] | None = None,
 ) -> str:
-    """Derive nejbližší další krok z signal + branch_value."""
+    """Derive nejbližší další krok z signal + branch_value + correlation."""
+    # F150M: correlation-driven override — high risk branch takes priority
+    if correlation:
+        high_risk = correlation.get("high_risk_branch") or correlation.get("high_risk") or []
+        if high_risk and len(high_risk) > 0:
+            # High-risk findings exist — operational security priority
+            return "priority: investigate high-risk branch — critical findings detected"
+
     # Branch-driven decision
     if branch_value:
         rec = branch_value.get("recommendation", "")
@@ -1139,12 +1236,25 @@ def _derive_follow_ups(
     sprint_trend: list[dict],
     source_leaderboard: list[dict],
     pvs: dict[str, Any],
+    correlation: dict[str, Any] | None = None,
 ) -> list[str]:
     """
     Sprint F150L: 2-5 nejzajímavějších follow-up bodů.
     Derived z branch_value + sprint_trend + source_leaderboard.
+    F150M: correlation-driven follow-ups — campaign hints, high-risk branch indicators.
     """
     follow_ups: list[str] = []
+
+    # F150M: correlation-based follow-ups (fail-soft, correlation may be absent)
+    if correlation:
+        # Campaign hints — findings suggesting same campaign
+        campaign = correlation.get("campaign_hints") or []
+        if campaign and isinstance(campaign, list) and len(campaign) > 0:
+            follow_ups.append(f"detekována možná kampaň: {len(campaign)} propojených nálezů")
+        # Dominant cluster follow-up
+        cluster = correlation.get("dominant_cluster") or correlation.get("cluster") or ""
+        if cluster and isinstance(cluster, str) and len(cluster) > 0:
+            follow_ups.append(f"dominantní téma: {cluster} — rozšířit investigaci")
 
     # Branch-based follow-ups
     if branch_value:
@@ -1187,6 +1297,52 @@ def _derive_follow_ups(
         follow_ups.append("IOC density velmi nízká — zvážit úpravu dedup prahů")
 
     return follow_ups[:5]  # Hard cap: max 5 follow-ups
+
+
+def _derive_trust_note(
+    pvs: dict[str, Any],
+    correlation: dict[str, Any] | None,
+    so_what: str,
+    campaign_hints: list[dict],
+    high_risk_branch: list[dict],
+) -> str:
+    """
+    Sprint F150M §2: Operator-facing trust/confidence note.
+    Derived from correlation truth + pvs signal quality.
+
+    Tells operator: how confident should I be in this sprint's output?
+    Fail-soft: returns empty string when correlation unavailable (older sprints).
+    """
+    if not correlation:
+        return ""  # No correlation data — skip, don't fabricate confidence
+
+    # High-risk branch presence = high stakes, operator needs explicit warning
+    if high_risk_branch and len(high_risk_branch) > 0:
+        risk_count = len(high_risk_branch)
+        return (
+            f"⚠️ {risk_count} kritických nálezů detekováno — "
+            f"vysoká priorita pro další ověření"
+        )
+
+    # Campaign hints — correlated findings increase confidence
+    if campaign_hints and len(campaign_hints) >= 2:
+        return (
+            f"kampanijní signál: {len(campaign_hints)} propojených nálezů — "
+            f"zvýšená spolehlivost korelace"
+        )
+
+    # so_what present = correlation engine produced a verdict
+    if so_what and len(so_what) > 5:
+        return f"korelace: {so_what}"
+
+    # Signal quality from pvs — baseline confidence
+    signal = pvs.get("signal_quality", "unknown")
+    if signal == "high_density":
+        return "vysoká spolehlivost — hustý signál, málo šumu"
+    elif signal == "depleted":
+        return "nízká spolehlivost — vyčerpaný prostor, minimální data"
+
+    return ""
 
 
 def _build_sprint_summary(pvs: dict[str, Any], seeds_count: int) -> dict[str, Any]:

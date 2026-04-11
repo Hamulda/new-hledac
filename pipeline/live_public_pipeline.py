@@ -57,7 +57,11 @@ _DISCOVERY_SIGNAL_SCORE_THRESHOLD: float = 0.3
 _FETCH_BUDGET_STRONG: float = 1.25   # very_good or discovery_score >= 0.7
 _FETCH_BUDGET_NORMAL: float = 1.0    # ok, good
 _FETCH_BUDGET_WEAK: float = 0.65     # weak_low_signal, low discovery score
-_FETCH_BUDGET_SKIP: float = 0.0       # SKIP_WEAK
+_FETCH_BUDGET_SKIP: float = 0.0       # SKIP_WEAK — dead until Fix A in F150J
+
+# Sprint F150J: pre-fetch skip threshold — below this score with no strong signal → SKIP tier
+_DISCOVERY_SKIP_THRESHOLD: float = 0.15
+"""If discovery_score is below this AND no strong signal, skip fetch entirely."""
 
 # -----------------------------------------------------------------------------
 # DTOs
@@ -93,8 +97,13 @@ class PipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     error: str | None = None
     # Sprint F150I: branch economics observability (additive)
     strong_pages: int = 0  # very_good tier, high yield
-    weak_pages_skipped: int = 0  # SKIP_WEAK early exits
+    weak_pages_skipped: int = 0  # SKIP_WEAK early exits (Fix B: was error-based, now quality_reason-based)
     low_value_fetches: int = 0  # fetched but matched nothing + poor quality
+    # Sprint F150J: derived value counters
+    discovery_strong_content_weak: int = 0  # discovery signal but zero pattern yield
+    discovery_and_content_strong: int = 0  # both discovery signal and pattern yield
+    # Sprint F150J: condensed public-branch verdict (additive dict)
+    public_branch_verdict: dict = {}
 
 
 # -----------------------------------------------------------------------------
@@ -468,7 +477,15 @@ async def _fetch_and_process_page(
     )
     strong_signal = discovery_score is not None and discovery_score >= 0.7
 
-    if discovery_score is not None and discovery_score >= 0.85:
+    # Sprint F150J Fix A: wire SKIP tier — was dead code before
+    low_discovery = (
+        discovery_score is not None
+        and discovery_score < _DISCOVERY_SKIP_THRESHOLD
+        and not strong_signal
+    )
+    if low_discovery:
+        budget_mult = _FETCH_BUDGET_SKIP  # 0.0 → true skip
+    elif discovery_score is not None and discovery_score >= 0.85:
         budget_mult = _FETCH_BUDGET_STRONG
     elif strong_signal or has_signal:
         budget_mult = _FETCH_BUDGET_NORMAL
@@ -863,14 +880,15 @@ async def async_run_live_public_pipeline(
     total_stored = sum(p.stored_findings for p in all_page_results)
     patterns_cfg = _get_patterns_configured_count()
 
-    # Sprint F150I: branch economics counters
+    # Sprint F150J Fix B: branch economics counters
+    # Fix weak_pages_skipped: SKIP_WEAK post-fetch pages have error=None (not error!=None)
     strong_pages = sum(
         1 for p in all_page_results
-        if p.quality_reason in ("very_good",)
+        if p.quality_reason == "very_good"
     )
     weak_pages_skipped = sum(
         1 for p in all_page_results
-        if p.error is not None and "SKIP_WEAK" in (p.quality_reason or "")
+        if p.quality_reason is not None and p.quality_reason.startswith("SKIP_WEAK")
     )
     # low-value = fetched but poor quality + no matches
     low_value_fetches = sum(
@@ -878,6 +896,17 @@ async def async_run_live_public_pipeline(
         if p.fetched
         and p.matched_patterns == 0
         and p.quality_reason in ("weak_low_signal", "ok:no_query_signal")
+    )
+    # Sprint F150J: additive derived counters for public-branch value assessment
+    # discovery_strong_content_weak: discovery signal but page yielded nothing
+    discovery_strong_content_weak = sum(
+        1 for p in all_page_results
+        if (p.discovery_signal and p.matched_patterns == 0)
+    )
+    # discovery_and_content_strong: both discovery signal and pattern yield
+    discovery_and_content_strong = sum(
+        1 for p in all_page_results
+        if p.discovery_signal and p.matched_patterns > 0
     )
 
     run_error: str | None = None
@@ -887,6 +916,44 @@ async def async_run_live_public_pipeline(
         # Surface first error
         err = error_results[0]
         run_error = f"batch_error:{type(err).__name__}:{err}"
+
+    # Sprint F150J: build condensed public-branch verdict
+    # waste_ratio = pages that consumed budget but yielded nothing
+    fetched_pages = [p for p in all_page_results if p.fetched]
+    fetched_count = len(fetched_pages)
+    waste_ratio = (
+        round(low_value_fetches / fetched_count, 3)
+        if fetched_count > 0
+        else 0.0
+    )
+    # value_ratio = pages with actual pattern yield vs total discovered
+    value_ratio = (
+        round(discovery_and_content_strong / total_discovered, 3)
+        if total_discovered > 0
+        else 0.0
+    )
+    # public_branch_hint: one-liner signal quality label
+    if strong_pages >= 2 and discovery_and_content_strong >= 2:
+        public_branch_hint = "high_value"
+    elif discovery_and_content_strong >= 1:
+        public_branch_hint = "some_value"
+    elif discovery_strong_content_weak >= 1:
+        public_branch_hint = "weak_signal"
+    elif weak_pages_skipped > 0 and fetched_count == 0:
+        public_branch_hint = "skipped_low_quality"
+    else:
+        public_branch_hint = "low_value"
+
+    public_branch_verdict = {
+        "waste_ratio": waste_ratio,
+        "value_ratio": value_ratio,
+        "public_branch_hint": public_branch_hint,
+        "strong_pages": strong_pages,
+        "weak_pages_skipped": weak_pages_skipped,
+        "discovery_strong_content_weak": discovery_strong_content_weak,
+        "discovery_and_content_strong": discovery_and_content_strong,
+        "low_value_fetches": low_value_fetches,
+    }
 
     return PipelineRunResult(
         query=query,
@@ -901,6 +968,9 @@ async def async_run_live_public_pipeline(
         strong_pages=strong_pages,
         weak_pages_skipped=weak_pages_skipped,
         low_value_fetches=low_value_fetches,
+        discovery_strong_content_weak=discovery_strong_content_weak,
+        discovery_and_content_strong=discovery_and_content_strong,
+        public_branch_verdict=public_branch_verdict,
     )
 
 
