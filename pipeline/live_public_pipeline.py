@@ -43,6 +43,22 @@ _DEFAULT_CONFIDENCE: float = 0.8
 _FINDING_ID_CONTEXT_RADIUS: int = 100
 """Character radius around pattern hit for payload_text context window."""
 
+# Sprint F150I: tier thresholds (additive, no new framework)
+_QUALITY_TIER_VERY_GOOD = "very_good"
+_QUALITY_TIER_GOOD = "good"
+_QUALITY_TIER_OK = "ok"
+_QUALITY_TIER_WEAK = "weak_low_signal"
+_QUALITY_TIER_SKIP = "SKIP_WEAK"
+
+# Discovery signal threshold — hit with score >= this is considered informative
+_DISCOVERY_SIGNAL_SCORE_THRESHOLD: float = 0.3
+
+# Adaptive fetch budget tiers: multiplier on base fetch_timeout_s
+_FETCH_BUDGET_STRONG: float = 1.25   # very_good or discovery_score >= 0.7
+_FETCH_BUDGET_NORMAL: float = 1.0    # ok, good
+_FETCH_BUDGET_WEAK: float = 0.65     # weak_low_signal, low discovery score
+_FETCH_BUDGET_SKIP: float = 0.0       # SKIP_WEAK
+
 # -----------------------------------------------------------------------------
 # DTOs
 # -----------------------------------------------------------------------------
@@ -58,6 +74,9 @@ class PipelinePageResult(msgspec.Struct, frozen=True, gc=False):
     stored_findings: int
     error: str | None = None
     quality_reason: str | None = None  # why page was good/weak/skipped
+    discovery_score: float | None = None  # signal strength from discovery hit
+    discovery_reason: str | None = None  # reason from discovery hit
+    discovery_signal: bool = False  # True if hit had score >= 0.3 or reason
 
 
 class PipelineRunResult(msgspec.Struct, frozen=True, gc=False):
@@ -72,6 +91,10 @@ class PipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     patterns_configured: int
     pages: tuple[PipelinePageResult, ...]
     error: str | None = None
+    # Sprint F150I: branch economics observability (additive)
+    strong_pages: int = 0  # very_good tier, high yield
+    weak_pages_skipped: int = 0  # SKIP_WEAK early exits
+    low_value_fetches: int = 0  # fetched but matched nothing + poor quality
 
 
 # -----------------------------------------------------------------------------
@@ -269,25 +292,36 @@ def _score_page_quality(
     hit_rank: int,
     query: str,
     extracted_text: str,
+    discovery_score: float | None = None,
+    discovery_reason: str | None = None,
 ) -> str:
     """
-    Return a short quality reason string for a discovered page.
+    Return a short quality tier string for a discovered page.
 
-    Scoring signals (compositional, no ML):
-    - query-term density in title/snippet (query-aware)
-    - URL signal strength (structured URL > bare domain)
-    - rank priority (top results get benefit of doubt)
-    - text richness (content length vs noise ratio)
-    - pre-filter: skip extremely weak candidates
+    Signals (compositional, no ML):
+    - query-term density in title/snippet
+    - URL structural depth
+    - text richness (avg word len + word count)
+    - discovery hit score / reason (if present)
+    - rank priority (top-5 benefit of doubt)
+    - pre-filter: skip extremely thin pages
 
     Returns one of:
-      SKIP_WEAK: below minimum threshold — skip
-      weak_low_text: fetched but very little text
-      low_signal: title/snippet missing query terms
-      ok: acceptable page
-      good: strong signals across multiple dimensions
-      very_good: exceptional title + URL + text quality
+      SKIP_WEAK: below minimum — skip immediately
+      weak_low_signal: poor signals even after fetch
+      ok: acceptable but not exceptional
+      good: strong multi-dimensional signals
+      very_good: exceptional signals, full investment warranted
     """
+    # --- Discovery signal blend (additive, fail-soft) ------------
+    has_discovery_signal = (
+        (discovery_score is not None and discovery_score >= _DISCOVERY_SIGNAL_SCORE_THRESHOLD)
+        or (discovery_reason is not None and discovery_reason.strip() != "")
+    )
+    strong_discovery = (
+        discovery_score is not None and discovery_score >= 0.7
+    )
+
     query_lower = query.lower()
     query_terms = frozenset(query_lower.split())
 
@@ -308,11 +342,9 @@ def _score_page_quality(
     # --- URL structural signal -----------------------------------
     url_has_path = "/" in hit_url and len(hit_url.split("/")) > 3
 
-    # --- Text richness: content chars / total chars ratio -------
-    # Very low ratio = mostly boilerplate/nav, not useful
+    # --- Text richness -----------------------------------------
     text_len = len(extracted_text)
     word_count = len(extracted_text.split())
-    # rough noise proxy: avg word len < 3.5 suggests heavy markup/boilerplate
     avg_word_len = text_len / max(word_count, 1)
     text_is_meaningful = avg_word_len >= 3.5 and word_count >= 50
 
@@ -323,16 +355,21 @@ def _score_page_quality(
         url_has_path,
         text_is_meaningful,
     ])
+    if strong_discovery:
+        signals_good += 1  # discovery bonus
 
-    rank_bonus = hit_rank < 5  # top-5 gets benefit of doubt
+    rank_bonus = hit_rank < 5
 
-    if signals_good >= 3 and rank_bonus:
+    # --- Tier determination -------------------------------------
+    if signals_good >= 4 or (signals_good >= 3 and (rank_bonus or strong_discovery)):
         return "very_good"
-    elif signals_good >= 2:
+    elif signals_good >= 3:
         return "good"
+    elif signals_good >= 2:
+        return "ok"
     elif signals_good >= 1:
         return "ok"
-    elif text_is_meaningful and text_len > 1000:
+    elif has_discovery_signal and text_is_meaningful and text_len > 1000:
         return "ok:no_query_signal"
     else:
         return "weak_low_signal"
@@ -410,31 +447,67 @@ async def _fetch_and_process_page(
     semaphore: asyncio.Semaphore,
     query: str,
     hit_url: str,
-    hit_title: str,  # noqa: F841
-    hit_snippet: str,  # noqa: F841
-    hit_rank: int,  # noqa: F841
+    hit_title: str,
+    hit_snippet: str,
+    hit_rank: int,
     fetch_timeout_s: float,
     fetch_max_bytes: int,
     store: Any | None,
+    discovery_score: float | None = None,
+    discovery_reason: str | None = None,
 ) -> PipelinePageResult:
     """
     Fetch one URL, extract text, scan patterns, optionally store findings.
-    Returns PipelinePageResult preserving hit metadata from discovery.
+    Discovery signal (score/reason) is propagated for observability and
+    used for adaptive budget selection — fail-soft when absent.
     """
+    # --- Adaptive budget tier ----------------------------------------
+    has_signal = (
+        (discovery_score is not None and discovery_score >= _DISCOVERY_SIGNAL_SCORE_THRESHOLD)
+        or (discovery_reason is not None and discovery_reason.strip() != "")
+    )
+    strong_signal = discovery_score is not None and discovery_score >= 0.7
+
+    if discovery_score is not None and discovery_score >= 0.85:
+        budget_mult = _FETCH_BUDGET_STRONG
+    elif strong_signal or has_signal:
+        budget_mult = _FETCH_BUDGET_NORMAL
+    else:
+        budget_mult = _FETCH_BUDGET_WEAK
+
+    effective_timeout = fetch_timeout_s * budget_mult
+    # Don't call fetch at all for SKIP tier (budget_mult == 0)
+    skip_fetch = budget_mult <= 0
+
     async with semaphore:
         # ---- Fetch -----------------------------------------------------------
-        fetch_start = time.monotonic()
+        if skip_fetch:
+            return PipelinePageResult(
+                url=hit_url,
+                fetched=False,
+                matched_patterns=0,
+                accepted_findings=0,
+                stored_findings=0,
+                error="skipped:weak_discovery",
+                quality_reason="SKIP_WEAK:weak_discovery",
+                discovery_score=discovery_score,
+                discovery_reason=discovery_reason,
+                discovery_signal=has_signal,
+            )
+
         try:
-            # 8AD surface
             result = await asyncio.wait_for(
-                _ASYNC_FETCH_PUBLIC_TEXT(hit_url, fetch_timeout_s, fetch_max_bytes),
-                timeout=fetch_timeout_s + 5.0,  # hard outer cap slightly above per-call timeout
+                _ASYNC_FETCH_PUBLIC_TEXT(hit_url, effective_timeout, fetch_max_bytes),
+                timeout=effective_timeout + 5.0,
             )
         except asyncio.TimeoutError:
             return PipelinePageResult(
                 url=hit_url, fetched=False, matched_patterns=0,
                 accepted_findings=0, stored_findings=0,
-                error=f"fetch_timeout_after_{fetch_timeout_s}s",
+                error=f"fetch_timeout_after_{effective_timeout:.1f}s",
+                discovery_score=discovery_score,
+                discovery_reason=discovery_reason,
+                discovery_signal=has_signal,
             )
         except asyncio.CancelledError:
             raise  # [I6] propagate, never swallow
@@ -443,10 +516,10 @@ async def _fetch_and_process_page(
                 url=hit_url, fetched=False, matched_patterns=0,
                 accepted_findings=0, stored_findings=0,
                 error=f"fetch_exception:{type(exc).__name__}:{exc}",
+                discovery_score=discovery_score,
+                discovery_reason=discovery_reason,
+                discovery_signal=has_signal,
             )
-
-        # fetch_elapsed available for future telemetry
-        # fetch_elapsed = time.monotonic() - fetch_start  # noqa: F841
 
         # Unpack fetch result (FetchResult frozen struct)
         fetched_text: str | None
@@ -460,6 +533,9 @@ async def _fetch_and_process_page(
                 url=hit_url, fetched=True, matched_patterns=0,
                 accepted_findings=0, stored_findings=0,
                 error="fetch_text_none_or_empty",
+                discovery_score=discovery_score,
+                discovery_reason=discovery_reason,
+                discovery_signal=has_signal,
             )
 
         # ---- Extract ---------------------------------------------------------
@@ -473,6 +549,9 @@ async def _fetch_and_process_page(
                 url=hit_url, fetched=True, matched_patterns=0,
                 accepted_findings=0, stored_findings=0,
                 error=f"html_extract_failed:{exc}",
+                discovery_score=discovery_score,
+                discovery_reason=discovery_reason,
+                discovery_signal=has_signal,
             )
 
         # Hard cap
@@ -488,6 +567,8 @@ async def _fetch_and_process_page(
             hit_rank=hit_rank,
             query=query,
             extracted_text=extracted_text,
+            discovery_score=discovery_score,
+            discovery_reason=discovery_reason,
         )
 
         # Skip very-low-quality pages early — preserve fetch budget
@@ -496,6 +577,9 @@ async def _fetch_and_process_page(
                 url=hit_url, fetched=True, matched_patterns=0,
                 accepted_findings=0, stored_findings=0,
                 error=None, quality_reason=quality_reason,
+                discovery_score=discovery_score,
+                discovery_reason=discovery_reason,
+                discovery_signal=has_signal,
             )
 
         # Sprint F150I: enrich extracted text with discovery metadata
@@ -522,6 +606,9 @@ async def _fetch_and_process_page(
             return PipelinePageResult(
                 url=hit_url, fetched=True, matched_patterns=0,
                 accepted_findings=0, stored_findings=0,
+                discovery_score=discovery_score,
+                discovery_reason=discovery_reason,
+                discovery_signal=has_signal,
             )
 
         # ---- Per-page dedup: (value, label, pattern) exact dedup -----------
@@ -577,6 +664,9 @@ async def _fetch_and_process_page(
             accepted_findings=accepted_count,
             stored_findings=stored_count,
             quality_reason=quality_reason,
+            discovery_score=discovery_score,
+            discovery_reason=discovery_reason,
+            discovery_signal=has_signal,
         )
 
 
@@ -720,6 +810,21 @@ async def async_run_live_public_pipeline(
     # Per-call semaphore, no global batch timeout
     tasks: list[asyncio.Task] = []
     for hit in hits:
+        # Sprint F150I: extract discovery score/reason if present (additive, fail-soft)
+        hit_score: float | None = getattr(hit, "score", None)
+        if hit_score is None and hasattr(hit, "__getitem__"):
+            try:
+                hit_score = float(hit[4]) if len(hit) > 4 else None
+            except (ValueError, TypeError):
+                hit_score = None
+
+        hit_reason: str | None = getattr(hit, "reason", None)
+        if hit_reason is None and hasattr(hit, "__getitem__"):
+            try:
+                hit_reason = str(hit[5]) if len(hit) > 5 else None
+            except (ValueError, TypeError):
+                hit_reason = None
+
         task = asyncio.create_task(
             _fetch_and_process_page(
                 semaphore=semaphore,
@@ -731,6 +836,8 @@ async def async_run_live_public_pipeline(
                 fetch_timeout_s=fetch_timeout_s,
                 fetch_max_bytes=fetch_max_bytes,
                 store=store,
+                discovery_score=hit_score,
+                discovery_reason=hit_reason,
             )
         )
         tasks.append(task)
@@ -756,6 +863,23 @@ async def async_run_live_public_pipeline(
     total_stored = sum(p.stored_findings for p in all_page_results)
     patterns_cfg = _get_patterns_configured_count()
 
+    # Sprint F150I: branch economics counters
+    strong_pages = sum(
+        1 for p in all_page_results
+        if p.quality_reason in ("very_good",)
+    )
+    weak_pages_skipped = sum(
+        1 for p in all_page_results
+        if p.error is not None and "SKIP_WEAK" in (p.quality_reason or "")
+    )
+    # low-value = fetched but poor quality + no matches
+    low_value_fetches = sum(
+        1 for p in all_page_results
+        if p.fetched
+        and p.matched_patterns == 0
+        and p.quality_reason in ("weak_low_signal", "ok:no_query_signal")
+    )
+
     run_error: str | None = None
     if discovery_error:
         run_error = discovery_error
@@ -774,6 +898,9 @@ async def async_run_live_public_pipeline(
         patterns_configured=patterns_cfg,
         pages=tuple(all_page_results),
         error=run_error,
+        strong_pages=strong_pages,
+        weak_pages_skipped=weak_pages_skipped,
+        low_value_fetches=low_value_fetches,
     )
 
 

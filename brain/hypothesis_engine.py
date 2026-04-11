@@ -1393,10 +1393,16 @@ class HypothesisPack:
 
     Returned by build_hypothesis_pack() - practical OSINT guidance
     without requiring heavy model.
+
+    Field roles (intentional separation to avoid redundancy):
+    - hypotheses: Concrete follow-up claims to verify (what might be true)
+    - suggested_queries: Ranked search queries to execute (how to investigate)
+    - ioc_follow_ups: Structured IOC pivot trails (actionable IOC chains)
+    - source_hints: Where to look next (quality-ranked sources)
     """
-    hypotheses: List[Dict[str, str]] = field(default_factory=list)
-    suggested_queries: List[Dict[str, str]] = field(default_factory=list)
-    ioc_follow_ups: List[Dict[str, str]] = field(default_factory=list)
+    hypotheses: List[Dict[str, Any]] = field(default_factory=list)
+    suggested_queries: List[Dict[str, Any]] = field(default_factory=list)  # Now has priority, pivot_type
+    ioc_follow_ups: List[Dict[str, Any]] = field(default_factory=list)    # Now has priority, to field
     source_hints: List[Any] = field(default_factory=list)
     provenance: str = "heuristic"  # "heuristic" or "model-assisted"
 
@@ -1414,10 +1420,25 @@ class HypothesisPack:
         if self.hypotheses:
             parts.append(f"{len(self.hypotheses)} hypotheses")
         if self.suggested_queries:
-            parts.append(f"{len(self.suggested_queries)} queries")
+            types = {}
+            for q in self.suggested_queries:
+                t = q.get("type", "unknown")
+                types[t] = types.get(t, 0) + 1
+            type_str = ", ".join(f"{v} {k}" for k, v in list(types.items())[:3])
+            parts.append(f"{len(self.suggested_queries)} queries ({type_str})")
         if self.ioc_follow_ups:
             parts.append(f"{len(self.ioc_follow_ups)} IOC pivots")
+        if self.source_hints:
+            parts.append(f"{len(self.source_hints)} sources")
         return ", ".join(parts) or "empty"
+
+    def top_queries(self, n: int = 3) -> List[Dict[str, Any]]:
+        """Get top N queries by priority for scheduler."""
+        return sorted(self.suggested_queries, key=lambda x: x.get("priority", 0.5), reverse=True)[:n]
+
+    def pivot_trail(self, ioc: str) -> List[Dict[str, Any]]:
+        """Get all pivots starting from a specific IOC."""
+        return [p for p in self.ioc_follow_ups if p.get("from") == ioc]
 
 
 class HypothesisEngine:
@@ -2708,43 +2729,130 @@ class HypothesisEngine:
 
         return queries[:5]
 
+    # Known threat actor / malware / technique names (high-value, skip filter)
+    _HIGH_VALUE_PATTERNS = [
+        # APT groups
+        r"\bAPT\d{1,2}\b", r"\bCozy Bear\b", r"\bFancy Bear\b", r"\bLazarus\b",
+        r"\bWannaCry\b", r"\bNotPetya\b", r"\bSolarWinds\b", r"\bKaseya\b",
+        r"\bLog4j\b", r"\bLog4Shell\b", r"\bCobalt Strike\b", r"\bMimikatz\b",
+        r"\bEmotet\b", r"\bTrickBot\b", r"\bRyuk\b", r"\bDarkSide\b",
+        r"\bREvil\b", r"\bBlackCat\b", r"\bALPHV\b", r"\bClop\b",
+        r"\bConti\b", r"\bHive\b", r"\bLockBit\b", r"\bBlackMatter\b",
+        # Techniques
+        r"\bTrickBot\b", r"\bCobaltStrike\b", r"\bPowerShell\b",
+        r"\bLiving off the Land\b", r"\bLotL\b",
+    ]
+
+    # Generic words to filter out from entity extraction
+    _GENERIC_ENTITY_WORDS = {
+        "actor", "target", "victim", "group", "campaign", "operation",
+        "incident", "breach", "attack", "threat", "actor", "agent",
+        "person", "individual", "team", "unit", "party", "entity",
+        "system", "network", "server", "host", "machine", "device",
+        "software", "tool", "malware", "ransomware", "virus", "trojan",
+        "data", "information", "file", "document", "report", "source",
+    }
+
     def _extract_entities_heuristic(self, text: str) -> List[str]:
-        """Extract potential entities using simple heuristics."""
+        """Extract high-value threat entities using targeted patterns."""
         entities = []
+        seen = set()
 
-        # CamelCase words (typical for organizations/products)
+        # 1. High-value threat patterns (priority)
+        for pattern in self._HIGH_VALUE_PATTERNS:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                name = match.group(0)
+                if name.lower() not in seen:
+                    seen.add(name.lower())
+                    entities.append(name)
+
+        # 2. CVE IDs as first-class entities
+        for match in re.finditer(r"\b(CVE-\d{4}-\d{4,7})\b", text, re.IGNORECASE):
+            cve = match.group(1).upper()
+            if cve.lower() not in seen:
+                seen.add(cve.lower())
+                entities.append(cve)
+
+        # 3. CamelCase compound words (organizations, products) - filter generics
         camel = re.findall(r"\b[A-Z][a-z]+(?:[A-Z]\w*)+\b", text)
-        entities.extend(camel[:5])
+        for c in camel[:5]:
+            c_lower = c.lower()
+            if c_lower not in seen and len(c) > 3 and c_lower not in self._GENERIC_ENTITY_WORDS:
+                seen.add(c_lower)
+                entities.append(c)
 
-        # Quoted strings
-        quoted = re.findall(r'"([^"]{3,30})"', text)
-        entities.extend([q for q in quoted if len(q.split()) <= 3][:5])
+        # 4. Quoted strings (specific named entities) - filter generics
+        quoted = re.findall(r'"([^"]{3,40})"', text)
+        for q in quoted:
+            q_lower = q.lower()
+            words = q.split()
+            if len(words) <= 4 and q_lower not in seen and q_lower not in self._GENERIC_ENTITY_WORDS:
+                seen.add(q_lower)
+                entities.append(q)
 
-        # All-caps acronyms (2-5 letters)
+        # 5. All-caps acronyms (2-5 letters, skip common words and generics)
+        skip = {"OR", "AND", "THE", "FOR", "WITH", "FROM", "THIS", "THAT", "WHEN", "THEN"}
         acronyms = re.findall(r"\b[A-Z]{2,5}\b", text)
-        entities.extend([a for a in acronyms if a not in {"OR", "AND", "THE", "FOR"}][:5])
+        for a in acronyms:
+            a_lower = a.lower()
+            if a not in skip and a_lower not in seen and a_lower not in self._GENERIC_ENTITY_WORDS:
+                seen.add(a_lower)
+                entities.append(a)
 
-        return list(dict.fromkeys(entities))  # Dedupe preserve order
+        return entities[:12]  # Cap at 12 high-value entities
 
     def _extract_iocs_heuristic(self, text: str) -> List[Tuple[str, str]]:
-        """Extract IOC-like patterns."""
+        """Extract IOC-like patterns with better coverage."""
         iocs = []
 
-        # IP addresses
+        # CVE identifiers (priority - security context)
+        cves = re.findall(r"\bCVE-\d{4}-\d{4,7}\b", text, re.IGNORECASE)
+        for cve in cves[:3]:
+            iocs.append(("cve", cve.upper()))
+
+        # IP addresses (including IPv6 condensed)
         ips = re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text)
-        for ip in ips[:2]:
+        for ip in ips[:3]:
             iocs.append(("ip", ip))
 
-        # URLs
-        urls = re.findall(r"https?://[^\s\"'>]+", text)
-        for url in urls[:2]:
-            domain = re.sub(r"https?://", "", url).split("/")[0]
-            iocs.append(("domain", domain))
+        # IPv6 (abbreviated)
+        ipv6s = re.findall(r"\b[0-9a-fA-F:]+:[0-9a-fA-F:]+\b", text)
+        for ip in ipv6s[:2]:
+            if ":" in ip and len(ip) > 10:
+                iocs.append(("ipv6", ip))
 
-        # Hashes (simplified)
-        hashes = re.findall(r"\b[a-fA-F0-9]{32,64}\b", text)
+        # URLs with extraction of domain
+        urls = re.findall(r"https?://[^\s\"'>]+", text)
+        for url in urls[:3]:
+            domain = re.sub(r"https?://", "", url).split("/")[0]
+            if domain and len(domain) > 3:
+                iocs.append(("domain", domain))
+
+        # MD5/SHA hashes (32/64 chars)
+        hashes = re.findall(r"\b[a-fA-F0-9]{32}\b", text)
         for h in hashes[:2]:
-            iocs.append(("hash", h[:16] + "..."))
+            iocs.append(("md5", h))
+        sha256s = re.findall(r"\b[a-fA-F0-9]{64}\b", text)
+        for h in sha256s[:2]:
+            iocs.append(("sha256", h))
+        sha1s = re.findall(r"\b[a-fA-F0-9]{40}\b", text)
+        for h in sha1s[:2]:
+            iocs.append(("sha1", h))
+
+        # Malware/S implant paths (YARA-style)
+        paths = re.findall(r"[A-Z]:\\(?:[^\\/:*?\"<>|\r\n]+\\)*[^\\\/:*?\"<>|\r\n]+", text)
+        for p in paths[:2]:
+            iocs.append(("path", p[:50]))
+
+        # Registry keys
+        regs = re.findall(r"HKLM\\[^,\s]+|HKCU\\[^,\s]+|HKCR\\[^,\s]+", text, re.IGNORECASE)
+        for r in regs[:2]:
+            iocs.append(("registry", r))
+
+        # File names with extensions (common malware)
+        files = re.findall(r"\b[\w\-]+\.(exe|dll|ps1|vbs|bat|cmd|js|jar|scr|sys)\b", text, re.IGNORECASE)
+        for f in files[:3]:
+            iocs.append(("file", f.lower()))
 
         return iocs
 
@@ -2926,22 +3034,13 @@ class HypothesisEngine:
         iocs: List[Tuple[str, str]],
         relationships: List[Tuple[str, str, str]],
         sources: List["SourceHint"],
-    ) -> List[Dict[str, str]]:
-        """Generate and rank follow-up queries."""
+    ) -> List[Dict[str, Any]]:
+        """Generate and rank follow-up queries with entity-pair and co-occurrence pivots."""
         queries: List[Dict[str, Any]] = []
+        all_text = " ".join(findings)
 
-        # Entity expansion queries (high priority)
-        for entity in entities[:3]:
-            queries.append({
-                "query": f'"{entity}" OR "{entity.lower()}"',
-                "rationale": f"Entity expansion: {entity}",
-                "type": "entity_expansion",
-                "priority": 0.9,
-                "pivot_type": "entity",
-            })
-
-        # IOC correlation queries (high priority)
-        for ioc_type, ioc_value in iocs[:3]:
+        # IOC correlation queries (highest priority)
+        for ioc_type, ioc_value in iocs[:4]:
             queries.append({
                 "query": f"{ioc_type}:{ioc_value}",
                 "rationale": f"IOC lookup: {ioc_type}={ioc_value}",
@@ -2950,120 +3049,280 @@ class HypothesisEngine:
                 "pivot_type": "ioc",
             })
 
-        # Relationship verification queries
+        # Entity expansion queries (high priority)
+        for entity in entities[:4]:
+            queries.append({
+                "query": f'"{entity}" OR "{entity.lower()}"',
+                "rationale": f"Entity expansion: {entity}",
+                "type": "entity_expansion",
+                "priority": 0.88,
+                "pivot_type": "entity",
+            })
+
+        # Entity-pair pivots: pairs of entities that co-occur in findings
+        # Check which entities appear near each other
+        entity_pairs = self._find_entity_pairs(all_text, entities)
+        for src, dst in entity_pairs[:3]:
+            queries.append({
+                "query": f'"{src}" AND "{dst}"',
+                "rationale": f"Entity pair: {src} + {dst} co-occurrence",
+                "type": "entity_pair",
+                "priority": 0.82,
+                "pivot_type": "entity_pair",
+            })
+
+        # Relationship verification queries (if we have detected relationships)
         for src, dst, rel in relationships[:2]:
             queries.append({
-                "query": f'"{src}" AND "{dst}" AND {rel}',
+                "query": f'"{src}" AND "{dst}"',
                 "rationale": f"Verify relationship: {src} {rel} {dst}",
                 "type": "relationship_verification",
-                "priority": 0.75,
+                "priority": 0.78,
                 "pivot_type": "relationship",
             })
 
-        # Source-based queries
+        # Co-occurrence pivots: entities that co-occur with IOCs
+        ioc_entities = self._find_ioc_entity_pairs(iocs, entities, all_text)
+        for ioc_val, entity in ioc_entities[:3]:
+            queries.append({
+                "query": f"{ioc_val} AND \"{entity}\"",
+                "rationale": f"IOC+entity co-occurrence: {ioc_val} + {entity}",
+                "type": "ioc_entity_pivot",
+                "priority": 0.85,
+                "pivot_type": "ioc_entity",
+            })
+
+        # Source-based queries (quality-weighted)
         for src_hint in sources[:2]:
             queries.append({
                 "query": f'"{src_hint.source}" latest',
                 "rationale": f"Source check: {src_hint.source} (quality: {src_hint.quality:.2f})",
                 "type": "source_discovery",
-                "priority": src_hint.quality * 0.8,
+                "priority": src_hint.quality * 0.75,
                 "pivot_type": "source",
             })
 
         # Domain/Organization anchor queries
-        org_anchors = self._extract_org_anchors(" ".join(findings))
+        org_anchors = self._extract_org_anchors(all_text)
         for org in org_anchors[:2]:
             queries.append({
                 "query": f'"{org}" (targeted OR attacked OR compromised)',
                 "rationale": f"Org anchor pivot: {org}",
                 "type": "org_pivot",
-                "priority": 0.7,
+                "priority": 0.65,
                 "pivot_type": "organization",
             })
 
         # Temporal expansion queries
-        time_indicators = re.findall(r"\b(20\d{2})\b", " ".join(findings))
+        time_indicators = re.findall(r"\b(20[12]\d)\b", all_text)
         for year in list(set(time_indicators))[:1]:
             queries.append({
                 "query": f'timeline:{year} security incident',
                 "rationale": f"Temporal expansion: {year}",
                 "type": "temporal_expansion",
-                "priority": 0.5,
+                "priority": 0.45,
                 "pivot_type": "temporal",
             })
 
         # Sort by priority descending
         queries.sort(key=lambda x: x.get("priority", 0.5), reverse=True)
-        return queries
+        return queries[:10]  # Cap at 10 queries before dedup
+
+    def _find_entity_pairs(self, text: str, entities: List[str]) -> List[Tuple[str, str]]:
+        """Find entity pairs that co-occur in the same sentences."""
+        pairs = []
+        # Split into sentences
+        sentences = re.split(r'[.!?]', text)
+        entities_lower = {e.lower(): e for e in entities}
+
+        for sent in sentences:
+            sent_lower = sent.lower()
+            found_in_sent = []
+            for lower, original in entities_lower.items():
+                if lower in sent_lower and len(lower) > 2:
+                    found_in_sent.append(original)
+
+            # Pairs of entities in same sentence
+            for i in range(len(found_in_sent)):
+                for j in range(i + 1, len(found_in_sent)):
+                    pair = (found_in_sent[i], found_in_sent[j])
+                    # Avoid very similar pairs
+                    if pair[0].lower() not in pair[1].lower() and pair[1].lower() not in pair[0].lower():
+                        pairs.append(pair)
+
+        return pairs[:5]
+
+    def _find_ioc_entity_pairs(
+        self, iocs: List[Tuple[str, str]], entities: List[str], text: str
+    ) -> List[Tuple[str, str]]:
+        """Find IOCs that co-occur near entities in the text."""
+        pairs = []
+        text_lower = text.lower()
+
+        for ioc_type, ioc_val in iocs:
+            if len(ioc_val) < 3:
+                continue
+            ioc_lower = ioc_val.lower()
+            # Find entities mentioned near this IOC
+            for entity in entities:
+                entity_lower = entity.lower()
+                if entity_lower == ioc_lower:
+                    continue
+                # Check if entity appears within 100 chars of IOC
+                idx_ioc = text_lower.find(ioc_lower)
+                idx_entity = text_lower.find(entity_lower)
+                if idx_ioc >= 0 and idx_entity >= 0:
+                    if abs(idx_ioc - idx_entity) < 150:
+                        pairs.append((ioc_val, entity))
+
+        return pairs[:5]
 
     def _generate_ioc_follow_ups(self, iocs: List[Tuple[str, str]]) -> List[Dict[str, str]]:
-        """Generate IOC pivot suggestions."""
+        """Generate IOC pivot suggestions with actionable pivot queries."""
         follow_ups: List[Dict[str, str]] = []
 
         for ioc_type, ioc_value in iocs:
-            if ioc_type == "ip":
-                # Pivot: IP -> hostname, geolocation, related IOCs
+            if ioc_type == "cve":
+                # Pivot: CVE -> exploit-db, NVD, related malware, affected products
+                follow_ups.append({
+                    "pivot": "cve",
+                    "from": ioc_value,
+                    "to": "exploitation_status",
+                    "query": f'"{ioc_value}" exploit OR vulnerable OR patch OR affected',
+                    "rationale": f"CVE exploitation status: {ioc_value}",
+                    "priority": 0.95,
+                })
+                follow_ups.append({
+                    "pivot": "cve",
+                    "from": ioc_value,
+                    "to": "threat_actors",
+                    "query": f'"{ioc_value}" APT OR threat actor OR nation-state OR campaign',
+                    "rationale": f"CVE in-the-wild exploitation: {ioc_value}",
+                    "priority": 0.9,
+                })
+            elif ioc_type == "ip":
+                # Pivot: IP -> threat intel, geolocation, passive DNS, historical
                 follow_ups.append({
                     "pivot": "ip",
                     "from": ioc_value,
-                    "to": "hostname_lookup",
-                    "query": f"ip:{ioc_value} hostname OR org OR isp",
-                    "rationale": f"IP enrichment: {ioc_value}",
+                    "to": "threat_intel",
+                    "query": f'ip:{ioc_value} malware OR suspicious OR malicious OR threat',
+                    "rationale": f"IP threat intel: {ioc_value}",
+                    "priority": 0.95,
                 })
                 follow_ups.append({
                     "pivot": "ip",
                     "from": ioc_value,
                     "to": "passive_dns",
-                    "query": f"passive-dns {ioc_value}",
+                    "query": f'passive-dns {ioc_value}',
                     "rationale": f"Passive DNS for IP: {ioc_value}",
+                    "priority": 0.8,
+                })
+                follow_ups.append({
+                    "pivot": "ip",
+                    "from": ioc_value,
+                    "to": "historical_whois",
+                    "query": f'historical whois {ioc_value}',
+                    "rationale": f"Historical WHOIS: {ioc_value}",
+                    "priority": 0.6,
                 })
             elif ioc_type == "domain":
-                # Pivot: domain -> subdomains, related IPs, WHOIS
+                # Pivot: domain -> subdomains, WHOIS, related IOCs, malware check
                 follow_ups.append({
                     "pivot": "domain",
                     "from": ioc_value,
                     "to": "subdomain_enum",
-                    "query": f"subdomain:{ioc_value} OR dns:{ioc_value}",
+                    "query": f'subdomain:{ioc_value} OR dns:{ioc_value}',
                     "rationale": f"Subdomain enumeration: {ioc_value}",
+                    "priority": 0.85,
                 })
                 follow_ups.append({
                     "pivot": "domain",
                     "from": ioc_value,
                     "to": "whois",
-                    "query": f"whois:{ioc_value}",
+                    "query": f'whois:{ioc_value} OR domain registration',
                     "rationale": f"WHOIS lookup: {ioc_value}",
+                    "priority": 0.7,
                 })
-            elif ioc_type == "hash":
-                # Pivot: hash -> file info, VT lookup
+                follow_ups.append({
+                    "pivot": "domain",
+                    "from": ioc_value,
+                    "to": "malware_check",
+                    "query": f'url:{ioc_value} malware OR suspicious OR scan',
+                    "rationale": f"URL threat scan: {ioc_value}",
+                    "priority": 0.8,
+                })
+            elif ioc_type in ("md5", "sha1", "sha256"):
+                # Pivot: hash -> VT, file info, malware family
                 follow_ups.append({
                     "pivot": "hash",
-                    "from": ioc_value,
+                    "from": ioc_value[:16] + "..." if len(ioc_value) > 16 else ioc_value,
                     "to": "threat_intel",
-                    "query": f"hash:{ioc_value} malware OR virus OR threat",
-                    "rationale": f"Threat intel for hash: {ioc_value[:16]}...",
+                    "query": f'hash:{ioc_value} malware OR virus OR virus_total',
+                    "rationale": f"Threat intel for {ioc_type}: {ioc_value[:16]}...",
+                    "priority": 0.95,
+                })
+                follow_ups.append({
+                    "pivot": "hash",
+                    "from": ioc_value[:16] + "..." if len(ioc_value) > 16 else ioc_value,
+                    "to": "malware_family",
+                    "query": f'hash:{ioc_value} family OR variant OR related',
+                    "rationale": f"Malware family lookup: {ioc_value[:16]}...",
+                    "priority": 0.8,
+                })
+            elif ioc_type == "file":
+                # Pivot: filename -> malware samples, TTPs
+                follow_ups.append({
+                    "pivot": "file",
+                    "from": ioc_value,
+                    "to": "malware_samples",
+                    "query": f'"{ioc_value}" malware sample OR uploaded OR vt',
+                    "rationale": f"Malware sample search: {ioc_value}",
+                    "priority": 0.85,
                 })
 
-        return follow_ups
+        return follow_ups[:8]  # Cap at 8 follow-ups
 
     def _deduplicate_and_rank_queries(
         self, queries: List[Dict[str, Any]]
     ) -> List[Dict[str, str]]:
-        """Deduplicate and finalize query list."""
+        """Deduplicate and finalize query list with priority preservation."""
         seen: Set[str] = set()
-        unique: List[Dict[str, str]] = []
+        unique: List[Dict[str, Any]] = []
 
         for q in queries:
             # Normalize query for dedup
             norm = q["query"].lower().strip()
             if norm and norm not in seen:
                 seen.add(norm)
-                unique.append({
-                    "query": q["query"],
-                    "rationale": q.get("rationale", ""),
-                    "type": q.get("type", "general"),
-                })
+                unique.append(q)
 
-        return unique
+        # Sort by priority descending, then by pivot_type preference
+        pivot_preference = {
+            "ioc": 0,
+            "entity": 1,
+            "relationship": 2,
+            "organization": 3,
+            "source": 4,
+            "temporal": 5,
+        }
+
+        def sort_key(q):
+            pref = pivot_preference.get(q.get("pivot_type", ""), 9)
+            return (0 - q.get("priority", 0.5), pref)
+
+        unique.sort(key=sort_key)
+
+        return [
+            {
+                "query": q["query"],
+                "rationale": q.get("rationale", ""),
+                "type": q.get("type", "general"),
+                "priority": q.get("priority", 0.5),
+                "pivot_type": q.get("pivot_type", "general"),
+            }
+            for q in unique[:8]
+        ]
 
     def _extract_relationships_heuristic(self, text: str) -> List[Tuple[str, str, str]]:
         """Extract relationship triples from text."""

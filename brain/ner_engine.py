@@ -877,6 +877,400 @@ class IOCScorer:
         return round(min(1.0, max(0.0, combined)), 4)
 
 
+# ============================================================================
+# Sprint F150I: Bounded Entity Seams — findings/texts → ranked entities
+# ============================================================================
+
+def _normalize_entity_text(text: str) -> str:
+    """Lowercase + strip for dedup."""
+    return text.strip().lower()
+
+
+def _extract_snippet(text: str, entity_value: str, context_chars: int = 60) -> str:
+    """Extract a short contextual snippet around entity occurrence."""
+    if not text or not entity_value:
+        return ""
+    pos = _normalize_entity_text(text).find(_normalize_entity_text(entity_value))
+    if pos < 0:
+        return text[:context_chars] + ("..." if len(text) > context_chars else "")
+    start = max(0, pos - context_chars // 2)
+    end = min(len(text), pos + len(entity_value) + context_chars // 2)
+    snippet = text[start:end]
+    if start > 0:
+        snippet = "…" + snippet
+    if end < len(text):
+        snippet = snippet + "…"
+    return snippet
+
+
+def _guess_entity_type(ioc_type: str | None, raw_text: str) -> str:
+    """Guess entity type from IOC type or text patterns."""
+    if ioc_type:
+        return ioc_type
+    # Fallback heuristics
+    raw_lower = raw_text.lower()
+    if _re.search(r'\b(?:Corp|LLC|Inc|Ltd|Technologies|Software|Systems|Security)\b', raw_text):
+        return "organization"
+    if _re.search(r'\b(?:Mr|Mrs|Ms|Dr|Prof)\.\s+\w+', raw_text):
+        return "person"
+    if _re.search(r'\b(?:St|City|Town|Country|Road|Ave|Boulevard)\b', raw_text):
+        return "location"
+    if _re.search(r'\b[A-Fa-f0-9]{32,64}\b', raw_text):
+        return "hash"
+    return "unknown"
+
+
+def _ioc_type_to_entity_type(ioc_type: str) -> str:
+    """Map IOC type string to entity type string."""
+    mapping = {
+        "cve": "cve", "sha256": "hash", "sha1": "hash", "md5": "hash",
+        "email": "email", "url": "url", "ipv4": "ipv4", "ipv6": "ipv6",
+        "domain": "domain",
+    }
+    return mapping.get(ioc_type, ioc_type)
+
+
+def _extract_iocs_from_text_bounded(text: str) -> list[dict]:
+    """
+    Bounded wrapper around extract_iocs_from_text.
+    Returns list[dict] with ioc_type as 'type' field for uniform interface.
+    """
+    iocs = extract_iocs_from_text(text)
+    for ioc in iocs:
+        ioc["type"] = _ioc_type_to_entity_type(ioc.get("ioc_type", ""))
+    return iocs
+
+
+def extract_entities_from_texts(
+    texts: list[str],
+    *,
+    min_count: int = 1,
+    max_entities: int = 100,
+    include_types: list[str] | None = None,
+) -> list[dict]:
+    """
+    Extract and rank entities from a list of raw texts.
+    Falls back to IOC regex patterns when no model is loaded.
+
+    Args:
+        texts: List of raw text strings.
+        min_count: Minimum occurrence count to include entity (default 1).
+        max_entities: Maximum number of top entities to return (default 100).
+        include_types: Optional whitelist of entity types to include.
+
+    Returns:
+        List of entity dicts sorted by (count * confidence) descending:
+            {
+                "value": str,          # normalized entity text
+                "type": str,            # cve, hash, email, url, ipv4, domain, organization, ...
+                "count": int,          # occurrence count across texts
+                "confidence": float,   # 0.0-1.0 combined confidence
+                "snippets": list[str], # up to 3 contextual snippets
+            }
+    """
+    if not texts:
+        return []
+
+    # 1. Collect entities from all texts (fail-soft)
+    entity_map: dict[tuple[str, str], dict] = {}
+
+    for text in texts:
+        if not text:
+            continue
+        # Cap each text for RAM safety
+        text = text[:15_000]
+
+        try:
+            # Primary: IOC regex pass
+            iocs = _extract_iocs_from_text_bounded(text)
+            for ioc in iocs:
+                key = (_normalize_entity_text(ioc["value"]), ioc["type"])
+                if key not in entity_map:
+                    entity_map[key] = {
+                        "value": ioc["value"],
+                        "type": ioc["type"],
+                        "count": 0,
+                        "confidence": ioc.get("confidence", 0.5),
+                        "snippets": [],
+                    }
+                entity_map[key]["count"] += 1
+                snippet = _extract_snippet(text, ioc["value"])
+                if snippet and snippet not in entity_map[key]["snippets"]:
+                    entity_map[key]["snippets"].append(snippet)
+                    # Keep max 3 snippets per entity
+                    if len(entity_map[key]["snippets"]) > 3:
+                        entity_map[key]["snippets"].pop(0)
+        except Exception:
+            pass
+
+    # 2. Filter and rank
+    entities = []
+    for (value, etype), ent in entity_map.items():
+        if include_types and etype not in include_types:
+            continue
+        if ent["count"] < min_count:
+            continue
+        # Boost confidence by count (log-scale)
+        ent["confidence"] = round(
+            min(1.0, ent["confidence"] + _math.log1p(ent["count"] - 1) * 0.05),
+            4
+        )
+        entities.append(ent)
+
+    # 3. Sort by count * confidence, return top N
+    entities.sort(key=lambda e: e["count"] * e["confidence"], reverse=True)
+    return entities[:max_entities]
+
+
+def extract_entities_from_findings(
+    findings: list[dict],
+    *,
+    min_count: int = 1,
+    max_entities: int = 100,
+    include_types: list[str] | None = None,
+) -> list[dict]:
+    """
+    Extract and rank entities from structured findings.
+    Each finding should have 'text' field; optional 'url' and 'source' for co-occurrence.
+
+    Args:
+        findings: List of dicts with keys:
+            - text (str): Raw text content.
+            - url (str, optional): Source URL.
+            - source (str, optional): Source name (e.g. "shodan", "whois").
+        min_count: Minimum occurrence count (default 1).
+        max_entities: Maximum top entities to return (default 100).
+        include_types: Optional type whitelist.
+
+    Returns:
+        List of entity dicts sorted by (count * confidence):
+            {
+                "value": str,
+                "type": str,
+                "count": int,
+                "confidence": float,
+                "snippets": list[str],
+                "sources": list[str],    # unique source names
+                "urls": list[str],       # unique source URLs
+            }
+    """
+    if not findings:
+        return []
+
+    # Extract texts and metadata
+    texts: list[str] = []
+    source_by_text: dict[int, str] = {}  # index -> source
+    url_by_text: dict[int, str] = {}     # index -> url
+
+    for f in findings:
+        text = f.get("text", "") if isinstance(f, dict) else str(f)
+        if text:
+            idx = len(texts)
+            texts.append(text)
+            if isinstance(f, dict):
+                if f.get("source"):
+                    source_by_text[idx] = f["source"]
+                if f.get("url"):
+                    url_by_text[idx] = f["url"]
+
+    # 1. Extract entities from all texts
+    entity_map: dict[tuple[str, str], dict] = {}
+
+    for idx, text in enumerate(texts):
+        if not text:
+            continue
+        text = text[:15_000]
+        source = source_by_text.get(idx)
+        url = url_by_text.get(idx)
+
+        try:
+            iocs = _extract_iocs_from_text_bounded(text)
+            for ioc in iocs:
+                key = (_normalize_entity_text(ioc["value"]), ioc["type"])
+                if key not in entity_map:
+                    entity_map[key] = {
+                        "value": ioc["value"],
+                        "type": ioc["type"],
+                        "count": 0,
+                        "confidence": ioc.get("confidence", 0.5),
+                        "snippets": [],
+                        "sources": [],
+                        "urls": [],
+                    }
+                entity_map[key]["count"] += 1
+                snippet = _extract_snippet(text, ioc["value"])
+                if snippet and snippet not in entity_map[key]["snippets"]:
+                    entity_map[key]["snippets"].append(snippet)
+                    if len(entity_map[key]["snippets"]) > 3:
+                        entity_map[key]["snippets"].pop(0)
+                if source and source not in entity_map[key]["sources"]:
+                    entity_map[key]["sources"].append(source)
+                if url and url not in entity_map[key]["urls"]:
+                    entity_map[key]["urls"].append(url)
+        except Exception:
+            pass
+
+    # 2. Filter and rank
+    entities = []
+    for (value, etype), ent in entity_map.items():
+        if include_types and etype not in include_types:
+            continue
+        if ent["count"] < min_count:
+            continue
+        ent["confidence"] = round(
+            min(1.0, ent["confidence"] + _math.log1p(ent["count"] - 1) * 0.05),
+            4
+        )
+        entities.append(ent)
+
+    entities.sort(key=lambda e: e["count"] * e["confidence"], reverse=True)
+    return entities[:max_entities]
+
+
+# ============================================================================
+# Sprint F150I: Co-occurrence hints — domain/url/org/ip cross-signal
+# ============================================================================
+
+def _extract_cooccurrence_hints_from_text(text: str) -> dict[str, list[str]]:
+    """
+    Extract co-occurrence hints: domains mentioned alongside orgs, IPs, emails.
+    Returns: {"domains": [...], "urls": [...], "orgs": [...], "ips": [...]}
+    """
+    hints: dict[str, list[str]] = {"domains": [], "urls": [], "orgs": [], "ips": []}
+
+    # Quick pass - cap at 5KB
+    text = text[:5_000]
+    seen_domain: set[str] = set()
+    seen_url: set[str] = set()
+    seen_org: set[str] = set()
+    seen_ip: set[str] = set()
+
+    # IOCs
+    for ioc in _extract_iocs_from_text_bounded(text):
+        t = ioc.get("type", "")
+        v = ioc.get("value", "")
+        if t == "domain" and v not in seen_domain:
+            seen_domain.add(v)
+            hints["domains"].append(v)
+        elif t == "url" and v not in seen_url:
+            seen_url.add(v)
+            hints["urls"].append(v)
+        elif t in ("ipv4", "ipv6") and v not in seen_ip:
+            seen_ip.add(v)
+            hints["ips"].append(v)
+
+    # Org entities via spaCy
+    nlp = _get_spacy()
+    if nlp is not None:
+        try:
+            doc = nlp(text[:2_000])
+            for ent in doc.ents:
+                if ent.label_ in ("ORG", "PRODUCT"):
+                    v = ent.text.strip()
+                    if v and v not in seen_org:
+                        seen_org.add(v)
+                        hints["orgs"].append(v)
+        except Exception:
+            pass
+
+    # Limit each list
+    for k in hints:
+        hints[k] = hints[k][:10]
+
+    return hints
+
+
+def build_entity_cooccurrence_map(
+    findings: list[dict],
+    *,
+    max_findings: int = 50,
+) -> dict[str, list[dict]]:
+    """
+    Build a co-occurrence map across findings.
+    Groups entities that appear in the same or closely related findings.
+
+    Args:
+        findings: List of findings dicts (with 'text', optional 'url', 'source').
+        max_findings: Cap on how many findings to process (default 50).
+
+    Returns:
+        Dict with entity co-occurrence hints:
+            {
+                "domain_org": [(domain, org, count), ...],
+                "domain_ip": [(domain, ip, count), ...],
+                "url_org": [(url, org, count), ...],
+                "by_domain": {domain: {"orgs": [...], "ips": [...], "urls": [...]}},
+            }
+    """
+    if not findings:
+        return {}
+
+    findings = findings[:max_findings]
+
+    # Collect hints per finding
+    finding_hints: list[dict] = []
+    for f in findings:
+        text = f.get("text", "") if isinstance(f, dict) else str(f)
+        if not text:
+            finding_hints.append({})
+            continue
+        hint = _extract_cooccurrence_hints_from_text(text)
+        finding_hints.append(hint)
+
+    # Build co-occurrence
+    domain_org_map: dict[tuple[str, str], int] = {}
+    domain_ip_map: dict[tuple[str, str], int] = {}
+    url_org_map: dict[tuple[str, str], int] = {}
+    by_domain: dict[str, dict[str, list[str]]] = {}
+
+    for hints in finding_hints:
+        domains = hints.get("domains", [])
+        urls = hints.get("urls", [])
+        orgs = hints.get("orgs", [])
+        ips = hints.get("ips", [])
+
+        # Domain ↔ Org
+        for d in domains:
+            if d not in by_domain:
+                by_domain[d] = {"orgs": [], "ips": [], "urls": []}
+            for o in orgs:
+                key = (d, o)
+                domain_org_map[key] = domain_org_map.get(key, 0) + 1
+                if o not in by_domain[d]["orgs"]:
+                    by_domain[d]["orgs"].append(o)
+
+        # Domain ↔ IP
+        for d in domains:
+            for ip in ips:
+                key = (d, ip)
+                domain_ip_map[key] = domain_ip_map.get(key, 0) + 1
+                if ip not in by_domain[d]["ips"]:
+                    by_domain[d]["ips"].append(ip)
+
+        # URL ↔ Org
+        for u in urls:
+            for o in orgs:
+                key = (u, o)
+                url_org_map[key] = url_org_map.get(key, 0) + 1
+
+        # URL under domain
+        for d in domains:
+            for u in urls:
+                if u not in by_domain[d]["urls"]:
+                    by_domain[d]["urls"].append(u)
+
+    # Convert to sorted lists
+    def _top_k(mapping: dict, k: int = 10) -> list:
+        return sorted(mapping.items(), key=lambda x: x[1], reverse=True)[:k]
+
+    return {
+        "domain_org": [(d, o, c) for (d, o), c in _top_k(domain_org_map)],
+        "domain_ip": [(d, ip, c) for (d, ip), c in _top_k(domain_ip_map)],
+        "url_org": [(u, o, c) for (u, o), c in _top_k(url_org_map)],
+        "by_domain": by_domain,
+    }
+
+
 __all__ = [
     "extract_iocs_from_text",
     "_IOC_PATTERNS",
@@ -885,4 +1279,8 @@ __all__ = [
     "NEREngine",
     "get_ner_engine",
     "reset_ner_engine",
+    # F150I bounded entity seams
+    "extract_entities_from_texts",
+    "extract_entities_from_findings",
+    "build_entity_cooccurrence_map",
 ]

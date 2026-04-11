@@ -20,10 +20,7 @@ from pathlib import Path
 import aiohttp
 import orjson
 
-from hledac.universal.core.resource_governor import (
-    UMAAlarmDispatcher,
-    sample_uma_status,
-)
+from hledac.universal.core.resource_governor import sample_uma_status
 from hledac.universal.intelligence.ct_log_client import CTLogClient
 from hledac.universal.knowledge.duckdb_store import DuckDBShadowStore
 from hledac.universal.knowledge.semantic_store import SemanticStore
@@ -45,25 +42,6 @@ _SPRINT_FEED_SOURCES = [
     "feodo_ip",
     "openphish_feed",
 ]
-
-
-# =============================================================================
-# UMA → Scheduler callbacks
-# =============================================================================
-
-
-async def _handle_uma_critical(scheduler) -> None:
-    """Called when UMA transitions to CRITICAL — request early WINDUP."""
-    logger.warning("[UMA] CRITICAL — requesting early WINDUP")
-    if hasattr(scheduler, "request_early_windup"):
-        scheduler.request_early_windup()
-
-
-async def _handle_uma_emergency(scheduler) -> None:
-    """Called when UMA transitions to EMERGENCY — abort sprint."""
-    logger.error("[UMA] EMERGENCY — aborting sprint")
-    if hasattr(scheduler, "request_immediate_abort"):
-        scheduler.request_immediate_abort()
 
 
 # =============================================================================
@@ -252,6 +230,59 @@ async def run_sprint(
                     elapsed = _phase_times[next_ph] - _phase_times[ph]
                     logger.info(f"[{sprint_id}] {ph}→{next_ph}: {elapsed:.1f}s")
 
+        # --- Derived metrics --------------------------------------------------------
+        findings_per_min = (result.accepted_findings / (actual_duration / 60.0)) if actual_duration > 0 else 0.0
+        total_seen = result.unique_entry_hashes_seen + result.duplicate_entry_hashes_skipped
+        dup_rate = (result.duplicate_entry_hashes_skipped / total_seen * 100) if total_seen > 0 else 0.0
+        feed_fnd = result.accepted_findings - result.public_accepted_findings
+        public_pct = (result.public_accepted_findings / result.accepted_findings * 100) if result.accepted_findings > 0 else 0.0
+
+        # Source mix
+        src_mix: list[str] = []
+        for src, cnt in sorted(result.hits_per_source.items(), key=lambda x: x[1], reverse=True):
+            src_mix.append(f"{src}={cnt}")
+        src_mix_str = ", ".join(src_mix) if src_mix else "none"
+
+        # Verdict heuristics
+        if result.aborted:
+            verdict = "⚠️  ABORTED"
+        elif result.accepted_findings == 0:
+            if result.public_discovered > 0:
+                verdict = "🔍  NOVELTY: public found hits, feed accepted nothing"
+            elif result.total_pattern_hits == 0:
+                verdict = "🗿  DEPLETED: no pattern hits anywhere"
+            else:
+                verdict = "🤷  SILENT: pattern hits but no accepted findings"
+        elif dup_rate > 85:
+            verdict = "📦  NOISE-HEAVY: duplicated heavily"
+        elif public_pct > 60:
+            verdict = "🌐  PUBLIC-LED: public discovery dominated"
+        elif public_pct > 25:
+            verdict = "⚖️  MIXED: public contributed meaningfully"
+        elif feed_fnd > 0:
+            verdict = "✅  FEED-LED: feed sources strong"
+        else:
+            verdict = "✅  SIGNAL: good feed performance"
+
+        # Next-step hint (heuristic, no new planner)
+        next_hint: str
+        if result.accepted_findings == 0 and result.total_pattern_hits == 0:
+            next_hint = "query may be too narrow — broaden terms or switch seed"
+        elif dup_rate > 80:
+            next_hint = "high dup rate — consider narrowing query scope"
+        elif public_pct > 60:
+            next_hint = "public discovery effective — let it run longer next time"
+        elif public_pct < 10 and feed_fnd == 0:
+            next_hint = "feed yield low — check if sources still alive (urlhaus, threatfox)"
+        elif public_pct < 10 and feed_fnd > 0:
+            next_hint = "feed performing — rely on feed-first, use public as supplemental"
+        elif result.public_discovered > 0 and result.public_fetched == 0:
+            next_hint = "public discovered but not fetched — check network/TOR"
+        elif result.stop_requested:
+            next_hint = "early stop triggered — lower threshold or widen query"
+        else:
+            next_hint = "current query and source mix working — continue as-is"
+
         logger.info(
             f"[SPRINT DONE] {sprint_id} | "
             f"findings: {result.accepted_findings} | "
@@ -259,6 +290,15 @@ async def run_sprint(
             f"duplicates: {result.duplicate_entry_hashes_skipped} | "
             f"phase: {result.final_phase}"
         )
+        logger.info(
+            f"[SUMMARY] {verdict} | "
+            f"feed={feed_fnd} public={result.public_accepted_findings}({public_pct:.0f}%) | "
+            f"f/min={findings_per_min:.2f} | dup={dup_rate:.1f}% | "
+            f"public: disc={result.public_discovered} fetch={result.public_fetched} "
+            f"match={result.public_matched_patterns} stored={result.public_stored_findings}"
+        )
+        logger.info(f"[NEXT] {next_hint}")
+        logger.info(f"[SOURCES] {src_mix_str}")
 
         # Sprint 8SA + 8UA: orjson JSON report export
         # Use /tmp directly to avoid FileExistsError when export_dir is a file
@@ -267,15 +307,33 @@ async def run_sprint(
             "sprint_id": sprint_id,
             "query": query,
             "duration_s": duration_s,
+            "actual_duration_s": actual_duration,
             "accepted_findings": result.accepted_findings,
+            "feed_findings": feed_fnd,
+            "public_accepted_findings": result.public_accepted_findings,
+            "public_discovered": result.public_discovered,
+            "public_fetched": result.public_fetched,
+            "public_matched_patterns": result.public_matched_patterns,
+            "public_stored_findings": result.public_stored_findings,
+            "public_error": result.public_error,
             "cycles_completed": result.cycles_completed,
             "cycles_started": result.cycles_started,
+            "unique_entry_hashes_seen": result.unique_entry_hashes_seen,
             "duplicate_entry_hashes_skipped": result.duplicate_entry_hashes_skipped,
+            "total_pattern_hits": result.total_pattern_hits,
+            "dup_rate_pct": round(dup_rate, 2),
+            "findings_per_min": round(findings_per_min, 2),
             "final_phase": result.final_phase,
             "aborted": result.aborted,
             "abort_reason": result.abort_reason,
+            "stop_requested": result.stop_requested,
+            "entries_per_source": result.entries_per_source,
+            "hits_per_source": result.hits_per_source,
+            "export_paths": result.export_paths,
             "uma_peak_gib": uma_peak_gib - uma_baseline_gib,
             "synthesis_success": result.accepted_findings > 0,
+            "verdict": verdict,
+            "next_hint": next_hint,
             "phase_timing": {
                 ph: round(_phase_times.get(ph, 0) - _phase_times.get("BOOT", 0), 2)
                 for ph in phases if ph in _phase_times

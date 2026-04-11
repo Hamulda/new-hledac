@@ -50,6 +50,8 @@ class DiscoveryHit(msgspec.Struct, frozen=True, gc=False):
     Single web discovery result.
 
     All string fields are never None — None is normalized to "".
+    score is a query-aware rank signal in [0.0, 1.0]; higher = more relevant.
+    reason is an optional short tag describing why this hit ranked well.
     """
 
     query: str
@@ -59,6 +61,8 @@ class DiscoveryHit(msgspec.Struct, frozen=True, gc=False):
     source: str  # always "duckduckgo"
     rank: int
     retrieved_ts: float
+    score: float = 0.0   # relevance signal, not guaranteed to be populated
+    reason: str | None = None  # short tag: "exact_domain", "quoted_match", etc.
 
 
 class DiscoveryBatchResult(msgspec.Struct, frozen=True, gc=False):
@@ -104,8 +108,182 @@ def last_error() -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# URL normalisation for per-call dedup
+# Query shaping — preserves quoted strings, entity-like tokens, IOC patterns
 # ---------------------------------------------------------------------------
+
+_REQUOTEABLE_QUOTE_CHARS = {'"', "'", "\u201c", "\u201d", "\u00ab", "\u00bb"}
+
+
+def _extract_quoted_tokens(query: str) -> tuple[list[str], str]:
+    """
+    Split query into quoted phrases and the remaining raw text.
+
+    Returns:
+        (list of de-quoted exact phrases, query with quoted parts stripped)
+    """
+    quoted: list[str] = []
+    remaining = query
+    for qc in _REQUOTEABLE_QUOTE_CHARS:
+        if qc not in remaining:
+            continue
+        parts = remaining.split(qc)
+        # Even-indexed parts = outside quotes; odd-indexed = inside quotes
+        for idx, part in enumerate(parts):
+            if idx % 2 == 1 and part.strip():
+                quoted.append(part.strip())
+        # Rebuild remaining — remove quoted spans entirely so raw query is clean
+        for i, part in enumerate(parts):
+            if i % 2 == 1:
+                remaining = remaining.replace(qc + part + qc, "", 1)
+    # Strip placeholder noise
+    cleaned = " ".join(remaining.split())
+    return quoted, cleaned
+
+
+# IOC / domain / time patterns that deserve special treatment
+_IOC_DOMAIN_RE = __import__("re").compile(
+    r"(?:\w+\.){1,6}(?:com|org|net|io|co|uk|edu|gov|mil|info|biz|ru|cn|de|fr|nl|pl|eu|us|ca|au|at|be|ch|jp|kr|br|mx|za|in|it|es|nl|se|no|fi|dk|cz|sk|hu|ro|gr|pt|tr|il|ae|sa|ng|ke|gh|eg|ua|rs|by|kz|uz|tj|ir|iq|pk|bd|kh|la|mm|vn|th|my|sg|ph|id|tl|tz|et|zm|zw|bw|na|ug|rw|mw|mz|ao|ci|cm|sn|gd|jm|ht|cu|do|ve|co|pe|bo|cl|ar|uy|p ypy|py|pr|pa|cr|ni|sv|gt|hn|bz|gy|sr|gf|ec|py)")
+_IOC_IP_RE = __import__("re").compile(
+    r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def _tokenize_raw_query(query: str) -> set[str]:
+    """Lower-case word tokens from the non-quoted part of the query."""
+    return {
+        t.lower().strip(".,;:!?()[]{}")
+        for t in query.split()
+        if len(t) > 1
+    }
+
+
+def _build_signals(
+    query: str,
+    title: str,
+    url: str,
+    snippet: str,
+) -> dict:
+    """
+    Compute a small dict of query-aware signals for ranking.
+    All text fields are lower-cased before comparison.
+    """
+    quoted_phrases, raw_query = _extract_quoted_tokens(query)
+    query_tokens = _tokenize_raw_query(raw_query)
+    lower_title = title.lower()
+    lower_url = url.lower()
+    lower_snippet = snippet.lower()
+
+    score = 0.0
+    reasons: list[str] = []
+
+    # Exact quoted phrase match in title → strong signal
+    for phrase in quoted_phrases:
+        if phrase.lower() in lower_title:
+            score += 0.4
+            reasons.append("quoted_title")
+            break
+
+    # Domain / host exact match — IOC-style domain in query matches URL host
+    if _IOC_DOMAIN_RE.search(url):
+        domain_in_url = _IOC_DOMAIN_RE.search(url).group(0) if _IOC_DOMAIN_RE.search(url) else ""
+        if domain_in_url and domain_in_url.lower() in lower_url:
+            score += 0.35
+            reasons.append("domain_hit")
+
+    # IP address in query matches URL
+    if _IOC_IP_RE.search(query):
+        ip = _IOC_IP_RE.search(query).group(0)
+        if ip in url:
+            score += 0.35
+            reasons.append("ip_hit")
+
+    # Title has substantial overlap with query tokens (excluding quoted part)
+    if query_tokens:
+        title_words = {
+            w.strip(".,;:!?()[]{}") for w in lower_title.split() if len(w) > 2
+        }
+        overlap = query_tokens & title_words
+        if overlap:
+            score += min(0.3, len(overlap) * 0.07)
+            reasons.append("title_overlap")
+
+    # Snippet mentions query tokens (weaker signal)
+    if query_tokens:
+        snippet_words = {
+            w.strip(".,;:!?()[]{}") for w in lower_snippet.split() if len(w) > 2
+        }
+        snippet_overlap = query_tokens & snippet_words
+        if snippet_overlap:
+            score += min(0.15, len(snippet_overlap) * 0.04)
+            reasons.append("snippet_overlap")
+
+    # Path depth signal: short paths tend to be more authoritative
+    try:
+        parsed = urlparse.urlparse(url)
+        path_depth = len([s for s in parsed.path.split("/") if s])
+        if path_depth <= 2:
+            score += 0.05
+        elif path_depth >= 5:
+            score -= 0.05
+    except Exception:
+        pass
+
+    # Clamp
+    score = max(0.0, min(1.0, score))
+    return {
+        "score": score,
+        "reasons": reasons,
+    }
+
+
+def _is_noise_result(title: str, url: str, snippet: str) -> bool:
+    """
+    Return True for obvious low-ROI / thin / noise results.
+
+    Noise patterns:
+    - Title is exactly the query (DDG self-loop query page)
+    - URL is a known ad/partner link or redirect stub
+    - Snippet is empty or is just "title • description" template noise
+    - Title is pure ASCII-art / repeated chars / emoji-only
+    """
+    t = title.strip()
+    s = snippet.strip()
+    u = url.lower()
+
+    # Self-loop: title ~= query (exact repeat of what you searched)
+    if t and t.lower() == s[: len(t)].lower():
+        return True
+
+    # Empty or near-empty content
+    if not t or len(t) < 3:
+        return True
+    if not s and len(u) > 100:
+        # URL is long (probable tracking/campaign URL) with zero snippet
+        return True
+
+    # Known noise URL patterns
+    if any(
+        p in u
+        for p in (
+            "duckduckgo.com/?q=",
+            "bing.com/search?",
+            "google.com/search",
+            "ecosia.org/search",
+            "startpage.com/search",
+            "swisscows.com/search",
+            "search.yahoo.com",
+            "search results for",
+            "/search/?q=",
+            "search/?q=",
+            "q=%",
+        )
+    ):
+        return True
+
+    # Title is pure repeating chars / symbols (ASCII art noise)
+    if len(t) > 10 and len(set(t)) < 3:
+        return True
+
+    return False
 
 # Tracking / junk query parameters to strip during normalisation.
 # Covers utm_*, fbclid, gclid, msclkid, dclid, twclid, at_* and similar.
@@ -339,8 +517,7 @@ async def async_search_public_web(
         _last_error = error_tag
         return DiscoveryBatchResult(hits=(), error=error_tag)
 
-    # ---- normalise + dedup + domain-diversity -------------------------------
-    # URL -> (original_rank, DiscoveryHit) — preserve first-seen
+    # ---- noise filter + signal-based ranking ---------------------------------
     seen_urls: dict[str, int] = {}
     host_counts: dict[str, int] = {}
     retrieved_ts = time.time()
@@ -349,8 +526,12 @@ async def async_search_public_web(
 
     for raw in raw_hits:
         raw_url = raw.get("url") or ""
-        title = raw.get("title") or ""
-        snippet = raw.get("body") or raw.get("snippet") or ""
+        title = (raw.get("title") or "").strip()
+        snippet = (raw.get("body") or raw.get("snippet") or "").strip()
+
+        # Skip empty / noise results early
+        if _is_noise_result(title, raw_url, snippet):
+            continue
 
         norm = _normalize_url_for_dedup(raw_url)
         if not norm or norm in seen_urls:
@@ -358,11 +539,14 @@ async def async_search_public_web(
 
         host = _extract_host(norm)
         if host and host_counts.get(host, 0) >= max_from_host:
-            # Domain cap reached — skip this hit, don't break to allow smaller hosts through
             continue
 
         seen_urls[norm] = len(hits_list)
         host_counts[host] = host_counts.get(host, 0) + 1
+
+        signals = _build_signals(trimmed, title, raw_url, snippet)
+        reason = signals["reasons"][0] if signals["reasons"] else None
+
         hits_list.append(
             DiscoveryHit(
                 query=trimmed,
@@ -370,15 +554,17 @@ async def async_search_public_web(
                 url=raw_url,
                 snippet=snippet,
                 source=SOURCE_NAME,
-                rank=len(hits_list),
+                rank=0,
                 retrieved_ts=retrieved_ts,
+                score=signals["score"],
+                reason=reason,
             )
         )
 
-    # Enforce final max_results cap after dedup
-    final_hits = tuple(hits_list[:max_results])
+    # Sort by signal score descending, then by rank (first-seen) as tiebreak
+    hits_list.sort(key=lambda h: (-h.score, h.rank))
 
-    # Re-rank to reflect final slice order
+    # Re-rank to reflect sorted order
     final_hits = tuple(
         DiscoveryHit(
             query=h.query,
@@ -388,8 +574,10 @@ async def async_search_public_web(
             source=h.source,
             rank=i,
             retrieved_ts=h.retrieved_ts,
+            score=h.score,
+            reason=h.reason,
         )
-        for i, h in enumerate(final_hits)
+        for i, h in enumerate(hits_list[:max_results])
     )
 
     return DiscoveryBatchResult(hits=final_hits, error=None)

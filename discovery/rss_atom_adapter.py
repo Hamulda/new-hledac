@@ -83,6 +83,14 @@ class FeedEntryHit(msgspec.Struct, frozen=True, gc=False):
     feed_title: str = ""
     # Sprint F150H: language hint from feed metadata (ISO 639-1 or similar)
     feed_language: str = ""
+    # F150J: freshness score 0.0-1.0 (recent=1.0, stale=0.1, future=penalized)
+    freshness_score: float = 0.0
+    # F150J: quality score 0.0-1.0 (rich_content, author, title/summary length)
+    quality_score: float = 0.0
+    # F150J: freshness tier label — recent|fresh|aged|stale|future|unknown
+    freshness_tier: str = ""
+    # F150J: human-readable reason for selection/rank
+    selection_reason: str = ""
 
 
 class FeedBatchResult(msgspec.Struct, frozen=True, gc=False):
@@ -271,6 +279,127 @@ def _parse_published_ts(raw: str | None) -> float | None:
     except Exception:
         pass
     return None
+
+
+# ---------------------------------------------------------------------------
+# F150J: Freshness + Quality scoring (pure local, no new deps)
+# ---------------------------------------------------------------------------
+
+# Freshness tiers: age in seconds from retrieved_ts
+_TIER_RECENT_MAX: float = 3 * 86400       # ≤3 days  → "recent"
+_TIER_FRESH_MAX: float = 14 * 86400       # ≤14 days → "fresh"
+_TIER_AGED_MAX: float = 60 * 86400         # ≤60 days → "aged"
+_TIER_STALE_MAX: float = 180 * 86400      # ≤180 days → "stale"
+# >180 days or future → "unknown"
+
+# Future penalty: entries with published_ts > retrieved_ts + this gap are penalized
+_FUTURE_GAP_MAX: float = 3600 * 6        # 6 hours ahead = tolerated noise
+
+
+def _compute_freshness(
+    published_ts: float | None,
+    retrieved_ts: float,
+) -> tuple[float, str]:
+    """
+    Compute freshness_score (0.0-1.0) and freshness_tier.
+
+    Scoring:
+    - recent (≤3d):   score 1.0
+    - fresh (≤14d):   score 0.85
+    - aged (≤60d):   score 0.6
+    - stale (≤180d): score 0.3
+    - very old:       score 0.1
+    - future (>retrieved_ts+6h): penalize by gap ratio, min 0.05
+    - None/unparseable: 0.05 (treat as very stale, not discarded)
+    """
+    if published_ts is None:
+        return 0.05, "unknown"
+
+    age = retrieved_ts - published_ts
+
+    if age < 0:
+        # Future timestamp
+        future_gap = abs(age)
+        if future_gap > _FUTURE_GAP_MAX:
+            # More than 6h in the future → heavy penalty
+            penalty = max(0.05, 0.3 * (1 - future_gap / (86400 * 7)))
+            return penalty, "future"
+        else:
+            # Within tolerance — near-present, small bonus
+            return 0.95, "recent"
+
+    if age <= _TIER_RECENT_MAX:
+        return 1.0, "recent"
+    if age <= _TIER_FRESH_MAX:
+        return 0.85, "fresh"
+    if age <= _TIER_AGED_MAX:
+        return 0.6, "aged"
+    if age <= _TIER_STALE_MAX:
+        return 0.3, "stale"
+    return 0.1, "unknown"
+
+
+def _compute_quality(entry: FeedEntryHit) -> float:
+    """
+    Compute quality_score (0.0-1.0) from entry metadata.
+    Factors: rich_content, summary length, title length,
+    entry_author presence, feed_language presence, URL structure.
+    """
+    score = 0.0
+
+    # rich_content — most important signal
+    rc = entry.rich_content
+    if rc:
+        rc_len = len(rc)
+        if rc_len > 500:
+            score += 0.35
+        elif rc_len > 100:
+            score += 0.2
+        else:
+            score += 0.1
+
+    # summary length (words)
+    summary_words = len(entry.summary.split())
+    if summary_words >= 30:
+        score += 0.15
+    elif summary_words >= 10:
+        score += 0.08
+    elif summary_words > 0:
+        score += 0.03
+
+    # title length (chars, excluding whitespace)
+    title_len = len(entry.title.strip())
+    if 30 <= title_len <= 120:
+        score += 0.12
+    elif title_len > 0:
+        score += 0.04
+
+    # entry_author presence
+    if entry.entry_author.strip():
+        score += 0.12
+
+    # feed_language presence
+    if entry.feed_language.strip():
+        score += 0.08
+
+    # feed_title presence (metadata richness)
+    if entry.feed_title.strip():
+        score += 0.05
+
+    # URL structure — has path beyond TLD
+    eu = entry.entry_url
+    if eu:
+        try:
+            parsed = urllib.parse.urlparse(eu)
+            path = parsed.path.rstrip("/")
+            if path.count("/") >= 2:
+                score += 0.08  # structured URL = article
+            elif path.count("/") == 1 and len(path) > 1:
+                score += 0.04
+        except Exception:
+            pass
+
+    return min(score, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -850,10 +979,69 @@ async def async_fetch_feed_entries(
         seen_keys.add(key)
         deduped.append(entry)
 
-    # Apply max_entries and re-rank
+    # ---- F150J: Score + pre-filter + deterministic rerank ----
+    scored: list[tuple[FeedEntryHit, float, float, str, str]] = []
+
+    for entry in deduped:
+        # Light pre-filter: skip obvious noise
+        title_len = len(entry.title.strip())
+        summary_len = len(entry.summary.strip())
+        rc_len = len(entry.rich_content) if entry.rich_content else 0
+
+        # Noise: no title AND no summary AND no rich_content → skip
+        if title_len == 0 and summary_len == 0 and rc_len == 0:
+            continue
+
+        freshness_score, freshness_tier = _compute_freshness(
+            entry.published_ts, retrieved_ts
+        )
+        quality_score = _compute_quality(entry)
+
+        # Combined score: freshness权重0.55, quality权重0.45
+        combined = freshness_score * 0.55 + quality_score * 0.45
+
+        scored.append((
+            entry, freshness_score, quality_score, freshness_tier, ""
+        ))
+
+    # Sort: highest combined score first; preserve-first as tie-break (stable sort)
+    scored.sort(key=lambda x: -x[2])  # secondary sort placeholder
+
+    # Stable sort: primary=combined score desc, secondary=preserve-first order desc
+    # We achieve this by sorting once with a tuple key that includes a reverse index
+    # to preserve insertion order as tie-break.
+    indexed = [
+        (i, -scored[i][2], entry)
+        for i, (entry, fs, qs, tier, reason) in enumerate(scored)
+        for entry in [scored[i][0]]
+    ]
+
+    # Sort by combined score desc, then by original index asc (preserve-first tie-break)
+    indexed.sort(key=lambda x: (x[1], x[0]))
+
+    # Clamp to max_entries and rebuild with scoring metadata
     entries: list[FeedEntryHit] = []
-    for rank, entry in enumerate(deduped[:max_entries]):
-        # Create new instance with updated rank (msgspec frozen → new instance)
+    for rank, (orig_idx, _, entry) in enumerate(indexed[:max_entries]):
+        # Retrieve stored scores from original scored list
+        _, freshness_score, quality_score, freshness_tier, _ = scored[orig_idx]
+
+        # Determine selection_reason
+        if freshness_tier == "future":
+            reason = "future_timestamp"
+        elif freshness_tier == "unknown":
+            reason = "missing_timestamp"
+        elif freshness_score >= 1.0:
+            reason = "recent_high_quality" if quality_score >= 0.5 else "recent"
+        elif freshness_score >= 0.85:
+            reason = "fresh_high_quality" if quality_score >= 0.5 else "fresh"
+        elif quality_score >= 0.6:
+            reason = "quality_signal"
+        elif quality_score >= 0.3:
+            reason = "moderate_quality"
+        else:
+            reason = "aged_low_quality"
+
+        # Build final entry with additive metadata
         entries.append(
             FeedEntryHit(
                 feed_url=entry.feed_url,
@@ -866,12 +1054,14 @@ async def async_fetch_feed_entries(
                 rank=rank,
                 retrieved_ts=entry.retrieved_ts,
                 entry_hash=entry.entry_hash,
-                # Sprint 8BE: preserve rich_content from original entry
                 rich_content=getattr(entry, "rich_content", "") or "",
-                # Sprint F150H: preserve enriched metadata
                 entry_author=getattr(entry, "entry_author", "") or "",
                 feed_title=getattr(entry, "feed_title", "") or "",
                 feed_language=getattr(entry, "feed_language", "") or "",
+                freshness_score=freshness_score,
+                quality_score=quality_score,
+                freshness_tier=freshness_tier,
+                selection_reason=reason,
             )
         )
 

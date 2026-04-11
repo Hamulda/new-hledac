@@ -1968,6 +1968,304 @@ class DuckDBShadowStore:
             return []
 
     # ------------------------------------------------------------------
+    # Practical read seam: sprint-scoped findings
+    # ------------------------------------------------------------------
+
+    async def async_query_recent_findings_by_sprint(
+        self,
+        sprint_id: str,
+        limit: int = 20,
+    ) -> list[dict]:
+        """
+        Return the most recent accepted findings for a given sprint,
+        ordered by ts DESC. Bounded, read-only, fail-soft.
+
+        Use for: export synthesis input, sprint retrospektivu,
+        scheduler priority scoring.
+        """
+        if not self._initialized or self._closed:
+            return []
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(
+                self._executor,
+                self._sync_query_recent_findings_by_sprint,
+                sprint_id,
+                limit,
+            )
+        except Exception:
+            return []
+
+    def _sync_query_recent_findings_by_sprint(
+        self,
+        sprint_id: str,
+        limit: int,
+    ) -> list[dict]:
+        """Sync — MUST be called on worker thread."""
+        try:
+            conn = self._file_conn if self._db_path else self._persistent_conn
+            if conn is None:
+                return []
+            rows = conn.execute(
+                """
+                SELECT id, query, source_type, confidence, ts
+                FROM shadow_findings
+                WHERE query LIKE ('%' || ? || '%')
+                   OR id LIKE ('%' || ? || '%')
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                [sprint_id, sprint_id, limit],
+            ).fetchall()
+            if not rows:
+                return []
+            return [
+                {
+                    "id": r[0],
+                    "query": r[1],
+                    "source_type": r[2],
+                    "confidence": r[3],
+                    "ts": r[4],
+                }
+                for r in rows
+            ]
+        except Exception:
+            return []
+
+    # ------------------------------------------------------------------
+    # Practical read seam: IOC-ish pivot candidates from sprint findings
+    # ------------------------------------------------------------------
+
+    async def async_query_top_entities_by_sprint(
+        self,
+        sprint_id: str,
+        limit: int = 20,
+    ) -> list[dict]:
+        """
+        Return entity-like pivot candidates extracted from finding queries
+        and provenance for the given sprint. Looks for domain/IP/url-like
+        tokens in query text. Bounded, read-only, fail-soft.
+
+        Use for: synthesis pivot hints, entity correlation candidates,
+        export enrichment. Does NOT require global_entities table.
+        """
+        if not self._initialized or self._closed:
+            return []
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(
+                self._executor,
+                self._sync_query_top_entities_by_sprint,
+                sprint_id,
+                limit,
+            )
+        except Exception:
+            return []
+
+    def _sync_query_top_entities_by_sprint(
+        self,
+        sprint_id: str,
+        limit: int,
+    ) -> list[dict]:
+        """Sync — MUST be called on worker thread."""
+        import re
+
+        DOMAIN_RE = re.compile(
+            r"(?:https?://)?(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}"
+        )
+        IP_RE = re.compile(
+            r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}"
+            r"(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b"
+        )
+
+        try:
+            conn = self._file_conn if self._db_path else self._persistent_conn
+            if conn is None:
+                return []
+            rows = conn.execute(
+                """
+                SELECT id, query, source_type, ts
+                FROM shadow_findings
+                WHERE query LIKE ('%' || ? || '%')
+                   OR id LIKE ('%' || ? || '%')
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                [sprint_id, sprint_id, limit * 4],
+            ).fetchall()
+            if not rows:
+                return []
+
+            candidates: dict[str, dict] = {}
+            for row in rows:
+                text = f"{row[1]} {row[0]}"
+                for m in DOMAIN_RE.finditer(text):
+                    domain = m.group().lower()
+                    if domain not in candidates:
+                        candidates[domain] = {
+                            "entity_value": domain,
+                            "entity_type": "domain",
+                            "occurrences": 0,
+                            "last_seen_ts": 0.0,
+                        }
+                    candidates[domain]["occurrences"] += 1
+                    candidates[domain]["last_seen_ts"] = max(
+                        candidates[domain]["last_seen_ts"], row[3]
+                    )
+                for m in IP_RE.finditer(text):
+                    ip = m.group()
+                    if ip not in candidates:
+                        candidates[ip] = {
+                            "entity_value": ip,
+                            "entity_type": "ip",
+                            "occurrences": 0,
+                            "last_seen_ts": 0.0,
+                        }
+                    candidates[ip]["occurrences"] += 1
+                    candidates[ip]["last_seen_ts"] = max(
+                        candidates[ip]["last_seen_ts"], row[3]
+                    )
+
+            sorted_candidates = sorted(
+                candidates.values(),
+                key=lambda x: (x["occurrences"], x["last_seen_ts"]),
+                reverse=True,
+            )
+            return sorted_candidates[:limit]
+        except Exception:
+            return []
+
+    # ------------------------------------------------------------------
+    # Practical read seam: sprint IOC summary
+    # ------------------------------------------------------------------
+
+    async def async_query_sprint_ioc_summary(
+        self,
+        sprint_id: str,
+    ) -> dict:
+        """
+        Return a lightweight IOC summary for a sprint:
+        total findings, unique source_types, avg confidence,
+        time span (first→last ts). Bounded, read-only, fail-soft.
+
+        Use for: scheduler decision support, synthesis quality signals,
+        sprint retrospektivu.
+        """
+        if not self._initialized or self._closed:
+            return {}
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(
+                self._executor,
+                self._sync_query_sprint_ioc_summary,
+                sprint_id,
+            )
+        except Exception:
+            return {}
+
+    def _sync_query_sprint_ioc_summary(
+        self,
+        sprint_id: str,
+    ) -> dict:
+        """Sync — MUST be called on worker thread."""
+        try:
+            conn = self._file_conn if self._db_path else self._persistent_conn
+            if conn is None:
+                return {}
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) as total_findings,
+                    COUNT(DISTINCT source_type) as unique_sources,
+                    AVG(confidence) as avg_confidence,
+                    MIN(ts) as first_ts,
+                    MAX(ts) as last_ts
+                FROM shadow_findings
+                WHERE query LIKE ('%' || ? || '%')
+                   OR id LIKE ('%' || ? || '%')
+                """,
+                [sprint_id, sprint_id],
+            ).fetchone()
+            if row is None or row[0] == 0:
+                return {}
+            return {
+                "sprint_id": sprint_id,
+                "total_findings": row[0] or 0,
+                "unique_sources": row[1] or 0,
+                "avg_confidence": round(row[2] or 0.0, 3),
+                "first_ts": row[3] or 0.0,
+                "last_ts": row[4] or 0.0,
+                "span_seconds": (row[4] or 0.0) - (row[3] or 0.0),
+            }
+        except Exception:
+            return {}
+
+    # ------------------------------------------------------------------
+    # Practical read seam: top sources by findings count for a sprint
+    # ------------------------------------------------------------------
+
+    async def async_query_top_sources_by_sprint(
+        self,
+        sprint_id: str,
+        limit: int = 10,
+    ) -> list[dict]:
+        """
+        Return source_type breakdown (findings count, avg confidence)
+        for a given sprint. Bounded, read-only, fail-soft.
+
+        Use for: sprint retrospektivu, source yield analysis,
+        scheduler source weighting decisions.
+        """
+        if not self._initialized or self._closed:
+            return []
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(
+                self._executor,
+                self._sync_query_top_sources_by_sprint,
+                sprint_id,
+                limit,
+            )
+        except Exception:
+            return []
+
+    def _sync_query_top_sources_by_sprint(
+        self,
+        sprint_id: str,
+        limit: int,
+    ) -> list[dict]:
+        """Sync — MUST be called on worker thread."""
+        try:
+            conn = self._file_conn if self._db_path else self._persistent_conn
+            if conn is None:
+                return []
+            rows = conn.execute(
+                """
+                SELECT
+                    source_type,
+                    COUNT(*) as findings_count,
+                    AVG(confidence) as avg_confidence
+                FROM shadow_findings
+                WHERE query LIKE ('%' || ? || '%')
+                   OR id LIKE ('%' || ? || '%')
+                GROUP BY source_type
+                ORDER BY findings_count DESC
+                LIMIT ?
+                """,
+                [sprint_id, sprint_id, limit],
+            ).fetchall()
+            return [
+                {
+                    "source_type": r[0],
+                    "findings_count": r[1] or 0,
+                    "avg_confidence": round(r[2] or 0.0, 3),
+                }
+                for r in rows
+            ]
+        except Exception:
+            return []
+
+    # ------------------------------------------------------------------
     # Sprint 8TA B.3: Research Scorecard
     # ------------------------------------------------------------------
 

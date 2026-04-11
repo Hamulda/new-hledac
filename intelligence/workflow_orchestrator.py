@@ -13,7 +13,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -997,6 +997,18 @@ class CorrelationResult:
         top_themes: Top 5 most significant themes sorted by weight
         anomaly_count: Number of detected anomalies
         verdict: Risk verdict string
+
+        # --- NEW: actionable condensation ---
+        source_themes: Dict[str, List[str]]           # source -> list of theme keys
+        top_entities: List[Dict[str, Any]]            # extracted IOCs (domain/ip/hash/url)
+        repeated_domains: List[str]                   # domains seen across >1 finding
+        repeated_iocs: List[Dict[str, Any]]          # IOCs appearing >1 time
+        dominant_cluster: Optional[str]               # theme with most high-severity findings
+        high_risk_branch: List[Dict[str, Any]]        # critical/high findings with infra hints
+        theme_source_overlap: Dict[str, List[str]]   # theme -> sources contributing
+        campaign_hints: List[Dict[str, Any]]          # findings suggesting same campaign
+        coupling_pairs: List[Tuple[str, str]]          # (entity, related_entity) pairs
+        so_what: str                                   # one-liner operator takeaway
     """
     themes: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     risk_score: float = 0.0
@@ -1004,6 +1016,17 @@ class CorrelationResult:
     top_themes: List[Tuple[str, float]] = field(default_factory=list)
     anomaly_count: int = 0
     verdict: str = "CLEAN"
+    # NEW fields (with defaults so existing callers don't break)
+    source_themes: Dict[str, List[str]] = field(default_factory=dict)
+    top_entities: List[Dict[str, Any]] = field(default_factory=list)
+    repeated_domains: List[str] = field(default_factory=list)
+    repeated_iocs: List[Dict[str, Any]] = field(default_factory=list)
+    dominant_cluster: Optional[str] = None
+    high_risk_branch: List[Dict[str, Any]] = field(default_factory=list)
+    theme_source_overlap: Dict[str, List[str]] = field(default_factory=dict)
+    campaign_hints: List[Dict[str, Any]] = field(default_factory=list)
+    coupling_pairs: List[Tuple[str, str]] = field(default_factory=list)
+    so_what: str = ""
 
 
 def correlate_findings(
@@ -1105,6 +1128,69 @@ def correlate_findings(
     elif risk_score >= thresholds.get("clean", 0.3):
         verdict = "SUSPICIOUS"
 
+    # --- Source -> themes mapping ---
+    source_themes: Dict[str, List[str]] = {}
+    for f in normalized:
+        src = f["source"]
+        tk = _derive_theme_key(f)
+        if src not in source_themes:
+            source_themes[src] = []
+        if tk not in source_themes[src]:
+            source_themes[src].append(tk)
+
+    # --- IOC / entity extraction ---
+    all_entities, domain_counts, ioc_counts = _extract_entities(normalized)
+    top_entities = sorted(all_entities,
+                          key=lambda x: x.get("_weight", 0),
+                          reverse=True)[:20]
+
+    # --- Repeated domains (seen >1 across findings) ---
+    repeated_domains = [d for d, cnt in domain_counts.items() if cnt > 1]
+
+    # --- Repeated IOCs ---
+    repeated_iocs = [
+        {"value": v, "type": t, "count": c}
+        for (v, t), c in ioc_counts.items() if c > 1
+    ]
+
+    # --- Dominant cluster: theme with most critical/high findings ---
+    dominant_cluster = None
+    cluster_scores: Dict[str, float] = {}
+    for theme, fndgs in themes.items():
+        score = sum(
+            SEVERITY_WEIGHTS.get(x["severity"].lower(), 0.25)
+            for x in fndgs if x["severity"].lower() in ("critical", "high")
+        )
+        if score > 0:
+            cluster_scores[theme] = score
+    if cluster_scores:
+        dominant_cluster = max(cluster_scores, key=lambda k: cluster_scores.get(k, 0.0))
+
+    # --- High-risk branch: critical/high + infra hints ---
+    high_risk_branch = [
+        f for f in normalized
+        if f["severity"].lower() in ("critical", "high")
+        and _has_infra_hints(f)
+    ]
+
+    # --- Theme -> sources overlap ---
+    theme_source_overlap: Dict[str, List[str]] = {}
+    for theme, fndgs in themes.items():
+        srcs = list({x["source"] for x in fndgs})
+        theme_source_overlap[theme] = srcs
+
+    # --- Campaign hints: findings sharing same type + source cluster ---
+    campaign_hints = _find_campaign_hints(normalized, themes)
+
+    # --- Coupling pairs: entities that appear together ---
+    coupling_pairs = _find_coupling_pairs(all_entities)
+
+    # --- Operator so_what ---
+    so_what = _build_so_what(
+        verdict, risk_score, top_themes, dominant_cluster,
+        len(high_risk_branch), anomaly_count, repeated_domains
+    )
+
     return CorrelationResult(
         themes=themes,
         risk_score=risk_score,
@@ -1112,7 +1198,197 @@ def correlate_findings(
         top_themes=top_themes,
         anomaly_count=anomaly_count,
         verdict=verdict,
+        # NEW
+        source_themes=source_themes,
+        top_entities=top_entities,
+        repeated_domains=repeated_domains,
+        repeated_iocs=repeated_iocs,
+        dominant_cluster=dominant_cluster,
+        high_risk_branch=high_risk_branch,
+        theme_source_overlap=theme_source_overlap,
+        campaign_hints=campaign_hints,
+        coupling_pairs=coupling_pairs,
+        so_what=so_what,
     )
+
+
+def _extract_entities(
+    findings: List[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], Dict[str, int], Dict[Tuple[str, str], int]]:
+    """Extract IOCs (domains, IPs, hashes, URLs) from findings descriptions.
+
+    Returns:
+        (entities, domain_counts, ioc_counts)
+        domain_counts: domain -> count across findings
+        ioc_counts: (value, type) -> count across findings
+    """
+    entities: List[Dict[str, Any]] = []
+    domain_counts: Dict[str, int] = {}
+    ioc_counts: Dict[Tuple[str, str], int] = {}
+
+    import re
+
+    DOMAIN_RE = re.compile(
+        r'\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b',
+        re.IGNORECASE
+    )
+    IPV4_RE = re.compile(
+        r'\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d{1,2})\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d{1,2})\b'
+    )
+    HASH_RE = re.compile(
+        r'\b(?:[a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})\b',
+        re.IGNORECASE
+    )
+    URL_RE = re.compile(
+        r'https?://[^\s<>"{}|\\^`\[\]]+',
+        re.IGNORECASE
+    )
+
+    for f in findings:
+        text = f.get("description", "") + " " + f.get("type", "")
+        severity = f.get("severity", "medium")
+        confidence = f.get("confidence", 0.5)
+        weight = SEVERITY_WEIGHTS.get(severity.lower(), 0.25) * confidence
+
+        found: Dict[str, Any] = {}
+
+        for domain in DOMAIN_RE.findall(text):
+            domain_lower = domain.lower()
+            found[domain_lower] = {"value": domain_lower, "type": "domain", "_weight": weight}
+            domain_counts[domain_lower] = domain_counts.get(domain_lower, 0) + 1
+
+        for ip in IPV4_RE.findall(text):
+            found[ip] = {"value": ip, "type": "ipv4", "_weight": weight}
+
+        for h in HASH_RE.findall(text):
+            found[h] = {"value": h, "type": "hash", "_weight": weight}
+
+        for url in URL_RE.findall(text):
+            found[url] = {"value": url, "type": "url", "_weight": weight}
+
+        for ent in found.values():
+            key = (ent["value"], ent["type"])
+            ioc_counts[key] = ioc_counts.get(key, 0) + 1
+            entities.append(ent)
+
+    # Deduplicate entities list by (value, type)
+    seen: Set[Tuple[str, str]] = set()
+    deduped: List[Dict[str, Any]] = []
+    for e in entities:
+        k = (e["value"], e["type"])
+        if k not in seen:
+            seen.add(k)
+            deduped.append(e)
+
+    return deduped, domain_counts, ioc_counts
+
+
+def _has_infra_hints(finding: Dict[str, Any]) -> bool:
+    """Check if finding has infrastructure-related hints."""
+    text = (finding.get("description", "") + " " + finding.get("type", "")).lower()
+    hints = (
+        "domain", "dns", "ip", "c2", "command", "control", "server",
+        "host", "infrastructure", "tunnel", "callback", "beacon"
+    )
+    return any(h in text for h in hints)
+
+
+def _find_campaign_hints(
+    findings: List[Dict[str, Any]],
+    _themes: Dict[str, List[Dict[str, Any]]]
+) -> List[Dict[str, Any]]:
+    """Find findings that may belong to the same campaign.
+
+    Heuristic: same type appearing from multiple sources or
+    high confidence + high severity cluster.
+    """
+    hints: List[Dict[str, Any]] = []
+
+    # Cluster: same type, multiple sources → campaign signal
+    type_sources: Dict[str, Set[str]] = {}
+    for f in findings:
+        type_sources.setdefault(f["type"], set()).add(f["source"])
+
+    for ftype, srcs in type_sources.items():
+        if len(srcs) >= 2:
+            matching = [f for f in findings if f["type"] == ftype]
+            avg_conf = sum(x["confidence"] for x in matching) / max(len(matching), 1)
+            hints.append({
+                "type": "multi_source_cluster",
+                "finding_type": ftype,
+                "sources": list(srcs),
+                "count": len(matching),
+                "avg_confidence": round(avg_conf, 2),
+            })
+
+    # High-confidence cluster (conf > 0.8, severity high/critical)
+    high_conf_findings = [
+        f for f in findings
+        if f["confidence"] > 0.8 and f["severity"].lower() in ("high", "critical")
+    ]
+    if len(high_conf_findings) >= 2:
+        hints.append({
+            "type": "high_confidence_cluster",
+            "count": len(high_conf_findings),
+            "severities": [f["severity"] for f in high_conf_findings],
+        })
+
+    return hints
+
+
+def _find_coupling_pairs(
+    entities: List[Dict[str, Any]]
+) -> List[Tuple[str, str]]:
+    """Find entity pairs that appear in the same finding.
+
+    Returns list of (entity1_value, entity2_value) tuples.
+    """
+    pairs: List[Tuple[str, str]] = []
+    # Group entities by their source finding index (approximate via dedup key)
+    # We pair entities of different types within the same pass
+    by_type: Dict[str, List[str]] = {}
+    for e in entities:
+        by_type.setdefault(e["type"], []).append(e["value"])
+
+    # Domain + IP pairs from same finding (heuristic: appear together in text)
+    # Simplified: just cross-type pairs seen across entities list
+    for dtype, dvals in list(by_type.items())[:2]:  # noqa: B007
+        for itype, ivals in list(by_type.items())[1:]:  # noqa: B007
+            for dv in dvals[:5]:
+                for iv in ivals[:5]:
+                    pairs.append((dv, iv))
+
+    return list(set(pairs))[:20]
+
+
+def _build_so_what(
+    verdict: str,
+    risk_score: float,
+    top_themes: List[Tuple[str, float]],
+    dominant_cluster: Optional[str],
+    high_risk_count: int,
+    anomaly_count: int,
+    repeated_domains: List[str],
+) -> str:
+    """Build one-liner operator takeaway."""
+    if verdict == "HIGH_RISK":
+        parts = ["HIGH RISK detected"]
+        if dominant_cluster:
+            parts.append(f"cluster={dominant_cluster}")
+        if high_risk_count > 0:
+            parts.append(f"{high_risk_count} critical/high findings")
+        if anomaly_count > 0:
+            parts.append(f"{anomaly_count} anomalies")
+        if repeated_domains:
+            parts.append(f"repeated domains: {', '.join(repeated_domains[:3])}")
+        return "; ".join(parts)
+    elif verdict == "SUSPICIOUS":
+        if top_themes:
+            top = top_themes[0][0]
+            return f"SUSPICIOUS: top theme={top}"
+        return "SUSPICIOUS: review recommended"
+    else:
+        return "CLEAN: no significant threats detected"
 
 
 def _derive_theme_key(finding: Dict[str, Any]) -> str:

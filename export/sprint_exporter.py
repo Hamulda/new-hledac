@@ -26,6 +26,16 @@ Sprint F150K: Next-action package — praktický follow-up balíček:
   - priority-based next actions (max 10, deduped, signal-derived)
   - focus/expand recommendations derived from signal_quality
   - NO new persistence, NO new planner, NO new write-back path
+Sprint F150L: Operator finish layer — derived seams integrated:
+  - branch_value z scorecard (feed vs public branch analysis)
+  - sprint_trend z store (poslední sprinty, fail-soft)
+  - source_leaderboard z store (top zdroje, fail-soft)
+  - eh.correlation (RunCorrelation) pokud přítomen
+  - Praktický operator brief: co sprint našel, která branch nesla signál,
+    co bylo slabé, jaký je nejbližší další krok, 2-5 zajímavých follow-upů
+  - Rozhraní mezi feed/public branch recommendation
+  - enriched next seeds z branch_value + sprint_trend
+  - VŠECHNO derived only, žádný new business engine
 """
 
 from __future__ import annotations
@@ -175,8 +185,10 @@ async def export_sprint(
     # Sprint F500B §2 + F500D §3: seeds land alongside JSON report (colocation)
     # Primary: get_sprint_next_seeds_path() from paths.py (canonical)
     # Fallback: SPRINT_STORE_ROOT.parent/"reports" if report_path is None (write failed)
-    # Sprint F150J: pvs drives enhanced seed derivation — signal_quality + reject_breakdown + cb state
-    seeds_path = _generate_next_sprint_seeds(top_nodes, _sprint_id, report_path, pvs)
+    # Sprint F150L: also pass branch_value + sprint_trend for enriched seeds
+    branch_value = _get_branch_value(eh)
+    sprint_trend = _get_sprint_trend(store, last_n=3)
+    seeds_path = _generate_next_sprint_seeds(top_nodes, _sprint_id, report_path, pvs, branch_value, sprint_trend)
 
     # Sprint F150K: build sprint_summary for human use
     try:
@@ -186,11 +198,16 @@ async def export_sprint(
         seeds_count = 0
     sprint_summary = _build_sprint_summary(pvs, seeds_count) if pvs else None
 
+    # Sprint F150L: operator brief — derived from all available seams
+    source_leaderboard = _get_source_leaderboard(store, days=7)
+    operator_brief = _build_operator_brief(pvs, branch_value, sprint_trend, source_leaderboard, seeds_count) if pvs else None
+
     return {
         "report_json": str(report_path) if report_path else "",
         "seeds_json": str(seeds_path),
         "product_value_summary": pvs,
         "sprint_summary": sprint_summary,
+        "operator_brief": operator_brief,
     }
 
 
@@ -199,6 +216,8 @@ def _generate_next_sprint_seeds(
     sprint_id: str,
     report_path: pathlib.Path | None,
     pvs: dict[str, Any] | None = None,
+    branch_value: dict[str, Any] | None = None,
+    sprint_trend: list[dict] | None = None,
 ) -> pathlib.Path:
     """
     Sprint F150J: Enhanced seed derivation driven by product_value_summary.
@@ -277,6 +296,16 @@ def _generate_next_sprint_seeds(
         if pvs:
             focus_expand = _derive_focus_expand(pvs)
             seeds.extend(focus_expand)
+
+        # 7. Sprint F150L: branch_value-driven seeds — which branch to expand
+        if branch_value:
+            branch_seeds = _derive_branch_seeds(branch_value)
+            seeds.extend(branch_seeds)
+
+        # 8. Sprint F150L: sprint_trend-driven seeds — what worked in recent sprints
+        if sprint_trend:
+            trend_seeds = _derive_trend_seeds(sprint_trend)
+            seeds.extend(trend_seeds)
 
         # Bounded output — keep total seed count manageable
         MAX_SEEDS = 15
@@ -815,6 +844,349 @@ def _derive_focus_expand(pvs: dict[str, Any]) -> list[dict[str, Any]]:
             })
 
     return recs[:2]
+
+
+def _derive_branch_seeds(branch_value: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Sprint F150L: Branch-driven seed derivation — which branch to expand next.
+
+    Reads branch_value from scorecard:
+      - feed_findings / public_findings
+      - branch_verdict: feed_dominant | public_dominant | balanced
+      - recommendation: expand_feed_branch | expand_public_branch | maintain_both
+
+    Returns seeds for which branch to pursue next.
+    """
+    verdict = branch_value.get("branch_verdict", "")
+    seeds: list[dict[str, Any]] = []
+
+    if verdict == "feed_dominant":
+        # Feed branch is winning — suggest expanding it
+        seeds.append({
+            "task_type": "query_suggestion",
+            "suggested_action": "expand_feed_branch",
+            "priority": 0.78,
+            "reason": f"feed_dominant/{verdict}",
+        })
+    elif verdict == "public_dominant":
+        # Public branch is winning — suggest expanding it
+        seeds.append({
+            "task_type": "query_suggestion",
+            "suggested_action": "expand_public_branch",
+            "priority": 0.78,
+            "reason": f"public_dominant/{verdict}",
+        })
+    elif verdict == "balanced":
+        # Both branches contribute — suggest balancing effort
+        seeds.append({
+            "task_type": "query_suggestion",
+            "suggested_action": "balance_branches",
+            "priority": 0.70,
+            "reason": "balanced_both_branches_contribute",
+        })
+
+    # If one side had zero findings, flag it explicitly
+    feed_f = branch_value.get("feed_findings", 0)
+    public_f = branch_value.get("public_findings", 0)
+    if feed_f == 0 and public_f > 0:
+        seeds.append({
+            "task_type": "source_revisit",
+            "suggested_action": "activate_feed_sources",
+            "priority": 0.72,
+            "reason": "feed_branch_zero_findings_try_activating",
+        })
+    elif public_f == 0 and feed_f > 0:
+        seeds.append({
+            "task_type": "source_revisit",
+            "suggested_action": "activate_public_sources",
+            "priority": 0.72,
+            "reason": "public_branch_zero_findings_try_activating",
+        })
+
+    return seeds[:3]  # Hard cap: max 3 branch seeds
+
+
+def _derive_trend_seeds(sprint_trend: list[dict]) -> list[dict[str, Any]]:
+    """
+    Sprint F150L: Sprint-trend-driven seed derivation — what worked in recent sprints.
+
+    Reads from sprint_trend (store.get_sprint_trend()):
+      - For each recent sprint: sprint_id, new_findings, ioc_nodes, findings_per_min
+
+    Logic:
+      - High fpm sprint → accelerate same query approach
+      - Zero findings sprint → pivot
+      - Trend upward → continue; trend downward → adjust
+    """
+    seeds: list[dict[str, Any]] = []
+    if not sprint_trend:
+        return seeds
+
+    # Analyze trend across recent sprints
+    fpm_values = []
+    for s in sprint_trend:
+        fpm = s.get("findings_per_min") or s.get("findings_per_minute") or 0
+        if isinstance(fpm, (int, float)):
+            fpm_values.append(float(fpm))
+
+    if len(fpm_values) >= 2:
+        recent = fpm_values[0]
+        older = fpm_values[-1]
+        if recent > older * 1.5:
+            # Trending up — continue same approach
+            seeds.append({
+                "task_type": "query_suggestion",
+                "suggested_action": "accelerate_same_approach",
+                "priority": 0.72,
+                "reason": f"trend_up/{recent:.2f}_vs_{older:.2f}_fpm",
+            })
+        elif recent < older * 0.5 and recent > 0:
+            # Trending down sharply — adjust
+            seeds.append({
+                "task_type": "query_suggestion",
+                "suggested_action": "pivot_approach",
+                "priority": 0.74,
+                "reason": f"trend_down/{recent:.2f}_vs_{older:.2f}_fpm",
+            })
+    elif len(fpm_values) == 1:
+        fpm = fpm_values[0]
+        if fpm > 0.5:
+            seeds.append({
+                "task_type": "query_suggestion",
+                "suggested_action": "same_query_continue",
+                "priority": 0.68,
+                "reason": f"single_sprint_fpm={fpm:.2f}",
+            })
+
+    # If all recent sprints had 0 findings — flag depleted query space
+    if fpm_values and all(f == 0 for f in fpm_values):
+        seeds.append({
+            "task_type": "query_suggestion",
+            "suggested_action": "completely_new_queries",
+            "priority": 0.82,
+            "reason": "all_recent_sprints_zero_findings",
+        })
+
+    return seeds[:2]  # Hard cap: max 2 trend seeds
+
+
+def _get_sprint_trend(store: Any, last_n: int = 5) -> list[dict]:
+    """
+    Sprint F150L: Fail-soft store seam pro sprint trend.
+    Používá existující duckdb_store.get_sprint_trend().
+    """
+    if store is None:
+        return []
+    try:
+        if hasattr(store, "get_sprint_trend"):
+            return store.get_sprint_trend(last_n=last_n) or []
+    except Exception:
+        pass
+    return []
+
+
+def _get_source_leaderboard(store: Any, days: int = 7) -> list[dict]:
+    """
+    Sprint F150L: Fail-soft store seam pro source leaderboard.
+    Používá existující duckdb_store.get_source_leaderboard().
+    """
+    if store is None:
+        return []
+    try:
+        if hasattr(store, "get_source_leaderboard"):
+            return store.get_source_leaderboard(days=days) or []
+    except Exception:
+        pass
+    return []
+
+
+def _get_branch_value(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
+    """
+    Sprint F150L: branch_value z scorecard — feed vs public branch analysis.
+    Přítomno v scorecard pokud windup scheduler běžel s paralelními branchemi.
+    """
+    scorecard = eh.scorecard if eh.scorecard else {}
+    return scorecard.get("branch_value") or None
+
+
+def _build_operator_brief(
+    pvs: dict[str, Any],
+    branch_value: dict[str, Any] | None,
+    sprint_trend: list[dict],
+    source_leaderboard: list[dict],
+    seeds_count: int,
+) -> dict[str, Any]:
+    """
+    Sprint F150L: Praktický operator brief — co sprint našel, která branch nesla signál,
+    co bylo slabé místo, jaký je nejbližší další krok, 2-5 nejzajímavějších follow-upů.
+
+    DERIVED ONLY — skládá z existujících truth/derived dat:
+      - pvs.signal_quality + accepted + ioc_density
+      - branch_value (feed vs public)
+      - sprint_trend (poslední sprinty)
+      - source_leaderboard (top zdroje)
+
+    Žádný nový business engine. Žádné nové persistence.
+    """
+    signal = pvs.get("signal_quality", "unknown")
+    accepted = pvs.get("accepted", 0)
+    ioc_density = pvs.get("ioc_density", 0.0)
+    dedup = pvs.get("reject_breakdown")
+    total_rejected = pvs.get("total_rejected", 0)
+
+    # --- Co sprint pravděpodobně našel ---
+    if signal == "high_density":
+        finding_summary = f"dobrý sprint: {accepted} kvalitních IOC při density {ioc_density:.2f}"
+    elif signal == "medium_density":
+        finding_summary = f"smíšený sprint: {accepted} IOC, {total_rejected} rejectů, density {ioc_density:.2f}"
+    elif signal == "slow_novelty":
+        fpm = pvs.get("findings_per_minute", 0.0)
+        finding_summary = f"pomalý ale existující signál: {accepted} IOC při {fpm:.2f} finds/min"
+    elif signal == "depleted":
+        finding_summary = "sprint nic nepřinesl — vyčerpaný prostor nebo nedostupné zdroje"
+    else:
+        finding_summary = f"nedefinovaný stav: accepted={accepted}"
+
+    # --- Která branch nesla nejlepší signál ---
+    branch_signal = None
+    if branch_value:
+        verdict = branch_value.get("branch_verdict", "")
+        feed_pct = branch_value.get("feed_pct", 0)
+        public_pct = branch_value.get("public_pct", 0)
+        if verdict == "feed_dominant":
+            branch_signal = f"feed branch dominantí ({feed_pct:.0f}% nálezů) — veřejné zdroje slabé"
+        elif verdict == "public_dominant":
+            branch_signal = f"veřejné zdroje dominantní ({public_pct:.0f}% nálezů) — feed branch podprůměrná"
+        elif verdict == "balanced":
+            branch_signal = f"vyvážený přínos: feed {feed_pct:.0f}% / public {public_pct:.0f}%"
+        else:
+            branch_signal = None
+    else:
+        branch_signal = None
+
+    # --- Co bylo slabé místo ---
+    weaknesses: list[str] = []
+    if signal == "depleted":
+        weaknesses.append("signál vyčerpaný — continuation nepomůže")
+    if total_rejected > 0 and dedup:
+        low_info = dedup.get("low_information", 0)
+        in_mem = dedup.get("in_memory_duplicate", 0)
+        persistent = dedup.get("persistent_duplicate", 0)
+        if low_info / total_rejected > 0.5:
+            weaknesses.append(f"příliš široké dotazy: {low_info} low-info rejectů")
+        if in_mem > 0 and in_mem / total_rejected > 0.3:
+            weaknesses.append(f"příliš mnoho podobných výsledků: {in_mem} in-memory duplikátů")
+        if persistent > 0 and persistent / total_rejected > 0.3:
+            weaknesses.append(f"persistentní duplikáty: {persistent}")
+    cb_open = pvs.get("cb_open_domains", [])
+    if cb_open:
+        weaknesses.append(f"circuit breaker open: {len(cb_open)} domains")
+    if not weaknesses:
+        weaknesses.append("žádné výrazné slabiny — sprint byl čistý")
+
+    # --- Co dělat dál: akční next step ---
+    next_step = _derive_next_step(signal, branch_value)
+
+    # --- 2-5 nejzajímavějších follow-up bodů ---
+    follow_ups = _derive_follow_ups(signal, branch_value, sprint_trend, source_leaderboard, pvs)
+
+    # --- Rozhraní branch recommendation ---
+    branch_recommendation = None
+    if branch_value:
+        branch_recommendation = branch_value.get("recommendation")
+
+    return {
+        "finding_summary": finding_summary,
+        "branch_signal": branch_signal,
+        "weaknesses": weaknesses,
+        "next_step": next_step,
+        "follow_ups": follow_ups,
+        "branch_recommendation": branch_recommendation,
+        "seeds_generated": seeds_count,
+    }
+
+
+def _derive_next_step(
+    signal: str,
+    branch_value: dict[str, Any] | None,
+) -> str:
+    """Derive nejbližší další krok z signal + branch_value."""
+    # Branch-driven decision
+    if branch_value:
+        rec = branch_value.get("recommendation", "")
+        if rec == "expand_feed_branch":
+            return "rozšířit feed branch — má nejlepší signál"
+        elif rec == "expand_public_branch":
+            return "rozšířit veřejné zdroje — dominantní přínos"
+        elif rec == "maintain_both":
+            return "držet obě větve — vyvážený přínos"
+
+    # Signal-driven fallback
+    if signal == "high_density":
+        return "rozšířit úspěšné dotazy o nové zdroje"
+    elif signal == "medium_density":
+        return "zúžit scope dotazů — příliš mnoho low-info rejectů"
+    elif signal == "slow_novelty":
+        return "urychlit stávající přístup (rychlejší zdroje)"
+    elif signal == "depleted":
+        return "úplně nový přístup — nové seed zdroje"
+    return "zjistit více o stavu sprintu"
+
+
+def _derive_follow_ups(
+    signal: str,
+    branch_value: dict[str, Any] | None,
+    sprint_trend: list[dict],
+    source_leaderboard: list[dict],
+    pvs: dict[str, Any],
+) -> list[str]:
+    """
+    Sprint F150L: 2-5 nejzajímavějších follow-up bodů.
+    Derived z branch_value + sprint_trend + source_leaderboard.
+    """
+    follow_ups: list[str] = []
+
+    # Branch-based follow-ups
+    if branch_value:
+        feed_f = branch_value.get("feed_findings", 0)
+        public_f = branch_value.get("public_findings", 0)
+        verdict = branch_value.get("branch_verdict", "")
+        if verdict == "feed_dominant" and public_f == 0:
+            follow_ups.append("zkusit veřejné zdroje — feed branch jede sama")
+        elif verdict == "public_dominant" and feed_f == 0:
+            follow_ups.append("zkusit feed zdroje — veřejné jede sama")
+        elif verdict == "balanced":
+            follow_ups.append("obě větve fungují — prostor pro paralelizaci")
+
+    # Sprint trend-based follow-ups
+    if sprint_trend:
+        last = sprint_trend[0] if sprint_trend else None
+        if last and last.get("sprint_id"):
+            follow_ups.append(f"minulý sprint: {last.get('sprint_id')} — {last.get('new_findings', 0)} findings")
+
+    # Source leaderboard follow-ups
+    if source_leaderboard:
+        top_source = source_leaderboard[0] if source_leaderboard else None
+        if top_source:
+            src = top_source.get("source_type", "?")
+            hits = top_source.get("total_findings", 0)
+            follow_ups.append(f"nejproduktivnější zdroj: {src} ({hits} findings)")
+
+    # Signal-based follow-ups
+    if signal == "depleted":
+        follow_ups.append("změnit seed zdroje — aktuální vyčerpané")
+        follow_ups.append("zkusit zcela jiný typ dotazu")
+    elif signal == "low_density":
+        follow_ups.append("zvýšit frekvenci dotazů — nízká density")
+    elif signal == "slow_novelty":
+        follow_ups.append("zvážit rychlejší zdroje místo kvalitnějších")
+
+    # IOC density based
+    ioc_density = pvs.get("ioc_density", 0.0)
+    if ioc_density < 0.1 and signal != "depleted":
+        follow_ups.append("IOC density velmi nízká — zvážit úpravu dedup prahů")
+
+    return follow_ups[:5]  # Hard cap: max 5 follow-ups
 
 
 def _build_sprint_summary(pvs: dict[str, Any], seeds_count: int) -> dict[str, Any]:

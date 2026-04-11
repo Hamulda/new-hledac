@@ -316,6 +316,24 @@ def _import_exporters():
 
 
 # ---------------------------------------------------------------------------
+# Sprint 8VN: Correlation seam (lazy import)
+# ---------------------------------------------------------------------------
+
+def _import_correlate_findings():
+    from hledac.universal.intelligence.workflow_orchestrator import correlate_findings
+    return correlate_findings
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8VN: Hypothesis pack seam (lazy import)
+# ---------------------------------------------------------------------------
+
+def _import_hypothesis_engine():
+    from hledac.universal.brain.hypothesis_engine import HypothesisEngine
+    return HypothesisEngine
+
+
+# ---------------------------------------------------------------------------
 # Sprint Scheduler
 # ---------------------------------------------------------------------------
 
@@ -426,6 +444,11 @@ class SprintScheduler:
         self._shadow_pd_summary: Any = None
         # Sprint 8VQ: Advisory gate snapshot — ephemeral, computed at WINDUP entry, diagnostic only
         self._advisory_gate_snapshot: Any = None
+        # Sprint 8VN: Correlation + hypothesis seams accumulators
+        # Bounded: max 500 findings to prevent OOM on M1 8GB
+        self._correlation_cache: Optional[dict] = None
+        self._hypothesis_pack_cache: Optional[dict] = None
+        self._branch_value_summary: Optional[dict] = None
 
     # ── Sprint 8VI §B: RL Adaptive Pivot ────────────────────────────────
 
@@ -819,6 +842,21 @@ class SprintScheduler:
         self._result.accepted_findings += result.accepted_findings
         # Sprint 8VD §F: Track finding count for scorecard
         self._finding_count += result.accepted_findings
+        # Sprint 8VN: Accumulate findings for correlation + hypothesis seams
+        # Bounded to 500 to stay M1 8GB safe
+        if hasattr(result, 'matched_patterns') and result.matched_patterns > 0:
+            finding_entry = {
+                "type": "pattern_hit",
+                "source": feed_url,
+                "matched_patterns": result.matched_patterns,
+                "accepted_findings": result.accepted_findings,
+                "severity": "medium",
+                "confidence": 0.6,
+                "description": f"{result.matched_patterns} pattern hits from {feed_url}",
+            }
+            # Sprint 8VN: bounded accumulation — cap at 500 to prevent OOM
+            if len(self._all_findings) < 500:
+                self._all_findings.append(finding_entry)
 
     # ── Dedup ─────────────────────────────────────────────────────────────
 
@@ -1007,6 +1045,14 @@ class SprintScheduler:
         shadow_preview = self._build_shadow_readiness_preview()
         if shadow_preview:
             report["shadow_pre_decision"] = shadow_preview
+        # Sprint 8VN: Embed correlation + hypothesis intelligence into report
+        intel = self.compute_sprint_intelligence()
+        if intel.get("correlation"):
+            report["correlation_summary"] = intel["correlation"]
+        if intel.get("hypothesis_pack"):
+            report["hypothesis_pack_summary"] = intel["hypothesis_pack"]
+        if intel.get("branch_value"):
+            report["branch_value"] = intel["branch_value"]
         return report
 
     # ── Sprint 8RC: IOC-aware prioritisation ───────────────────────────────
@@ -2030,6 +2076,117 @@ class SprintScheduler:
 
         return result
 
+    # ── Sprint 8VN: Correlation + Hypothesis seams ──────────────────────────
+
+    def compute_sprint_intelligence(self) -> dict[str, Any]:
+        """
+        Sprint 8VN: Lazy fail-soft computation of correlation + hypothesis seams.
+
+        Both seams run only when findings exist. Returns a dict with:
+        - correlation: from correlate_findings() (workflow_orchestrator.py)
+        - hypothesis_pack: from build_hypothesis_pack() (hypothesis_engine.py)
+        - branch_value: feed vs public branch value comparison
+
+        All computation is bounded and M1 8GB safe:
+        - correlation: max 500 findings
+        - hypothesis: max 1000 text chars
+        - no model dependency
+        - fail-soft throughout
+        """
+        findings = getattr(self, "_all_findings", []) or []
+
+        if not findings:
+            return {
+                "correlation": None,
+                "hypothesis_pack": None,
+                "branch_value": None,
+            }
+
+        result: dict[str, Any] = {
+            "correlation": None,
+            "hypothesis_pack": None,
+            "branch_value": None,
+        }
+
+        # ── Correlation seam ────────────────────────────────────────────────
+        try:
+            correlate_fn = _import_correlate_findings()
+            corr = correlate_fn(findings[:500])
+            result["correlation"] = {
+                "risk_score": round(corr.risk_score, 3),
+                "verdict": corr.verdict,
+                "anomaly_count": corr.anomaly_count,
+                "top_themes": corr.top_themes[:5],
+                "theme_count": len(corr.themes),
+            }
+        except Exception:
+            result["correlation"] = None
+
+        # ── Hypothesis pack seam ───────────────────────────────────────────
+        try:
+            HypEng = _import_hypothesis_engine()
+            eng = HypEng()
+            # Build finding strings for hypothesis engine
+            finding_texts: list[str] = []
+            for f in findings[:200]:
+                desc = f.get("description", "")
+                src = f.get("source", "")
+                if desc:
+                    finding_texts.append(f"[{src}] {desc}" if src else desc)
+            if finding_texts:
+                pack = eng.build_hypothesis_pack(finding_texts)
+                result["hypothesis_pack"] = {
+                    "hypothesis_count": len(pack.hypotheses),
+                    "query_count": len(pack.suggested_queries),
+                    "ioc_follow_ups": len(pack.ioc_follow_ups),
+                    "source_hints_count": len(pack.source_hints),
+                    "provenance": pack.provenance,
+                    "top_queries": [
+                        {"query": q.get("query", ""), "rationale": q.get("rationale", "")[:80]}
+                        for q in (pack.suggested_queries or [])[:5]
+                        if isinstance(q, dict)
+                    ],
+                }
+        except Exception:
+            result["hypothesis_pack"] = None
+
+        # ── Branch value comparison ────────────────────────────────────────
+        try:
+            feed_f = self._result.accepted_findings or 0
+            pub_f = self._result.public_accepted_findings or 0
+            feed_h = self._result.total_pattern_hits or 0
+            pub_h = self._result.public_matched_patterns or 0
+            total = feed_f + pub_f
+            if total > 0:
+                feed_pct = round(feed_f / total * 100, 1)
+                pub_pct = round(pub_f / total * 100, 1)
+            else:
+                feed_pct = pub_pct = 0.0
+            # Sprint 8VN §B: Branch value verdict
+            if pub_f > feed_f * 1.5:
+                branch_verdict = "public_dominant"
+                recommendation = "expand_public_branch"
+            elif feed_f > pub_f * 1.5:
+                branch_verdict = "feed_dominant"
+                recommendation = "expand_feed_branch"
+            else:
+                branch_verdict = "balanced"
+                recommendation = "maintain_both"
+            result["branch_value"] = {
+                "feed_findings": feed_f,
+                "public_findings": pub_f,
+                "feed_pattern_hits": feed_h,
+                "public_pattern_hits": pub_h,
+                "feed_pct": feed_pct,
+                "public_pct": pub_pct,
+                "branch_verdict": branch_verdict,
+                "recommendation": recommendation,
+            }
+        except Exception:
+            result["branch_value"] = None
+
+        return result
+
     # ── Internal reset ────────────────────────────────────────────────────
 
     def _reset_result(self) -> None:
@@ -2052,6 +2209,11 @@ class SprintScheduler:
         self._shadow_pd_summary = None
         # Sprint 8VQ: Clear advisory gate snapshot
         self._advisory_gate_snapshot = None
+        # Sprint 8VN: Clear intelligence caches and findings accumulator
+        self._all_findings.clear()
+        self._correlation_cache = None
+        self._hypothesis_pack_cache = None
+        self._branch_value_summary = None
 
 
 # ---------------------------------------------------------------------------

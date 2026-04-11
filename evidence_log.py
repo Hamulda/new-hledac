@@ -1558,6 +1558,171 @@ class EvidenceLog:
             "persistence_enabled": self._enable_persist,
         }
 
+    def get_sprint_health_summary(self) -> Dict[str, Any]:
+        """
+        Compact retrospective seam for sprint health assessment.
+
+        Composes existing helpers to answer in one call:
+        - Sprint posture: observation-heavy vs decision-heavy vs error-heavy
+        - Quality signal integrity (where it broke)
+        - Decision confidence distribution
+        - Health status: healthy / degraded / noisy
+        - Top weak spots and error fragment patterns
+
+        Bounded, fail-soft, read-only. Uses existing helpers as primary
+        source; raw event iteration only when helpers don't suffice.
+
+        Returns:
+            Dict with health signals ready for export or local diagnostics
+        """
+        # ---- Compose existing helpers (primary source) ----
+        funnel = self.get_event_funnel()       # event_type counts, avg_conf, pct
+        decisions = self.get_decision_summary() # decision count, confidence, kinds
+        errors = self.get_error_rate()          # error_count, error_rate, low_conf_*
+
+        total = sum(v["count"] for v in funnel.values()) if funnel else 0
+
+        # ---- 1. SPRINT POSTURE ----
+        # Which event type dominates?
+        if not funnel:
+            posture = "empty"
+        else:
+            dominant = max(funnel.items(), key=lambda x: x[1]["count"])
+            dominant_pct = dominant[1]["pct"]
+            if dominant_pct < 40:
+                posture = "balanced"
+            elif dominant[0] == "observation":
+                posture = "observation_heavy"
+            elif dominant[0] == "decision":
+                posture = "decision_heavy"
+            elif dominant[0] == "tool_call":
+                posture = "tool_heavy"
+            elif dominant[0] == "error":
+                posture = "error_heavy"
+            elif dominant[0] == "synthesis":
+                posture = "synthesis_heavy"
+            else:
+                posture = f"{dominant[0]}_heavy"
+
+        # ---- 2. QUALITY SIGNAL ----
+        # Where did quality signal break? Derived from funnel avg_conf drops
+        quality_breaks = []
+        for et, data in funnel.items():
+            if data["avg_conf"] < 0.7:
+                quality_breaks.append({
+                    "event_type": et,
+                    "avg_conf": data["avg_conf"],
+                    "count": data["count"],
+                })
+        quality_signal = "intact" if not quality_breaks else "degraded"
+
+        # ---- 3. DECISION CONFIDENCE ----
+        decision_conf = decisions.get("avg_confidence", 0.0)
+        decision_min = decisions.get("min_confidence", 0.0)
+        decision_max = decisions.get("max_confidence", 0.0)
+        decision_count = decisions.get("count", 0)
+
+        # Pressure: low-confidence decisions (conf < 0.7) as pressure signal
+        # Count decisions with conf < 0.7 by looking at raw events (bounded)
+        low_conf_decisions = 0
+        if decision_count > 0:
+            for e in self.query(event_type="decision", limit=500):
+                if e.confidence < 0.7:
+                    low_conf_decisions += 1
+
+        # ---- 4. HEALTH STATUS ----
+        error_rate = errors.get("error_rate", 0.0)
+        low_conf_rate = errors.get("low_conf_rate", 0.0)
+
+        if posture == "empty" or total == 0:
+            health = "empty"
+        elif error_rate >= 20 or low_conf_rate >= 30:
+            health = "noisy"
+        elif error_rate >= 10 or low_conf_rate >= 20:
+            health = "degraded"
+        elif error_rate >= 5 or low_conf_rate >= 10:
+            health = "warning"
+        else:
+            health = "healthy"
+
+        # Override to error_heavy if errors dominate funnel
+        if posture == "error_heavy" and error_rate > 15:
+            health = "degraded" if health == "healthy" else health
+
+        # ---- 5. TOP WEAK SPOTS (bounded raw access) ----
+        weak_spots: Dict[str, int] = {}
+        error_events = self.query(event_type="error", limit=100)
+        for e in error_events:
+            payload = e.payload or {}
+            kind = payload.get("kind", "unknown")
+            msg = payload.get("message", "")[:50]
+            if msg:
+                key = f"[{kind}] {msg}"
+            else:
+                key = f"[{kind}]"
+            weak_spots[key] = weak_spots.get(key, 0) + 1
+
+        top_weak_spots = dict(
+            sorted(weak_spots.items(), key=lambda x: -x[1])[:5]
+        )
+
+        # ---- 6. RECENT HIGH-CONFIDENCE DECISIONS (last 3, conf >= 0.9) ----
+        recent_high_conf_decisions = []
+        for e in reversed(self.query(event_type="decision", limit=50)):
+            if e.confidence >= 0.9:
+                payload = e.payload or {}
+                recent_high_conf_decisions.append({
+                    "event_id": e.event_id[-12:],
+                    "kind": payload.get("kind", ""),
+                    "conf": e.confidence,
+                    "timestamp": e.timestamp.isoformat(),
+                })
+                if len(recent_high_conf_decisions) >= 3:
+                    break
+
+        # ---- 7. LOW-CONFIDENCE PRESSURE ----
+        low_conf_pressure = ""
+        if low_conf_decisions > 0 and decision_count > 0:
+            pressure_pct = low_conf_decisions / decision_count * 100
+            if pressure_pct > 30:
+                low_conf_pressure = "high"
+            elif pressure_pct > 15:
+                low_conf_pressure = "moderate"
+            else:
+                low_conf_pressure = "low"
+        else:
+            low_conf_pressure = "none"
+
+        return {
+            # Identity
+            "run_id": self._run_id,
+            "total_events": total,
+            "created_at": self._created_at.isoformat(),
+            # Posture
+            "posture": posture,
+            "dominant_pct": dominant[1]["pct"] if posture not in ("empty", "balanced") else 0.0,
+            # Quality signal
+            "quality_signal": quality_signal,
+            "quality_breaks": quality_breaks[:5],
+            # Decision confidence
+            "decision_count": decision_count,
+            "decision_avg_conf": round(decision_conf, 4),
+            "decision_conf_range": [round(decision_min, 4), round(decision_max, 4)],
+            "low_conf_decisions": low_conf_decisions,
+            "low_conf_pressure": low_conf_pressure,
+            # Error signal
+            "error_count": errors.get("error_count", 0),
+            "error_rate_pct": error_rate,
+            "low_conf_count": errors.get("low_conf_count", 0),
+            "low_conf_rate_pct": low_conf_rate,
+            # Health
+            "health": health,
+            # Weak spots
+            "top_weak_spots": top_weak_spots,
+            # Recent high-confidence decisions
+            "recent_high_conf_decisions": recent_high_conf_decisions,
+        }
+
     def get_chain(self, event_id: str) -> List[EvidenceEvent]:
         """
         Získá řetězec událostí vedoucí k dané události.

@@ -56,6 +56,126 @@ FEED_PAYLOAD_CONTEXT_CHARS: int = 200
 MAX_FEED_PATTERN_TASKS: int = 4
 
 # ---------------------------------------------------------------------------
+# Sprint F150H: Entry quality signal — lightweight metadata-aware routing
+# No LLM, no new model, no new dependency
+# ---------------------------------------------------------------------------
+
+# Minimum content length that qualifies as "substantive" for quality scoring
+_MIN_SUBSTANTIVE_CHARS: int = 80
+
+# Char-length thresholds for entry quality bands
+_QUALITY_TITLE_ONLY_CHARS: int = 60
+_QUALITY_SUMMARY_MIN_CHARS: int = 120
+
+# Language mismatch bonus — feed language vs common OSINT target languages
+# English (en), Czech (cs), Slovak (sk) — most relevant for this tool's use case
+_OSINT_RELEVANT_LANGUAGES: frozenset[str] = frozenset({"en", "cs", "sk", "de", "pl"})
+
+# Feed language codes that indicate high-value technical/security feeds
+_HIGH_VALUE_FEED_LANGS: frozenset[str] = frozenset({"en"})
+
+
+class EntryQualitySignal(msgspec.Struct, frozen=True, gc=False):
+    """
+    Lightweight quality signal for a single entry.
+    Used for routing decisions and observability — NOT for filtering findings.
+    """
+    quality_band: str = "unknown"      # "low" | "medium" | "high" | "unknown"
+    quality_score: int = 0             # 0-100
+    quality_reason_tag: str = ""       # short reason: "author_present" | "feed_title_context" | "language_match" | "rich_content" | "title_only" | etc.
+    metadata_boost: bool = False        # True if author/title/lang added signal beyond raw text
+    language_mismatch: bool = False    # True if feed_language known but not in OSINT_RELEVANT
+
+
+def _compute_entry_quality_signal(
+    title: str,
+    summary: str,
+    rich_content: str,
+    entry_author: str,
+    feed_title: str,
+    feed_language: str,
+) -> EntryQualitySignal:
+    """
+    Compute lightweight quality signal from entry metadata.
+
+    No LLM. No new model. Pure heuristic.
+    """
+    # Measure raw text substance
+    title_len = len(title.strip()) if title else 0
+    summary_len = len(summary.strip()) if summary else 0
+    rich_len = len(rich_content.strip()) if rich_content else 0
+
+    # Determine content substance
+    has_rich = rich_len >= _MIN_SUBSTANTIVE_CHARS
+    has_summary = summary_len >= _MIN_SUBSTANTIVE_CHARS
+    has_author = bool(entry_author and len(entry_author.strip()) >= 2)
+    has_feed_title = bool(feed_title and len(feed_title.strip()) >= 2)
+
+    # Language assessment
+    lang_mismatch = False
+    if feed_language:
+        lang_lower = feed_language.strip().lower()[:2]  # ISO 639-1 prefix
+        lang_mismatch = lang_lower not in _OSINT_RELEVANT_LANGUAGES
+
+    # Compute quality score (0-100)
+    score = 0
+
+    # Base: text substance
+    if has_rich:
+        score += 40
+    elif has_summary:
+        score += 20
+
+    if title_len > _QUALITY_TITLE_ONLY_CHARS:
+        score += 10
+
+    # Metadata boosts
+    metadata_boost = False
+    reason_tags: list[str] = []
+
+    if has_author:
+        score += 15
+        metadata_boost = True
+        reason_tags.append("author_present")
+
+    if has_feed_title:
+        score += 10
+        metadata_boost = True
+        reason_tags.append("feed_title_context")
+
+    if not lang_mismatch and feed_language:
+        score += 10
+        reason_tags.append("language_match")
+
+    # Clamp score
+    score = min(score, 100)
+
+    # Quality band
+    if has_rich or (has_summary and score >= 50):
+        band = "high"
+    elif score >= 30:
+        band = "medium"
+    elif score >= 10:
+        band = "low"
+    else:
+        band = "unknown"
+
+    if not reason_tags:
+        if title_len > 0:
+            reason_tags.append("title_only")
+        else:
+            reason_tags.append("no_content")
+
+    return EntryQualitySignal(
+        quality_band=band,
+        quality_score=score,
+        quality_reason_tag=",".join(reason_tags),
+        metadata_boost=metadata_boost,
+        language_mismatch=lang_mismatch,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Patchable symbol for pattern offload (tests patch this, not asyncio.to_thread)
 # ---------------------------------------------------------------------------
 
@@ -274,23 +394,43 @@ def _assemble_enriched_feed_text(
     title: str,
     summary: str,
     rich_content: str,
+    feed_title: str = "",
+    entry_author: str = "",
 ) -> tuple[str, str]:
     """
-    Assemble deterministic clean text from title + summary + rich_content.
+    Assemble deterministic clean text from title + summary + rich_content + metadata.
 
     Sprint 8BE PHASE 1 + F150H: source-specific text enrichment with
     corrected priority so rich HTML content is used as primary surface.
+    Metadata (feed_title, entry_author) are prepended as lightweight context anchors.
 
     Priority hierarchy:
-    1. rich_content (converted, if substantive — HTML articles etc.)
-    2. summary (stripped and cleaned, if non-empty)
-    3. title (as final anchor when nothing else available)
-    4. sentinel "[no content]" if all empty
+    1. feed_title + author as metadata context header (if available)
+    2. rich_content (converted, if substantive — HTML articles etc.)
+    3. summary (stripped and cleaned, if non-empty)
+    4. title (as final anchor when nothing else available)
+    5. sentinel "[no content]" if all empty
 
     Returns (clean_text, enrichment_phase).
     """
     parts: list[str] = []
     enrichment_phase = "none"
+
+    # Priority 0: metadata context header — feed_title and author as lightweight anchors
+    # These are prepended at the top so PatternMatcher sees them first
+    # Bounded: only add if they provide genuine context beyond the title
+    meta_parts: list[str] = []
+    if feed_title and feed_title.strip():
+        ft = feed_title.strip()
+        if ft != title.strip():  # avoid duplicating title
+            meta_parts.append(ft)
+    if entry_author and entry_author.strip() and len(entry_author.strip()) >= 2:
+        ea = entry_author.strip()
+        # Only add author if not already embedded in title
+        if ea.lower() not in title.lower():
+            meta_parts.append(f"by {ea}")
+    if meta_parts:
+        parts.append(" | ".join(meta_parts))
 
     # Priority 1: rich_content first — full HTML articles from content:encoded / Atom content
     # Only use converted text if it's substantive (avoids noise from tiny HTML fragments)
@@ -693,32 +833,62 @@ async def _entry_to_pattern_findings(
     feed_url: str,
     entry: Any,
     query_context: str | None,
-) -> tuple[list[dict], int, int, int, str, str, bool, bool]:
+) -> tuple[list[dict], int, int, int, str, str, bool, bool, EntryQualitySignal]:
     """
     Entry -> pattern-backed CanonicalFinding dicts.
 
-    Returns (findings, patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted).
+    Returns (findings, patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted, quality_signal).
     Empty registry = valid zero-findings state (patterns_configured=0, matched=0).
     enrichment_phase: "feed_rich_content" | "article_fallback" | "none"
     article_fallback_used: True if article was fetched and enriched
+    quality_signal: EntryQualitySignal with metadata-aware quality assessment
     """
     title = getattr(entry, "title", "") or ""
     summary = getattr(entry, "summary", "") or ""
     rich_content = getattr(entry, "rich_content", "") or ""
     entry_url = getattr(entry, "entry_url", "") or ""
+    # Sprint F150H: extract metadata for quality scoring
+    entry_author = getattr(entry, "entry_author", "") or ""
+    feed_title = getattr(entry, "feed_title", "") or ""
+    feed_language = getattr(entry, "feed_language", "") or ""
 
     if not entry_url:
         entry_url = f"urn:feed:entry:{title[:64]}"
 
-    # Sprint 8BE PHASE 1: use enriched assembly (title + summary + rich_content)
-    clean_text, enrichment_phase = _assemble_enriched_feed_text(title, summary, rich_content)
+    # Sprint F150H: compute quality signal BEFORE assembly so it informs fallback decision
+    quality_signal = _compute_entry_quality_signal(
+        title=title,
+        summary=summary,
+        rich_content=rich_content,
+        entry_author=entry_author,
+        feed_title=feed_title,
+        feed_language=feed_language,
+    )
+
+    # Sprint 8BE PHASE 1: use enriched assembly (title + summary + rich_content + metadata)
+    clean_text, enrichment_phase = _assemble_enriched_feed_text(
+        title, summary, rich_content, feed_title=feed_title, entry_author=entry_author
+    )
     assembled_text_len = len(clean_text)
     article_fallback_used = False
 
-    # Sprint 8BE PHASE 2: article fallback when assembled text is too short
-    # Invariant: only fetch if assembled_len < 400 and entry_url is valid http/https
+    # Sprint 8BE PHASE 2 + F150H: smarter article fallback decision
+    # Rule: skip fallback if feed-native content is already high-quality.
+    #       Force fallback if metadata suggests high relevance but content is weak.
+    # Always respect the hard 250-char threshold; quality_signal refines within that.
+    should_skip_fallback = (
+        assembled_text_len >= _MIN_ARTICLE_FALLBACK_CHARS
+        and quality_signal.quality_band in ("high", "medium")
+    )
+    # High-relevance metadata + weak content → force fallback even if above threshold
+    force_fallback = (
+        assembled_text_len < _MIN_ARTICLE_FALLBACK_CHARS
+        and quality_signal.metadata_boost
+        and not quality_signal.language_mismatch
+    )
+
     article_fallback_attempted = False
-    if assembled_text_len < _MIN_ARTICLE_FALLBACK_CHARS:
+    if not should_skip_fallback and (force_fallback or assembled_text_len < _MIN_ARTICLE_FALLBACK_CHARS):
         article_text = ""
         article_success = False
         try:
@@ -762,7 +932,7 @@ async def _entry_to_pattern_findings(
     matched_patterns = len(hits)
 
     if not hits:
-        return ([], patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted)
+        return ([], patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted, quality_signal)
 
     # Per-entry dedup by (label, pattern, value)
     entry_deduper = _EntryDeduper()
@@ -781,7 +951,7 @@ async def _entry_to_pattern_findings(
         )
         findings.append(finding)
 
-    return (findings, patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted)
+    return (findings, patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted, quality_signal)
 
 
 # ---------------------------------------------------------------------------
@@ -979,7 +1149,7 @@ async def async_run_live_feed_pipeline(
 
         # Pattern scan + mapping — fail-soft per entry
         try:
-            findings, patterns_cfg, matched, assembled_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted = await _entry_to_pattern_findings(
+            findings, patterns_cfg, matched, assembled_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted, quality_signal = await _entry_to_pattern_findings(
                 feed_url, entry, query_context
             )
         except asyncio.CancelledError:
