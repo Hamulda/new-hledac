@@ -109,6 +109,13 @@ def run_pre_sprint_checks() -> bool:
 # =============================================================================
 
 
+def _derive_top_source(hits_per_source: dict[str, int]) -> str:
+    """Return source with most hits, or empty string if no data."""
+    if not hits_per_source:
+        return ""
+    return max(hits_per_source, key=lambda k: hits_per_source[k])
+
+
 async def write_sprint_delta(
     store: DuckDBShadowStore,
     sprint_id: str,
@@ -119,23 +126,27 @@ async def write_sprint_delta(
     uma_baseline_gib: float,
     uma_peak_gib: float,
     synthesis_success: bool,
+    duration_s: float,
+    hits_per_source: dict[str, int],
 ) -> None:
     """Write sprint_delta record to DuckDB at TEARDOWN."""
     try:
+        findings_per_min = (new_findings / (duration_s / 60.0)) if duration_s > 0 else 0.0
+        top_source = _derive_top_source(hits_per_source)
         row = {
             "sprint_id": sprint_id,
             "ts": time.time(),
             "query": query,
-            "duration_s": 0,
+            "duration_s": duration_s,
             "new_findings": new_findings,
             "dedup_hits": dedup_hits,
             "ioc_nodes": ioc_nodes,
-            "ioc_new_this_sprint": 0,
+            "ioc_new_this_sprint": new_findings,
             "uma_peak_gib": uma_peak_gib - uma_baseline_gib,
             "synthesis_success": synthesis_success,
-            "findings_per_min": 0.0,
-            "top_source_type": "",
-            "synthesis_confidence": 0.0,
+            "findings_per_min": findings_per_min,
+            "top_source_type": top_source,
+            "synthesis_confidence": 1.0 if synthesis_success else 0.0,
         }
         # Wait for store to be healthy
         for _ in range(40):
@@ -146,7 +157,9 @@ async def write_sprint_delta(
         logger.info(
             f"[TEARDOWN] sprint_delta written: {new_findings} findings, "
             f"{dedup_hits} dedup hits, "
-            f"UMA delta: {uma_peak_gib - uma_baseline_gib:+.2f}GiB"
+            f"UMA delta: {uma_peak_gib - uma_baseline_gib:+.2f}GiB, "
+            f"top_source: {top_source!r}, "
+            f"findings_per_min: {findings_per_min:.2f}"
         )
     except Exception as exc:
         logger.warning(f"[TEARDOWN] sprint_delta write failed: {exc}")
@@ -205,6 +218,9 @@ async def run_sprint(
 
         _phase_times["WINDUP"] = time.monotonic()
 
+        # Actual sprint elapsed (BOOT → WINDUP)
+        actual_duration = _phase_times["WINDUP"] - _phase_times["BOOT"]
+
         # UMA peak
         uma_peak_gib = sample_uma_status().system_used_gib
 
@@ -215,10 +231,12 @@ async def run_sprint(
             query=query,
             new_findings=result.accepted_findings,
             dedup_hits=result.duplicate_entry_hashes_skipped,
-            ioc_nodes=0,
+            ioc_nodes=result.unique_entry_hashes_seen,
             uma_baseline_gib=uma_baseline_gib,
             uma_peak_gib=uma_peak_gib,
             synthesis_success=result.accepted_findings > 0,
+            duration_s=actual_duration,
+            hits_per_source=result.hits_per_source,
         )
 
         _phase_times["TEARDOWN"] = time.monotonic()

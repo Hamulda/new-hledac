@@ -93,6 +93,49 @@ def _validate_url(url: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Retry constants — bounded, M1-safe
+# ---------------------------------------------------------------------------
+
+MAX_RETRIES: Final[int] = 1  # exactly one retry; no infinite loops
+_RETRYABLE_STATUS_CODES: Final[frozenset[int]] = frozenset({429, 502, 503, 504, 520})
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    return status_code in _RETRYABLE_STATUS_CODES
+
+
+def _extract_retry_after(headers) -> float | None:
+    """Parse Retry-After header, return seconds or None."""
+    ra = headers.get("Retry-After") or headers.get("retry-after")
+    if ra is None:
+        return None
+    try:
+        return float(ra)
+    except (ValueError, TypeError):
+        return None
+
+
+def _compute_backoff_seconds(retry_after: float | None, attempt: int) -> float:
+    """Return bounded backoff in seconds.
+
+    Uses Retry-After if available, otherwise exponential backoff capped at 8 s.
+    Attempt 0 = no backoff (first failure already counted).
+    """
+    if retry_after is not None and retry_after > 0:
+        return min(retry_after, 60.0)  # cap at 60 s to bound pause
+    return min(2.0 ** (attempt + 1), 8.0)  # 4 s, capped at 8 s
+
+
+def _build_retry_error(status_code: int, retry_after: float | None) -> str:
+    parts = [f"retryable:{status_code}"]
+    if retry_after is not None:
+        parts.append(f"retry_after={retry_after:.1f}s")
+    else:
+        parts.append("backoff=exp")
+    return "|".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Main fetch function
 # ---------------------------------------------------------------------------
 
@@ -161,124 +204,159 @@ async def async_fetch_public_text(
     if max_bytes > MAX_BYTES_HARD:
         max_bytes = MAX_BYTES_HARD
 
-    # --- Session from shared runtime ---
-    session = await async_get_aiohttp_session()
+    # --- Retryable status tracking ---
+    retry_after: float | None = None
+    last_status_code: int = 0
+    last_error: str | None = None
 
-    headers = {"User-Agent": DEFAULT_UA}
+    for attempt in range(MAX_RETRIES + 1):
+        session = await async_get_aiohttp_session()
+        headers = {"User-Agent": DEFAULT_UA}
 
-    try:
-        # Use asyncio.timeout() for deadline awareness
-        async with asyncio.timeout(timeout_s):
-            async with session.get(url, headers=headers, allow_redirects=True) as resp:
-                final_url = str(resp.url)
-                status_code = resp.status
-                content_type = resp.headers.get("Content-Type", "")
-                raw_content_type = content_type.split(";")[0].strip().lower()
+        try:
+            async with asyncio.timeout(timeout_s):
+                async with session.get(url, headers=headers, allow_redirects=True) as resp:
+                    final_url = str(resp.url)
+                    last_status_code = resp.status
+                    content_type = resp.headers.get("Content-Type", "")
+                    raw_content_type = content_type.split(";")[0].strip().lower()
 
-                # --- Content-type gate ---
-                if raw_content_type not in ACCEPTED_CONTENT_TYPES:
-                    elapsed_ms = (time.monotonic() - t0) * 1000
-                    return FetchResult(
-                        url=url,
-                        final_url=final_url,
-                        status_code=status_code,
-                        content_type=content_type,
-                        text=None,
-                        fetched_bytes=0,
-                        declared_length=-1,
-                        elapsed_ms=elapsed_ms,
-                        error=f"content_type_rejected:{raw_content_type}",
-                    )
-
-                # --- Chunked body read with size cap ---
-                body_chunks: list[bytes] = []
-                total_read = 0
-                accumulated_ok = True
-
-                # declared length from header (may be -1 / absent)
-                raw_declared = resp.headers.get("Content-Length")
-                try:
-                    declared_length = int(raw_declared) if raw_declared else -1
-                except (ValueError, TypeError):
-                    declared_length = -1
-
-                async for chunk in resp.content.iter_chunked(8192):
-                    chunk_len = len(chunk)
-                    if total_read + chunk_len > max_bytes:
-                        # Truncate at cap — take only what fits
-                        remaining = max_bytes - total_read
-                        if remaining > 0:
-                            body_chunks.append(chunk[:remaining])
-                            total_read += remaining
-                        accumulated_ok = False
+                    # --- Retryable status → wait and retry once ---
+                    if _is_retryable_status(last_status_code):
+                        last_error = _build_retry_error(last_status_code, retry_after)
+                        if attempt < MAX_RETRIES:
+                            retry_after = _extract_retry_after(resp.headers)
+                            backoff = _compute_backoff_seconds(retry_after, attempt)
+                            await asyncio.sleep(backoff)
+                            continue
+                        # Exhausted retries — return with error prefix
                         elapsed_ms = (time.monotonic() - t0) * 1000
                         return FetchResult(
                             url=url,
                             final_url=final_url,
-                            status_code=status_code,
+                            status_code=last_status_code,
                             content_type=content_type,
                             text=None,
-                            fetched_bytes=total_read,
-                            declared_length=declared_length,
+                            fetched_bytes=0,
+                            declared_length=-1,
                             elapsed_ms=elapsed_ms,
-                            error="size_cap_exceeded",
+                            error=last_error,
                         )
-                    body_chunks.append(chunk)
-                    total_read += chunk_len
 
-                # --- Decode ---
-                if accumulated_ok and body_chunks:
+                    # --- Content-type gate ---
+                    if raw_content_type not in ACCEPTED_CONTENT_TYPES:
+                        elapsed_ms = (time.monotonic() - t0) * 1000
+                        return FetchResult(
+                            url=url,
+                            final_url=final_url,
+                            status_code=last_status_code,
+                            content_type=content_type,
+                            text=None,
+                            fetched_bytes=0,
+                            declared_length=-1,
+                            elapsed_ms=elapsed_ms,
+                            error=f"content_type_rejected:{raw_content_type}",
+                        )
+
+                    # --- Chunked body read with size cap ---
+                    body_chunks: list[bytes] = []
+                    total_read = 0
+                    accumulated_ok = True
+
+                    raw_declared = resp.headers.get("Content-Length")
                     try:
-                        body_bytes = b"".join(body_chunks)
-                        text = body_bytes.decode("utf-8", errors="replace")
-                    except Exception:
+                        declared_length = int(raw_declared) if raw_declared else -1
+                    except (ValueError, TypeError):
+                        declared_length = -1
+
+                    async for chunk in resp.content.iter_chunked(8192):
+                        chunk_len = len(chunk)
+                        if total_read + chunk_len > max_bytes:
+                            remaining = max_bytes - total_read
+                            if remaining > 0:
+                                body_chunks.append(chunk[:remaining])
+                                total_read += remaining
+                            accumulated_ok = False
+                            elapsed_ms = (time.monotonic() - t0) * 1000
+                            return FetchResult(
+                                url=url,
+                                final_url=final_url,
+                                status_code=last_status_code,
+                                content_type=content_type,
+                                text=None,
+                                fetched_bytes=total_read,
+                                declared_length=declared_length,
+                                elapsed_ms=elapsed_ms,
+                                error="size_cap_exceeded",
+                            )
+                        body_chunks.append(chunk)
+                        total_read += chunk_len
+
+                    if accumulated_ok and body_chunks:
+                        try:
+                            body_bytes = b"".join(body_chunks)
+                            text = body_bytes.decode("utf-8", errors="replace")
+                        except Exception:
+                            text = None
+                    else:
                         text = None
-                else:
-                    text = None
 
-                elapsed_ms = (time.monotonic() - t0) * 1000
-                return FetchResult(
-                    url=url,
-                    final_url=final_url,
-                    status_code=status_code,
-                    content_type=content_type,
-                    text=text,
-                    fetched_bytes=total_read,
-                    declared_length=declared_length,
-                    elapsed_ms=elapsed_ms,
-                    error=None,
-                )
+                    elapsed_ms = (time.monotonic() - t0) * 1000
+                    return FetchResult(
+                        url=url,
+                        final_url=final_url,
+                        status_code=last_status_code,
+                        content_type=content_type,
+                        text=text,
+                        fetched_bytes=total_read,
+                        declared_length=declared_length,
+                        elapsed_ms=elapsed_ms,
+                        error=None,
+                    )
 
-    except asyncio.TimeoutError:
-        elapsed_ms = (time.monotonic() - t0) * 1000
-        return FetchResult(
-            url=url,
-            final_url=url,
-            status_code=0,
-            content_type="",
-            text=None,
-            fetched_bytes=0,
-            declared_length=-1,
-            elapsed_ms=elapsed_ms,
-            error="timeout",
-        )
-    except asyncio.CancelledError:
-        # Never swallow CancelledError — re-raise so the cancellation propagates
-        elapsed_ms = (time.monotonic() - t0) * 1000
-        raise
-    except Exception as exc:
-        elapsed_ms = (time.monotonic() - t0) * 1000
-        return FetchResult(
-            url=url,
-            final_url=url,
-            status_code=0,
-            content_type="",
-            text=None,
-            fetched_bytes=0,
-            declared_length=-1,
-            elapsed_ms=elapsed_ms,
-            error=f"fetch_error:{type(exc).__name__}:{exc}",
-        )
+        except asyncio.TimeoutError:
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            return FetchResult(
+                url=url,
+                final_url=url,
+                status_code=0,
+                content_type="",
+                text=None,
+                fetched_bytes=0,
+                declared_length=-1,
+                elapsed_ms=elapsed_ms,
+                error="timeout",
+            )
+        except asyncio.CancelledError:
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            raise
+        except Exception as exc:
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            return FetchResult(
+                url=url,
+                final_url=url,
+                status_code=0,
+                content_type="",
+                text=None,
+                fetched_bytes=0,
+                declared_length=-1,
+                elapsed_ms=elapsed_ms,
+                error=f"fetch_error:{type(exc).__name__}:{exc}",
+            )
+
+    # Should not reach here, but as safeguard:
+    elapsed_ms = (time.monotonic() - t0) * 1000
+    return FetchResult(
+        url=url,
+        final_url=url,
+        status_code=last_status_code,
+        content_type="",
+        text=None,
+        fetched_bytes=0,
+        declared_length=-1,
+        elapsed_ms=elapsed_ms,
+        error=last_error or "retry_exhausted",
+    )
 
 
 __all__ = [
@@ -287,7 +365,11 @@ __all__ = [
     "DEFAULT_UA",
     "MAX_BYTES_DEFAULT",
     "MAX_BYTES_HARD",
+    "MAX_RETRIES",
     "FetchResult",
+    "_is_retryable_status",
+    "_extract_retry_after",
+    "_compute_backoff_seconds",
 ]
 
 # ---------------------------------------------------------------------------

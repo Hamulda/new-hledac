@@ -256,6 +256,13 @@ class SprintSchedulerResult:
     aborted: bool = False
     abort_reason: str = ""
     stop_requested: bool = False  # True when stop_on_first_accepted triggered
+    # Sprint 8XE: Public discovery pipeline results (canonical path parity)
+    public_discovered: int = 0
+    public_fetched: int = 0
+    public_matched_patterns: int = 0
+    public_accepted_findings: int = 0
+    public_stored_findings: int = 0
+    public_error: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +288,18 @@ def _import_live_feed_pipeline():
         FeedPipelineRunResult,
     )
     return async_run_live_feed_pipeline, FeedPipelineRunResult
+
+
+# ---------------------------------------------------------------------------
+# Live-public pipeline seam (lazy import — Sprint 8XE canonical parity)
+# ---------------------------------------------------------------------------
+
+def _import_live_public_pipeline():
+    from hledac.universal.pipeline.live_public_pipeline import (
+        async_run_live_public_pipeline,
+        PipelineRunResult,
+    )
+    return async_run_live_public_pipeline, PipelineRunResult
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +384,8 @@ class SprintScheduler:
         self._novelty_bonuses: dict[str, float] = {}  # source_type → novelty multiplier
         # Sprint 8TB: Agentic Pivot Loop state
         self._pivot_queue: asyncio.PriorityQueue[PivotTask] = asyncio.PriorityQueue(maxsize=200)
+        # Sprint 8XE: Last sources list for public discovery query hint
+        self._last_sources: list[str] = []
         self._pivot_stats: dict[str, int] = {"total": 0, "processed": 0, "errors": 0}
         self._pivot_ioc_graph: Any = None  # IOCGraph reference injected via inject_ioc_graph
         # Sprint 8UC B.4: Speculative prefetch
@@ -549,6 +570,8 @@ class SprintScheduler:
                     break
 
                 self._result.cycles_started += 1
+                # Sprint 8XE: Store sources for public discovery query hint
+                self._last_sources = list(ordered_sources)
                 cycle_ok = await self._run_one_cycle(
                     lifecycle, ordered_sources, now_monotonic
                 )
@@ -686,7 +709,72 @@ class SprintScheduler:
         for feed_url, result in results:
             self._process_result(feed_url, result)
 
+        # Sprint 8XE: Run public discovery pipeline in same cycle (canonical parity)
+        # Both pipelines run concurrently via TaskGroup; failure of one does not fail the other
+        await self._run_public_discovery_in_cycle()
+
         return True
+
+    async def _run_public_discovery_in_cycle(self) -> None:
+        """
+        Sprint 8XE: Run public discovery pipeline in the current cycle.
+
+        Uses asyncio.TaskGroup for bounded concurrency with the feed pipeline.
+        Fail-soft: errors are accumulated but never raise or abort the sprint.
+
+        Query is derived from sources list (first source as primary query hint).
+        UMA check is handled inside the pipeline itself.
+        """
+        try:
+            async_run_public, PipelineRunResult = _import_live_public_pipeline()
+        except Exception as exc:
+            log.debug(f"[8XE] Public pipeline import failed: {exc}")
+            self._result.public_error = f"import:{type(exc).__name__}"
+            return
+
+        # Build query hint from sources (same pattern as __main__.py)
+        sources = getattr(self, "_last_sources", None)
+        query_hint = "OSINT passive discovery"
+        if sources and len(sources) > 0:
+            query_hint = str(sources[0]) if sources[0] else query_hint
+
+        try:
+            async with asyncio.TaskGroup() as tg:
+                public_task = tg.create_task(
+                    async_run_public(
+                        query=query_hint,
+                        store=None,  # Sprint 8XE: canonical path — no store override
+                        max_results=5,
+                        fetch_timeout_s=35.0,
+                        fetch_concurrency=3,
+                    )
+                )
+
+            public_result = public_task.result()
+
+            # Accumulate into result — fail-soft aggregation
+            self._result.public_discovered += public_result.discovered
+            self._result.public_fetched += public_result.fetched
+            self._result.public_matched_patterns += public_result.matched_patterns
+            self._result.public_accepted_findings += public_result.accepted_findings
+            self._result.public_stored_findings += public_result.stored_findings
+            if public_result.error:
+                self._result.public_error = public_result.error
+
+            # Sprint 8VD §F: Track public findings in scorecard count
+            self._finding_count += public_result.accepted_findings
+
+            log.debug(
+                f"[8XE] Public discovery: discovered={public_result.discovered} "
+                f"matched={public_result.matched_patterns} "
+                f"accepted={public_result.accepted_findings}"
+            )
+
+        except asyncio.CancelledError:
+            raise  # [I6] propagate
+        except Exception as exc:
+            log.debug(f"[8XE] Public pipeline error: {exc}")
+            self._result.public_error = f"{type(exc).__name__}:{exc}"
 
     def _build_work_items(
         self, sources: Sequence[str]

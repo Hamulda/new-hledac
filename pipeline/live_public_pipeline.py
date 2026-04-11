@@ -402,9 +402,7 @@ async def _fetch_and_process_page(
                         # ActivationResult — accepted if stored
                         if sr.lmdb_success:
                             stored_count += 1
-                    else:
-                        # Fallback: count as accepted
-                        stored_count += 1
+                    # else: Fallback: unknown result type — do NOT overcount
             except asyncio.CancelledError:
                 raise  # [I6]
             except Exception:

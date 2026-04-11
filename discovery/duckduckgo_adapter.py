@@ -37,6 +37,8 @@ SOURCE_NAME: str = "duckduckgo"
 DEFAULT_MAX_RESULTS: int = 10
 HARD_MAX_RESULTS: int = 50
 DEFAULT_TIMEOUT_S: float = 35.0
+# Domain diversity cap: at most this fraction of results from a single host.
+MAX_HOST_SHARE_RATIO: float = 0.4
 
 # ---------------------------------------------------------------------------
 # DTO contracts
@@ -105,16 +107,48 @@ def last_error() -> str | None:
 # URL normalisation for per-call dedup
 # ---------------------------------------------------------------------------
 
+# Tracking / junk query parameters to strip during normalisation.
+# Covers utm_*, fbclid, gclid, msclkid, dclid, twclid, at_* and similar.
+# Uses prefix matching so adding new variants needs no code change.
+_TRACKING_PARAM_PREFIXES: tuple[str, ...] = (
+    "utm_",
+    "fbclid",
+    "gclid",
+    "msclkid",
+    "dclid",
+    "twclid",
+    "at_",
+    "_ga",
+    "_gl",
+    "mc_cid",
+    "mc_eid",
+    "oly_enc_id",
+    "oly_anon_id",
+    "ref_src",
+    "ref_url",
+    "source",
+)
+
+
+def _is_tracking_param(param: str) -> bool:
+    """Return True if query param is a known tracking/advertising identifier."""
+    p = param.lower()
+    return any(p == prefix or p.startswith(prefix) for prefix in _TRACKING_PARAM_PREFIXES)
+
 
 def _normalize_url_for_dedup(raw_url: str) -> str:
     """
-    Minimal URL normalisation for deduplication only.
+    Robust URL normalisation for deduplication.
 
-    Rules:
-    1. Lower-case scheme + host
-    2. Strip trailing slash from path only (keep root-only "http://host/")
-    3. Remove solitary trailing "?"
-    4. Preserve fragment (user may want #section anchors)
+    Rules (bounded, deterministic):
+      1. Lower-case scheme + host
+      2. Strip leading "www." prefix from host (noise, not semantically distinct)
+      3. Collapse consecutive slashes in path to single slash
+      4. Strip trailing slash from non-root paths
+      5. Remove tracking / ad identifiers from query string
+      6. Drop empty fragment; drop lone trailing "?"
+      7. Normalise path "." and ".." components
+      8. Lower-case the remaining query keys for consistency
     """
     if not raw_url:
         return ""
@@ -122,27 +156,66 @@ def _normalize_url_for_dedup(raw_url: str) -> str:
     try:
         parsed = urlparse.urlparse(raw_url)
         scheme = parsed.scheme.lower() if parsed.scheme else "https"
-        netloc = parsed.netloc.lower() if parsed.netloc else ""
+        netloc = (parsed.netloc or "").lower()
+
+        # Strip "www." prefix — same resource, different subdomain noise
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
 
         path = parsed.path
-        # strip trailing slash only when path is non-empty (avoids "http://host/" -> "http://host")
+
+        # Collapse multi-slashes (// → /)
+        while "//" in path:
+            path = path.replace("//", "/")
+
+        # Resolve "." and ".." path components
+        segments = path.split("/")
+        resolved: list[str] = []
+        for seg in segments:
+            if seg == "" or seg == ".":
+                continue
+            if seg == "..":
+                if resolved:
+                    resolved.pop()
+            else:
+                resolved.append(seg)
+
+        path = ("/" + "/".join(resolved) if resolved else "/").lower()
+        # Strip trailing slash from non-root path
         if path.endswith("/") and len(path) > 1:
             path = path.rstrip("/")
 
-        query = parsed.query
-        # drop lone "?" with no real query params
+        # Filter tracking/ad identifiers from query params
+        raw_params = [p.strip() for p in parsed.query.split("&") if p.strip()]
+        kept_params: list[str] = []
+        for p in raw_params:
+            key = p.split("=", 1)[0] if "=" in p else p
+            if not _is_tracking_param(key):
+                kept_params.append(p.lower())  # normalise key case
+
+        query = "&".join(kept_params)
         if query == "?":
             query = ""
 
-        fragment = parsed.fragment
+        # Drop fragment — #section anchors vary across pages but same content
+        fragment = ""
 
         return urlparse.urlunsplit((scheme, netloc, path, query, fragment))
     except Exception:  # pragma: no cover — defensive, malformed URL
-        # Fallback: lowercase as much as reasonably possible
         lower = raw_url.lower()
+        if lower.startswith("www."):
+            lower = lower[4:]
         if lower.endswith("/") and len(lower) > 1:
             lower = lower.rstrip("/")
         return lower
+
+
+def _extract_host(norm_url: str) -> str:
+    """Extract lower-case host from a normalised URL (already urlparse'd)."""
+    try:
+        return urlparse.urlparse(norm_url).netloc
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -266,13 +339,15 @@ async def async_search_public_web(
         _last_error = error_tag
         return DiscoveryBatchResult(hits=(), error=error_tag)
 
-    # ---- normalise + dedup -------------------------------------------------
+    # ---- normalise + dedup + domain-diversity -------------------------------
     # URL -> (original_rank, DiscoveryHit) — preserve first-seen
     seen_urls: dict[str, int] = {}
+    host_counts: dict[str, int] = {}
     retrieved_ts = time.time()
     hits_list: list[DiscoveryHit] = []
+    max_from_host = max(1, int(max_results * MAX_HOST_SHARE_RATIO))
 
-    for _rank, raw in enumerate(raw_hits):
+    for raw in raw_hits:
         raw_url = raw.get("url") or ""
         title = raw.get("title") or ""
         snippet = raw.get("body") or raw.get("snippet") or ""
@@ -281,7 +356,13 @@ async def async_search_public_web(
         if not norm or norm in seen_urls:
             continue
 
+        host = _extract_host(norm)
+        if host and host_counts.get(host, 0) >= max_from_host:
+            # Domain cap reached — skip this hit, don't break to allow smaller hosts through
+            continue
+
         seen_urls[norm] = len(hits_list)
+        host_counts[host] = host_counts.get(host, 0) + 1
         hits_list.append(
             DiscoveryHit(
                 query=trimmed,

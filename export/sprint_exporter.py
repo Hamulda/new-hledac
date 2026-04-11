@@ -6,6 +6,13 @@
 Sprint 8VI §A: EXPORT fáze — export_sprint() + _generate_next_sprint_seeds()
 Sprint 8VJ §C: ExportHandoff | dict → typed handoff spotřeba
 Sprint 8VX §A: Finish-up — removal conditions tightened, comments aligned with reality
+Sprint F150I: product_value_summary — přenáší do exportu to, co runtime už ví:
+  - accepted/stored reality z dedup status
+  - reject breakdown (low-info / duplicate / fail-open)
+  - circuit breaker state pokud je k dispozici
+  - gnn_predictions signal
+  - phase_durations timing truth
+  - robustnější seed derivation (divný input → skip, ne pád)
 """
 
 from __future__ import annotations
@@ -13,14 +20,17 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
-from typing import Any, Union
+from typing import TYPE_CHECKING, Any, Union
+
+if TYPE_CHECKING:
+    from hledac.universal.types import ExportHandoff
 
 logger = logging.getLogger(__name__)
 
 
 async def export_sprint(
     store: Any,
-    handoff: Union["ExportHandoff", dict, None],
+    handoff: Union["ExportHandoff", dict, None],  # type: ignore[name-defined]
     sprint_id: str | None = None,
 ) -> dict:
     """
@@ -35,6 +45,7 @@ async def export_sprint(
       1. JSON report do ~/.hledac/reports/{sprint_id}_report.json
          Canonical path owner: paths.get_sprint_json_report_path() (post-F500B)
       2. Seed tasky pro příští sprint z top IOC graph nodes
+      3. Sprint F150I: product_value_summary — decisions有用的 pro další sprinty
 
     PRIMARY HANDOFF SURFACE (Sprint 8VX):
       - ExportHandoff.top_nodes — kanonický zdroj pro seed generation
@@ -90,6 +101,9 @@ async def export_sprint(
         }
         sanitized_scorecard_raw = json.dumps(degraded, default=str)
 
+    # Sprint F150I §2: Build product_value_summary from all existing surfaces
+    pvs = _build_product_value_summary(store, eh, _sprint_id)
+
     # 1. JSON report — write via canonical path (F10 boundary applied)
     # report_path already computed via get_sprint_json_report_path() above
     try:
@@ -110,6 +124,14 @@ async def export_sprint(
             sanitized_obj = json.loads(sanitized_scorecard_raw[:5000]) if sanitized_scorecard_raw else {}
             if sanitized_obj is None:
                 sanitized_obj = {}
+
+        # Sprint F150I §3: Attach product_value_summary to JSON report (derived output)
+        if isinstance(sanitized_obj, dict):
+            sanitized_obj["product_value_summary"] = pvs
+        elif isinstance(sanitized_obj, list):
+            # Edge case: truncated JSON is a list — wrap in dict with pvs
+            sanitized_obj = {"_truncated_content": sanitized_obj, "product_value_summary": pvs}
+
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(sanitized_obj, f, indent=2, default=str)
         logger.info(f"[EXPORT] JSON report → {report_path}")
@@ -145,6 +167,7 @@ async def export_sprint(
     return {
         "report_json": str(report_path) if report_path else "",
         "seeds_json": str(seeds_path),
+        "product_value_summary": pvs,
     }
 
 
@@ -175,6 +198,8 @@ def _generate_next_sprint_seeds(
       - url → rdap_lookup only
       - infohash → dht_infohash_lookup only
       - onion/cve/hash/unknown → NO seeds (truthful skip)
+
+    Sprint F150I §5: Robust seed derivation — divný input → skip, not crash.
     """
     # Sprint F500D §3: Use canonical helper; colocation via report_path parent
     from hledac.universal.paths import get_sprint_next_seeds_path, SPRINT_STORE_ROOT
@@ -189,14 +214,30 @@ def _generate_next_sprint_seeds(
 
     try:
         for node in top_nodes:
-            # node může být dict nebo tuple
-            if isinstance(node, dict):
-                ioc_value = node.get("value", "")
-                ioc_type = node.get("ioc_type", "unknown")
-            elif isinstance(node, (list, tuple)) and len(node) >= 2:
-                ioc_value = str(node[0])
-                ioc_type = str(node[1])
-            else:
+            # Sprint F150I §5: Defensive extraction — malformed node never crashes
+            try:
+                if isinstance(node, dict):
+                    ioc_value = str(node.get("value", "")) if node else ""
+                    ioc_type = str(node.get("ioc_type", "unknown")) if node else "unknown"
+                elif isinstance(node, (list, tuple)) and len(node) >= 2:
+                    ioc_value = str(node[0]) if node[0] else ""
+                    ioc_type = str(node[1]) if node[1] else "unknown"
+                elif isinstance(node, (list, tuple)) and len(node) == 1:
+                    # Single-element tuple — treat as value with unknown type
+                    ioc_value = str(node[0]) if node[0] else ""
+                    ioc_type = "unknown"
+                elif isinstance(node, str):
+                    # Plain string node — use as value, unknown type
+                    ioc_value = node
+                    ioc_type = "unknown"
+                elif isinstance(node, (int, float)):
+                    # Numeric node — convert to string, unknown type
+                    ioc_value = str(node)
+                    ioc_type = "unknown"
+                else:
+                    continue
+            except Exception:
+                # Sprint F150I §5: Any extraction error → skip this node, continue
                 continue
 
             if not ioc_value or len(ioc_value) < 3:
@@ -302,6 +343,142 @@ def _type_aware_seeds(value: str, ioc_type: str) -> list[dict[str, Any]]:
         # Catch-all for any other type not explicitly handled:
         # generate NO seeds — better to skip than to generate falsy task
         return []
+
+
+def _build_product_value_summary(
+    store: Any,
+    eh: "ExportHandoff",  # type: ignore[name-defined]
+    sprint_id: str,
+) -> dict[str, Any]:
+    """
+    Sprint F150I §1: product_value_summary — agreguje truth surfaces do jednoho
+    rozhodovacího balíčku pro další sprinty.
+
+    ZDROJE (existující surfaces, žádné nové):
+      1. eh.scorecard — windup output (findings_per_minute, ioc_density,
+         semantic_novelty, accepted_findings, peak_rss_mb, phase_timings)
+      2. store.get_dedup_runtime_status() — accepted vs rejected by reason
+         (Sprint 8AV extended: low-info / in-memory-dup / persistent-dup / fail-open)
+      3. eh.scorecard["cb_open_domains"] — circuit breaker state
+      4. eh.gnn_predictions — ML model signal (0 pokud nepoužit)
+      5. eh.phase_durations — timing truth
+
+    DEGRADED MODE: pokud store není dostupný, pole jsou None — není to chyba,
+    je to expected degraded state pro standalone/test scénáře.
+
+    JE TO DERIVED OUTPUT, NE NOVÝ TRUTH STORE:
+      - Žádné nové write API
+      - Žádné nové history mechanismy
+      - Pouze čte z existujících surfaces a skládá je dohromady
+    """
+    scorecard = eh.scorecard if eh.scorecard else {}
+
+    # 1. Základní scorecard facts
+    # Sprint F150I §1: all numeric fields use isinstance guards to prevent
+    # TypeError when scorecard contains MagicMock or other non-numeric values
+    def _num(val, default):
+        return val if isinstance(val, (int, float)) else default
+    def _n(key, default):
+        return _num(scorecard.get(key, default), default)
+    accepted = _n("accepted_findings", 0) or _n("accepted_findings_count", 0)
+    findings_per_minute = _n("findings_per_minute", 0.0)
+    ioc_density = _n("ioc_density", 0.0)
+    peak_rss_mb = scorecard.get("peak_rss_mb", None)
+    if peak_rss_mb is not None and not isinstance(peak_rss_mb, (int, float)):
+        peak_rss_mb = None
+    phase_timings = scorecard.get("phase_duration_seconds", {}) or {}
+
+    # 2. Dedup status — Sprint 8AV extended ingest outcome counters
+    dedup_status: dict[str, Any] | None = None
+    if store is not None:
+        try:
+            if hasattr(store, "get_dedup_runtime_status"):
+                raw = store.get_dedup_runtime_status()
+                # Sprint F150I §6: guard against MagicMock / non-dict returns
+                if isinstance(raw, dict):
+                    dedup_status = raw
+        except Exception:
+            pass
+
+    if dedup_status:
+        accepted = dedup_status.get("accepted_count", accepted)
+        reject_breakdown = {
+            "low_information": dedup_status.get("low_information_rejected_count", 0),
+            "in_memory_duplicate": dedup_status.get("in_memory_duplicate_rejected_count", 0),
+            "persistent_duplicate": dedup_status.get("persistent_duplicate_rejected_count", 0),
+            "fail_open": dedup_status.get("other_rejected_count", 0),
+        }
+        total_rejected = sum(reject_breakdown.values())
+        dedup_effective = dedup_status.get("persistent_dedup_enabled", False)
+        dedup_lmdb_path = dedup_status.get("dedup_lmdb_path", "")
+        hot_cache = {
+            "size": dedup_status.get("hot_cache_size", 0),
+            "capacity": dedup_status.get("hot_cache_capacity", 0),
+        }
+    else:
+        reject_breakdown = None
+        total_rejected = None
+        dedup_effective = None
+        dedup_lmdb_path = None
+        hot_cache = None
+
+    # 3. Circuit breaker state
+    cb_open_domains = scorecard.get("cb_open_domains", []) or []
+
+    # 4. GNN predictions
+    gnn_predictions = eh.gnn_predictions if eh.gnn_predictions else 0
+
+    # 5. Synthesis engine
+    synthesis_engine = eh.synthesis_engine if eh.synthesis_engine else (
+        scorecard.get("synthesis_engine_used", "unknown") or "unknown"
+    )
+
+    # Sprint F150I §4: Build signal_quality — condensed quality verdict
+    # Pro další sprint: je tenhle sprint dobrý seed source?
+    if accepted > 0 and findings_per_minute > 0:
+        # Good signal: we found things and did it efficiently
+        if ioc_density >= 0.5:
+            signal_quality = "high_density"
+        elif ioc_density >= 0.2:
+            signal_quality = "medium_density"
+        else:
+            signal_quality = "low_density"
+    elif accepted > 0 and findings_per_minute == 0:
+        signal_quality = "slow_novelty"
+    elif accepted == 0 and dedup_status:
+        signal_quality = "depleted"
+    else:
+        signal_quality = "unknown"
+
+    summary: dict[str, Any] = {
+        "sprint_id": sprint_id,
+        # Accepted reality
+        "accepted": accepted,
+        # Reject breakdown (Sprint 8AV extended dedup status)
+        "reject_breakdown": reject_breakdown,
+        "total_rejected": total_rejected,
+        # Dedup infrastructure state
+        "dedup_effective": dedup_effective,
+        "dedup_lmdb_path": dedup_lmdb_path,
+        "hot_cache": hot_cache,
+        # Circuit breaker
+        "cb_open_domains": cb_open_domains,
+        # ML signal
+        "gnn_predictions": gnn_predictions,
+        # Synthesis engine
+        "synthesis_engine": synthesis_engine,
+        # Scorecard basics
+        "findings_per_minute": findings_per_minute,
+        "ioc_density": ioc_density,
+        "peak_rss_mb": peak_rss_mb,
+        # Phase timings
+        "phase_durations": phase_timings if phase_timings else None,
+        # Decision signal for next sprint
+        "signal_quality": signal_quality,
+    }
+
+    # Remove None fields for cleaner output (keep 0 as valid)
+    return {k: v for k, v in summary.items() if v is not None}
 
 
 def _make_serializable(obj: Any) -> Any:
