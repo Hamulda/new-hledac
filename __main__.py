@@ -2339,7 +2339,7 @@ async def _print_scorecard_report(
     # REMOVAL CONDITION: ExportHandoff.top_nodes always populated in all windup paths.
     try:
         from export.sprint_exporter import export_sprint as _export_sprint
-        from types import ExportHandoff
+        from .types import ExportHandoff
 
         # Sprint 8VZ §B: Construct typed handoff directly — canonical producer truth
         # top_nodes from store seam (DuckPGQGraph-backed store.get_top_seed_nodes)
@@ -2463,6 +2463,7 @@ async def _run_sprint_mode(
 
         # ---- ACTIVE: pipeline runs every 60s while remaining > 3min ----
         from .pipeline.live_feed_pipeline import async_run_default_feed_batch
+        from .pipeline.live_public_pipeline import async_run_live_public_pipeline
         from .knowledge.duckdb_store import create_owned_store
 
         store_instance = None
@@ -2506,16 +2507,22 @@ async def _run_sprint_mode(
                 await asyncio.sleep(5)
                 continue
 
-            # Run pipeline every 60s
+            # Run pipelines every 60s — both in parallel via TaskGroup
             now = time.monotonic()
             if now - last_pipeline_time >= 60.0:
                 if store_instance is not None:
                     try:
-                        await async_run_default_feed_batch(
-                            store=store_instance,
-                            max_entries_per_feed=10,
-                            query_context=target,
-                        )
+                        async with asyncio.TaskGroup() as tg:
+                            tg.create_task(async_run_live_public_pipeline(
+                                query=target,
+                                store=store_instance,
+                                max_results=5,
+                            ))
+                            tg.create_task(async_run_default_feed_batch(
+                                store=store_instance,
+                                max_entries_per_feed=10,
+                                query_context=target,
+                            ))
                         _boot_record("sprint_mode", "pipeline_run_ok")
                     except Exception as e:
                         _boot_record("sprint_mode", "pipeline_run_error", error=str(e))

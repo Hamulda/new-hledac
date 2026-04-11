@@ -258,9 +258,61 @@ class ModelManager:
             logger.error("GLiNER not installed. Install with: pip install gliner")
             raise
 
-    # FIX 8: RAM pressure guard
+    # ========================================================================
+    # Sprint F150H: Memory admission gate — fail-fast before heavy load
+    # ========================================================================
+    # Uses canonical evaluate_uma_state from resource_governor.
+    # FAILS FAST at CRITICAL or EMERGENCY to prevent OOM on M1 8GB.
+    # Clean separation: this gate is HARD fail (raises), _check_memory_pressure
+    # remains SOFT fail (clears cache only).
+    # ========================================================================
+
+    def _check_memory_admission(self) -> None:
+        """
+        Deterministický fail-fast gate před těžkým model loadem.
+
+        Kontroluje system_used_gib přes evaluate_uma_state().
+        Pokud je stav CRITICAL nebo EMERGENCY, okamžitě raise.
+        NEČEKÁ na lazy evaluation — běží PŘED factory() voláním.
+
+        Raises:
+            RuntimeError: Pokud je memory pressure příliš vysoký.
+        """
+        try:
+            from hledac.universal.core.resource_governor import (
+                sample_uma_status,
+                evaluate_uma_state,
+                UMA_STATE_CRITICAL,
+                UMA_STATE_EMERGENCY,
+            )
+        except ImportError:
+            # Fail-open: pokud resource_governor není dostupný, neblokujeme load
+            return
+
+        try:
+            status = sample_uma_status()
+            state = evaluate_uma_state(status.system_used_gib)
+            if state == UMA_STATE_EMERGENCY:
+                raise RuntimeError(
+                    f"[MEMORY ADMISSION] EMERGENCY state ({status.system_used_gib:.2f} GiB) — "
+                    f"model load BLOCKED to prevent OOM. "
+                    f"Free up memory before retrying."
+                )
+            if state == UMA_STATE_CRITICAL:
+                raise RuntimeError(
+                    f"[MEMORY ADMISSION] CRITICAL state ({status.system_used_gib:.2f} GiB) — "
+                    f"model load BLOCKED to prevent OOM. "
+                    f"Free up memory before retrying."
+                )
+        except RuntimeError:
+            raise  # už je to naše RuntimeError, propaguj
+        except Exception:
+            # Fail-safe: jakákoliv jiná chyba při měření nezablokuje load
+            pass
+
+    # FIX 8: RAM pressure guard (SOFT - clears cache only, doesn't block)
     def _check_memory_pressure(self, threshold_gb: float = 0.8) -> bool:
-        """Check free RAM, clear MLX cache if below threshold."""
+        """Check free RAM, clear MLX cache if below threshold (soft fail)."""
         if not self._psutil_available:
             return False
         try:
@@ -433,6 +485,10 @@ class ModelManager:
                     f"before loading {model_name}"
                 )
                 await self._release_current_async()
+
+            # Sprint F150H: Hard fail-fast memory admission gate
+            # Runs BEFORE factory() — prevents OOM on heavy model load
+            self._check_memory_admission()
 
             # Načteme nový model
             try:

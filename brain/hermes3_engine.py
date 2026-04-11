@@ -1176,9 +1176,11 @@ What should be the next action?"""
         bounded_query = str(query)[:self._PLAN_MAX_QUERY_CHARS]
         query_was_truncated = len(str(query)) > self._PLAN_MAX_QUERY_CHARS
 
-        # Bound history
+        # Bound history — guard against non-dict items (Sprint F150H fix)
         bounded_history = []
         for h in history:
+            if not isinstance(h, dict):
+                h = {"action": str(h)[:200] if h else ""}
             entry = {
                 "action": str(h.get("action", ""))[:200],
                 "result": str(h.get("result", ""))[:300] if h.get("result") else None,

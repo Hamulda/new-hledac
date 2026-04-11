@@ -4529,6 +4529,12 @@ class DuckDBShadowStore:
         Hard cap: _DEDUP_HOT_CACHE_MAX entries.
         """
         if fp in self._dedup_hot_cache:
+            # Existing entry — bump access order to recent (MRU semantics)
+            try:
+                self._dedup_hot_cache_order.remove(fp)
+            except ValueError:
+                pass
+            self._dedup_hot_cache_order.append(fp)
             return
         if len(self._dedup_hot_cache) >= _DEDUP_HOT_CACHE_MAX:
             oldest = self._dedup_hot_cache_order.pop(0)

@@ -20,6 +20,7 @@ import heapq
 import time
 import uuid
 from typing import Dict, List, Optional, Any, Union, Callable, Tuple
+from collections import OrderedDict
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from enum import Enum
@@ -27,21 +28,26 @@ import logging
 from collections import deque
 import psutil
 
-# Import existing Hledac components
+logger = logging.getLogger(__name__)
+
+# Import existing Hledac components (fail-soft, logger-based degradation)
 try:
     from hledac.advanced_web.automation_orchestrator import AutomationOrchestrator, AutomationWorkflow
     from hledac.stealth_web_v2.intelligent_scraper import IntelligentScraper, ScrapingTarget, ScrapingConfig
     from hledac.intelligence.osint_reporting_generator import OSINTReportingGenerator, ReportConfig, ReportType
     from hledac.social_engineering.osint_aggregator import OSINTAggregator, OSINTConfig
+    _IMPORT_ERROR: Optional[Exception] = None
 except ImportError as e:
-    print(f"Warning: Could not import Hledac components: {e}")
-    # Fallback for testing
+    _IMPORT_ERROR = e
+    logger.warning(
+        "intel.webintel: optional Hledac components unavailable — "
+        "running in degraded mode. Error: %s", e
+    )
+    # Fallback for testing / degraded mode
     AutomationOrchestrator = None
     IntelligentScraper = None
     OSINTReportingGenerator = None
     OSINTAggregator = None
-
-logger = logging.getLogger(__name__)
 
 
 class IntelligenceOperationType(Enum):
@@ -136,7 +142,8 @@ class UnifiedWebIntelligence:
 
         # Operation tracking
         self.active_operations: Dict[str, IntelligenceResult] = {}
-        self.completed_operations: Dict[str, IntelligenceResult] = {}
+        self._completed_operations: OrderedDict[str, IntelligenceResult] = OrderedDict()
+        self._completed_operations_limit: int = self.config.get('completed_operations_limit', 1000)
         # Priority queue using heapq: (priority, counter, operation_id)
         # Priority: 0=low, 1=medium, 2=high, 3=critical (lower = higher priority)
         self.operation_queue: List[tuple] = []
@@ -185,6 +192,29 @@ class UnifiedWebIntelligence:
         logger.info(f"⚡ FlashAttention: {'Enabled' if self.enable_flashattention else 'Disabled'}")
         logger.info(f"🔍 OSINT: {'Enabled' if self.enable_osint else 'Disabled'}")
         logger.info(f"🛡️ Stealth: {'Enabled' if self.enable_stealth else 'Disabled'}")
+        logger.info("📊 completed_operations bounded to %d entries", self._completed_operations_limit)
+
+    @property
+    def completed_operations(self) -> Dict[str, IntelligenceResult]:
+        """Backward-compatible accessor for completed_operations."""
+        return dict(self._completed_operations)
+
+    def _add_completed_operation(self, operation_id: str, result: IntelligenceResult) -> None:
+        """Add operation to completed_operations with bounded eviction policy.
+
+        Eviction policy: FIFO — oldest (first-inserted) entries are removed
+        when the limit is exceeded. Uses OrderedDict.move_to_end() on access
+        to preserve LRU-like behavior for lookups while maintaining FIFO eviction.
+        """
+        # Evict oldest if at limit
+        if (len(self._completed_operations) >= self._completed_operations_limit
+                and operation_id not in self._completed_operations):
+            evicted_id, _ = self._completed_operations.popitem(last=False)
+            logger.debug(
+                "intel.webintel: completed_operations eviction (FIFO, limit=%d): "
+                "evicted operation_id=%s", self._completed_operations_limit, evicted_id
+            )
+        self._completed_operations[operation_id] = result
 
     async def _initialize_components(self):
         """Initialize all intelligence components."""
@@ -329,8 +359,8 @@ class UnifiedWebIntelligence:
             logger.error(f"❌ Operation {operation_id} failed: {e}")
 
         finally:
-            # Move to completed
-            self.completed_operations[operation_id] = result
+            # Move to completed (bounded, FIFO eviction)
+            self._add_completed_operation(operation_id, result)
             self.active_operations.pop(operation_id, None)
 
             # Process queued operations (Fix 0)
@@ -641,7 +671,7 @@ class UnifiedWebIntelligence:
 
     async def get_operation_status(self, operation_id: str) -> Optional[Dict[str, Any]]:
         """Get status of a specific operation."""
-        operation = self.active_operations.get(operation_id) or self.completed_operations.get(operation_id)
+        operation = self.active_operations.get(operation_id) or self._completed_operations.get(operation_id)
         if not operation:
             return None
 
@@ -665,7 +695,7 @@ class UnifiedWebIntelligence:
 
     async def get_operation_results(self, operation_id: str, format: str = "json") -> Dict[str, Any]:
         """Get comprehensive operation results."""
-        operation = self.completed_operations.get(operation_id)
+        operation = self._completed_operations.get(operation_id)
         if not operation:
                 raise ValueError(f"Operation not found: {operation_id}")
 
@@ -756,7 +786,7 @@ class UnifiedWebIntelligence:
             for operation_id in list(self.active_operations.keys()):
                 operation = self.active_operations[operation_id]
                 operation.status = OperationStatus.CANCELLED
-                self.completed_operations[operation_id] = operation
+                self._add_completed_operation(operation_id, operation)
 
             self.active_operations.clear()
 
