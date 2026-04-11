@@ -214,6 +214,8 @@ async def run_sprint(
             config=config,
             lifecycle=lifecycle,
             now_monotonic=time.monotonic(),
+            query=query,
+            duckdb_store=store,
         )
 
         _phase_times["WINDUP"] = time.monotonic()

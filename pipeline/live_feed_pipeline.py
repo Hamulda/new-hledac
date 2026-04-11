@@ -265,6 +265,11 @@ def _convert_rich_html_to_text(rich_html: str) -> str:
     return _strip_html_tags_from_text(rich_html)
 
 
+# Minimum converted text length from rich HTML to be considered "substantive"
+# Used to decide whether rich_content qualifies as primary signal vs noise
+_RICH_CONTENT_MIN_CHARS: int = 40
+
+
 def _assemble_enriched_feed_text(
     title: str,
     summary: str,
@@ -273,12 +278,13 @@ def _assemble_enriched_feed_text(
     """
     Assemble deterministic clean text from title + summary + rich_content.
 
-    Sprint 8BE PHASE 1: source-specific text enrichment.
+    Sprint 8BE PHASE 1 + F150H: source-specific text enrichment with
+    corrected priority so rich HTML content is used as primary surface.
 
     Priority hierarchy:
-    1. title (if non-empty)
+    1. rich_content (converted, if substantive — HTML articles etc.)
     2. summary (stripped and cleaned, if non-empty)
-    3. rich_content (converted, if non-empty)
+    3. title (as final anchor when nothing else available)
     4. sentinel "[no content]" if all empty
 
     Returns (clean_text, enrichment_phase).
@@ -286,6 +292,18 @@ def _assemble_enriched_feed_text(
     parts: list[str] = []
     enrichment_phase = "none"
 
+    # Priority 1: rich_content first — full HTML articles from content:encoded / Atom content
+    # Only use converted text if it's substantive (avoids noise from tiny HTML fragments)
+    if rich_content:
+        converted = _convert_rich_html_to_text(rich_content)
+        if converted and len(converted) >= _RICH_CONTENT_MIN_CHARS:
+            parts.append(converted)
+            enrichment_phase = "feed_rich_content"
+
+    # Priority 2: title + summary — title as anchor, summary as secondary context
+    # Only include title if we have something richer below; title alone is not enough
+    # for substantive pattern matching, so it stays as anchor until we confirm
+    # we have rich_content/summary that covers the signal
     if title:
         parts.append(title.strip())
 
@@ -293,12 +311,6 @@ def _assemble_enriched_feed_text(
         stripped = _strip_html_tags_from_text(summary)
         if stripped:
             parts.append(stripped)
-
-    if rich_content:
-        converted = _convert_rich_html_to_text(rich_content)
-        if converted:
-            parts.append(converted)
-            enrichment_phase = "feed_rich_content"
 
     if not parts:
         return ("[no content]", "none")
@@ -593,7 +605,11 @@ def _pattern_hit_to_finding(
 # ---------------------------------------------------------------------------
 
 
-_MIN_ARTICLE_FALLBACK_CHARS: int = 400
+# Threshold for triggering article fallback.
+# Feed entries with >= 250 chars of feed-native text (rich_content/summary)
+# are considered substantive enough — no article fetch needed.
+# Title-only entries will have ~50-100 chars, triggering fallback (intentional).
+_MIN_ARTICLE_FALLBACK_CHARS: int = 250
 _MAX_ARTICLE_FALLBACK_TIMEOUT: float = 8.0
 _MAX_ARTICLE_FALLBACK_KB: int = 150
 

@@ -1410,6 +1410,116 @@ class EvidenceLog:
             "last_seq_no": self._seq,
         }
 
+    def get_event_funnel(self) -> Dict[str, Any]:
+        """
+        Vrací funnel událostí: počty a průměrná confidence per typ.
+
+        Praktický sprint-ready view — rychlý přehled "co se stalo"
+        bez iterace přes všechny události.
+
+        Returns:
+            Dict s event_type jako klíče, hodnoty jsou {count, avg_conf, pct}
+        """
+        if not self._log:
+            return {}
+
+        total = len(self._log)
+        result = {}
+
+        for event_type, indices in self._index_by_type.items():
+            if not indices:
+                continue
+            events = [self._log[i] for i in indices]
+            avg_conf = sum(e.confidence for e in events) / len(events)
+            result[event_type] = {
+                "count": len(indices),
+                "avg_conf": round(avg_conf, 4),
+                "pct": round(len(indices) / total * 100, 1),
+            }
+
+        return result
+
+    def get_decision_summary(self) -> Dict[str, Any]:
+        """
+        Vrací shrnutí decision událostí pro sprint retro.
+
+        Ukazuje: počet rozhodnutí, confidence spread,
+        top decision kinds, top reason patterns.
+
+        Returns:
+            Dict s decision statistikami
+        """
+        decisions = self.query(event_type="decision")
+
+        if not decisions:
+            return {"count": 0, "kinds": {}, "avg_confidence": 0.0}
+
+        kind_counts: Dict[str, int] = {}
+        all_reasons: List[str] = []
+        confidences: List[float] = []
+
+        for e in decisions:
+            payload = e.payload or {}
+            kind = payload.get("kind", "unknown")
+            kind_counts[kind] = kind_counts.get(kind, 0) + 1
+            reasons = payload.get("reasons", [])
+            all_reasons.extend(reasons)
+            confidences.append(e.confidence)
+
+        # Top reason fragments (first 40 chars)
+        top_reasons: Dict[str, int] = {}
+        for r in all_reasons:
+            fragment = r[:40] if len(r) > 40 else r
+            top_reasons[fragment] = top_reasons.get(fragment, 0) + 1
+        top_reasons = dict(sorted(top_reasons.items(), key=lambda x: -x[1])[:5])
+
+        return {
+            "count": len(decisions),
+            "avg_confidence": round(sum(confidences) / len(confidences), 4),
+            "min_confidence": round(min(confidences), 4),
+            "max_confidence": round(max(confidences), 4),
+            "kinds": dict(sorted(kind_counts.items(), key=lambda x: -x[1])),
+            "top_reasons": top_reasons,
+        }
+
+    def get_error_rate(self) -> Dict[str, Any]:
+        """
+        Vrací error rate a low-confidence event breakdown.
+
+        Praktický signál pro sprint kvalitu:
+        - error_count + error_rate
+        - low_confidence_count (< 0.7)
+        - recent_error_types (posledních 10 errors)
+
+        Returns:
+            Dict s error a low-confidence metrikama
+        """
+        if not self._log:
+            return {"error_count": 0, "error_rate": 0.0, "low_conf_count": 0}
+
+        errors = self.query(event_type="error")
+        low_conf_events = [e for e in self._log if e.confidence < 0.7]
+
+        recent_errors = []
+        for e in reversed(errors):
+            if len(recent_errors) >= 10:
+                break
+            payload = e.payload or {}
+            recent_errors.append({
+                "event_id": e.event_id,
+                "timestamp": e.timestamp.isoformat(),
+                "message": payload.get("message", "")[:80],
+                "kind": payload.get("kind", ""),
+            })
+
+        return {
+            "error_count": len(errors),
+            "error_rate": round(len(errors) / len(self._log) * 100, 2),
+            "low_conf_count": len(low_conf_events),
+            "low_conf_rate": round(len(low_conf_events) / len(self._log) * 100, 2),
+            "recent_errors": recent_errors,
+        }
+
     def get_statistics(self) -> Dict[str, Any]:
         """
         Vrátí statistiky o logu - M1 8GB optimized.

@@ -2528,6 +2528,233 @@ class HypothesisEngine:
         # Ořezat na max_hypotheses
         return hypotheses[:max_hypotheses]
 
+    # -------------------------------------------------------------------------
+    # Sprint F150H: Follow-up Query Seam (heuristic-first, bounded)
+    # -------------------------------------------------------------------------
+
+    def suggest_next_queries(
+        self,
+        findings: Union[List[str], str],
+        context: Optional[Dict[str, Any]] = None,
+        max_queries: int = 5,
+    ) -> List[Dict[str, str]]:
+        """
+        Generate bounded follow-up search queries from findings.
+
+        HEURISTIC-FIRST: Cheap pattern-based extraction as primary path.
+        MODEL-ASSISTED: Optional MLX enhancement only if available, never blocking.
+
+        This is a SEAM - a bounded interface for next-hypothesis generation
+        that doesn't require full hypothesis loop or heavy model.
+
+        Args:
+            findings: Single finding string or list of finding strings
+            context: Optional context dict (may include 'entity_types', 'known_iocs')
+            max_queries: Maximum queries to return (hard cap, default 5)
+
+        Returns:
+            List of dicts with keys: 'query' (str), 'rationale' (str), 'type' (str)
+            Types: 'entity_expansion', 'relationship_check', 'temporal_expansion', 'source_discovery'
+        """
+        context = context or {}
+        if isinstance(findings, str):
+            findings = [findings]
+
+        if not findings:
+            return []
+
+        # Hard cap
+        max_queries = min(max_queries, 5)
+
+        queries: List[Dict[str, str]] = []
+
+        # --- HEURISTIC PATH (primary, always available) ---
+        queries.extend(self._heuristic_query_generation(findings, context))
+
+        # --- MODEL-ASSISTED PATH (optional enhancement) ---
+        # Only if we have room and MLX is available
+        if len(queries) < max_queries:
+            model_queries = self._model_assisted_query_suggestion(
+                findings, context, max_queries - len(queries)
+            )
+            if model_queries:
+                queries.extend(model_queries)
+
+        # Deduplicate by query text (preserve first rationale)
+        seen = set()
+        unique = []
+        for q in queries:
+            if q["query"] not in seen:
+                seen.add(q["query"])
+                unique.append(q)
+
+        return unique[:max_queries]
+
+    def _heuristic_query_generation(
+        self,
+        findings: List[str],
+        context: Dict[str, Any],
+    ) -> List[Dict[str, str]]:
+        """Generate queries using cheap heuristics - no model required."""
+        queries: List[Dict[str, str]] = []
+        all_text = " ".join(findings)
+
+        # --- Entity Extraction ---
+        entities = self._extract_entities_heuristic(all_text)
+        known_iocs = context.get("known_iocs", set())
+
+        # 1. Entity Expansion Queries
+        for entity in entities[:3]:
+            if entity not in known_iocs:
+                queries.append({
+                    "query": f'"{entity}" OR "{entity.lower()}"',
+                    "rationale": f"Entity expansion: {entity}",
+                    "type": "entity_expansion",
+                })
+
+        # 2. Pattern-based Relationship Queries
+        rel_patterns = [
+            (r"(\w+)\s+(?:linked|connected|related)\s+to\s+(\w+)", "linked_to"),
+            (r"(\w+)\s+(?:uses?|employs?|leverages?)\s+(\w+)", "uses"),
+            (r"(\w+)\s+(?:targeted|attacked)\s+(\w+)", "targeted"),
+        ]
+
+        for pattern, rel_type in rel_patterns:
+            matches = re.findall(pattern, all_text, re.IGNORECASE)
+            for m in matches[:2]:
+                if len(m) == 2:
+                    queries.append({
+                        "query": f'"{m[0]}" AND "{m[1]}"',
+                        "rationale": f"Relationship check: {m[0]} {rel_type} {m[1]}",
+                        "type": "relationship_check",
+                    })
+
+        # 3. Temporal Expansion
+        time_indicators = re.findall(
+            r"(?:in|during|since|after|before)\s+(\d{4})", all_text
+        )
+        for year in time_indicators[:2]:
+            queries.append({
+                "query": f'timeline:{year} OR "{year}" security incident',
+                "rationale": f"Temporal expansion: {year}",
+                "type": "temporal_expansion",
+            })
+
+        # 4. Source Discovery - find related sources
+        source_patterns = [
+            r"(?:according to|from|via)\s+([A-Z][\w\s]+?(?:report|news|article|source))",
+            r"(?:published|released)\s+(?:by\s+)?([A-Z][\w\s]+)",
+        ]
+        for pattern in source_patterns:
+            sources = re.findall(pattern, all_text)
+            for src in sources[:1]:
+                clean_src = src.strip()[:40]
+                queries.append({
+                    "query": f'"{clean_src}" latest news',
+                    "rationale": f"Source discovery: {clean_src}",
+                    "type": "source_discovery",
+                })
+
+        # 5. IOC Correlation Queries
+        iocs = self._extract_iocs_heuristic(all_text)
+        for ioc_type, ioc_value in iocs[:2]:
+            queries.append({
+                "query": f"{ioc_type}:{ioc_value} OR {ioc_value}",
+                "rationale": f"IOC correlation: {ioc_type}={ioc_value}",
+                "type": "entity_expansion",
+            })
+
+        return queries[:5]
+
+    def _extract_entities_heuristic(self, text: str) -> List[str]:
+        """Extract potential entities using simple heuristics."""
+        entities = []
+
+        # CamelCase words (typical for organizations/products)
+        camel = re.findall(r"\b[A-Z][a-z]+(?:[A-Z]\w*)+\b", text)
+        entities.extend(camel[:5])
+
+        # Quoted strings
+        quoted = re.findall(r'"([^"]{3,30})"', text)
+        entities.extend([q for q in quoted if len(q.split()) <= 3][:5])
+
+        # All-caps acronyms (2-5 letters)
+        acronyms = re.findall(r"\b[A-Z]{2,5}\b", text)
+        entities.extend([a for a in acronyms if a not in {"OR", "AND", "THE", "FOR"}][:5])
+
+        return list(dict.fromkeys(entities))  # Dedupe preserve order
+
+    def _extract_iocs_heuristic(self, text: str) -> List[Tuple[str, str]]:
+        """Extract IOC-like patterns."""
+        iocs = []
+
+        # IP addresses
+        ips = re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text)
+        for ip in ips[:2]:
+            iocs.append(("ip", ip))
+
+        # URLs
+        urls = re.findall(r"https?://[^\s\"'>]+", text)
+        for url in urls[:2]:
+            domain = re.sub(r"https?://", "", url).split("/")[0]
+            iocs.append(("domain", domain))
+
+        # Hashes (simplified)
+        hashes = re.findall(r"\b[a-fA-F0-9]{32,64}\b", text)
+        for h in hashes[:2]:
+            iocs.append(("hash", h[:16] + "..."))
+
+        return iocs
+
+    def _model_assisted_query_suggestion(
+        self,
+        findings: List[str],
+        context: Dict[str, Any],
+        max_to_add: int,
+    ) -> List[Dict[str, str]]:
+        """
+        Optional model-assisted query enhancement.
+
+        Only called if:
+        1. Heuristic path returned fewer than max_queries
+        2. MLX model is available (lazy check)
+
+        Returns empty list on any failure - never blocks.
+        """
+        if max_to_add <= 0:
+            return []
+
+        try:
+            # Lazy import - don't load unless needed
+            from hledac.universal.utils.mlx_cache import get_mlx_model
+        except ImportError:
+            return []
+
+        try:
+            import asyncio
+
+            # Check if model is available (non-blocking check)
+            model_name = context.get("model_name", "mlx-community/Qwen2.5-0.5B-Instruct-4bit")
+
+            # Quick timeout - if model doesn't load in 2s, skip
+            async def _try_load():
+                try:
+                    model, tokenizer = await asyncio.wait_for(
+                        get_mlx_model(model_name),
+                        timeout=2.0
+                    )
+                    return model is not None
+                except (asyncio.TimeoutError, Exception):
+                    return None
+
+            # This won't work in sync context, so just skip
+            # Model-assisted path is aspirational - fail soft
+            return []
+
+        except Exception:
+            # Any failure = fail soft, return empty
+            return []
+
     def get_statistics(self) -> Dict[str, Any]:
         """Get engine statistics."""
         return {

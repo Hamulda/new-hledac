@@ -472,6 +472,8 @@ class SprintScheduler:
         lifecycle: Any,
         sources: Sequence[str],
         now_monotonic: Optional[float] = None,
+        query: str = "",
+        duckdb_store: Any = None,
     ) -> SprintSchedulerResult:
         """
         Run the sprint to completion.
@@ -573,7 +575,7 @@ class SprintScheduler:
                 # Sprint 8XE: Store sources for public discovery query hint
                 self._last_sources = list(ordered_sources)
                 cycle_ok = await self._run_one_cycle(
-                    lifecycle, ordered_sources, now_monotonic
+                    lifecycle, ordered_sources, now_monotonic, query, duckdb_store
                 )
                 self._result.cycles_completed += 1
 
@@ -644,6 +646,8 @@ class SprintScheduler:
         lifecycle,
         sources: Sequence[str],
         now_monotonic: Optional[float] = None,
+        query: str = "",
+        duckdb_store: Any = None,
     ) -> bool:
         """
         Run one bounded fetch cycle across all sources, tier-ordered.
@@ -711,18 +715,21 @@ class SprintScheduler:
 
         # Sprint 8XE: Run public discovery pipeline in same cycle (canonical parity)
         # Both pipelines run concurrently via TaskGroup; failure of one does not fail the other
-        await self._run_public_discovery_in_cycle()
+        await self._run_public_discovery_in_cycle(query, duckdb_store)
 
         return True
 
-    async def _run_public_discovery_in_cycle(self) -> None:
+    async def _run_public_discovery_in_cycle(
+        self, query: str = "", duckdb_store: Any = None
+    ) -> None:
         """
         Sprint 8XE: Run public discovery pipeline in the current cycle.
 
         Uses asyncio.TaskGroup for bounded concurrency with the feed pipeline.
         Fail-soft: errors are accumulated but never raise or abort the sprint.
 
-        Query is derived from sources list (first source as primary query hint).
+        query: real sprint query context from __main__.py (not a weak source hint).
+        duckdb_store: DuckDBShadowStore instance for storing findings.
         UMA check is handled inside the pipeline itself.
         """
         try:
@@ -732,18 +739,15 @@ class SprintScheduler:
             self._result.public_error = f"import:{type(exc).__name__}"
             return
 
-        # Build query hint from sources (same pattern as __main__.py)
-        sources = getattr(self, "_last_sources", None)
-        query_hint = "OSINT passive discovery"
-        if sources and len(sources) > 0:
-            query_hint = str(sources[0]) if sources[0] else query_hint
+        # Build query hint: real sprint query from __main__.py takes priority
+        query_hint = query or "OSINT passive discovery"
 
         try:
             async with asyncio.TaskGroup() as tg:
                 public_task = tg.create_task(
                     async_run_public(
                         query=query_hint,
-                        store=None,  # Sprint 8XE: canonical path — no store override
+                        store=duckdb_store,  # Sprint 8XE: real store for finding persistence
                         max_results=5,
                         fetch_timeout_s=35.0,
                         fetch_concurrency=3,
@@ -2059,6 +2063,8 @@ async def async_run_tiered_feed_sprint_once(
     config: Optional[SprintSchedulerConfig] = None,
     lifecycle: Optional[object] = None,
     now_monotonic: Optional[float] = None,
+    query: str = "",
+    duckdb_store: Any = None,
 ) -> SprintSchedulerResult:
     """
     One-shot tiered feed sprint.
@@ -2075,4 +2081,4 @@ async def async_run_tiered_feed_sprint_once(
         )
 
     scheduler = SprintScheduler(config)
-    return await scheduler.run(lifecycle, sources, now_monotonic)
+    return await scheduler.run(lifecycle, sources, now_monotonic, query, duckdb_store)

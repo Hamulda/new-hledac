@@ -26,7 +26,14 @@ from pathlib import Path
 from enum import Enum
 import logging
 from collections import deque
-import psutil
+
+# psutil je optional — nepovinný pro M1 lightweight provoz
+try:
+    import psutil
+    _PSUTIL_ERROR: Optional[Exception] = None
+except ImportError as e:
+    psutil = None  # type: ignore[assignment]
+    _PSUTIL_ERROR = e
 
 logger = logging.getLogger(__name__)
 
@@ -39,15 +46,11 @@ try:
     _IMPORT_ERROR: Optional[Exception] = None
 except ImportError as e:
     _IMPORT_ERROR = e
+    # Fallback for testing / degraded mode — NENASTAVUJEME třídy na None, zůstávají jako NoneType pro guardy
     logger.warning(
         "intel.webintel: optional Hledac components unavailable — "
         "running in degraded mode. Error: %s", e
     )
-    # Fallback for testing / degraded mode
-    AutomationOrchestrator = None
-    IntelligentScraper = None
-    OSINTReportingGenerator = None
-    OSINTAggregator = None
 
 
 class IntelligenceOperationType(Enum):
@@ -134,11 +137,13 @@ class UnifiedWebIntelligence:
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
 
-        # Initialize core components
+        # Initialize core components (LAZY — initialize on first use)
         self.automation_orchestrator: Optional[AutomationOrchestrator] = None
         self.intelligent_scraper: Optional[IntelligentScraper] = None
         self.osint_reporter: Optional[OSINTReportingGenerator] = None
         self.osint_aggregator: Optional[OSINTAggregator] = None
+        self._components_initialized: bool = False
+        self._components_init_task: Optional[asyncio.Task] = None
 
         # Operation tracking
         self.active_operations: Dict[str, IntelligenceResult] = {}
@@ -158,9 +163,9 @@ class UnifiedWebIntelligence:
         self._aging_task: Optional[asyncio.Task] = None
         self._queued_op_times: Dict[str, float] = {}  # operation_id -> enqueue timestamp
 
-        # Memory budget enforcement (Fix 5)
+        # Memory budget enforcement (optional psutil)
         self._memory_limit_bytes = 512 * 1024 * 1024  # 512 MB
-        self._process = psutil.Process()
+        self._process = psutil.Process() if psutil else None
 
         # Performance metrics
         self.metrics = {
@@ -182,17 +187,21 @@ class UnifiedWebIntelligence:
         self.enable_osint = self.config.get('enable_osint', True)
         self.enable_stealth = self.config.get('enable_stealth', True)
 
-        # Initialize components asynchronously
-        asyncio.create_task(self._initialize_components())
+        # NO fire-and-forget tasks — components initialized lazily on first operation
+        # NO background tasks started in __init__ — prevents orphaned tasks on GC
 
-        # Start priority aging task (Fix 0)
-        self._aging_task = asyncio.create_task(self._age_queued_priorities())
-
-        logger.info("🧠 Unified Web Intelligence System initialized")
-        logger.info(f"⚡ FlashAttention: {'Enabled' if self.enable_flashattention else 'Disabled'}")
-        logger.info(f"🔍 OSINT: {'Enabled' if self.enable_osint else 'Disabled'}")
-        logger.info(f"🛡️ Stealth: {'Enabled' if self.enable_stealth else 'Disabled'}")
+        logger.info("🧠 Unified Web Intelligence System created (lazy init mode)")
         logger.info("📊 completed_operations bounded to %d entries", self._completed_operations_limit)
+
+    @property
+    def is_degraded(self) -> bool:
+        """True pokud modul běží v degraded mode (chybí volitelné komponenty)."""
+        return _IMPORT_ERROR is not None
+
+    @property
+    def degradation_reason(self) -> Optional[str]:
+        """Důvod degraded módu, pokud existuje."""
+        return str(_IMPORT_ERROR) if _IMPORT_ERROR else None
 
     @property
     def completed_operations(self) -> Dict[str, IntelligenceResult]:
@@ -289,11 +298,14 @@ class UnifiedWebIntelligence:
         self.active_operations[operation_id] = result
         self.metrics['total_operations'] += 1
 
+        # Lazy initialization — spustit při první operaci, ne při __init__
+        await self._ensure_components_initialized()
+
         # Map priority string to numeric priority (lower = higher priority)
         priority_map = {"low": 3, "medium": 2, "high": 1, "critical": 0}
 
-        # Memory budget enforcement (Fix 5) - check before queue logic
-        current_rss = self._process.memory_info().rss
+        # Memory budget enforcement (optional psutil)
+        current_rss = self._process.memory_info().rss if self._process else 0
         memory_exceeded = current_rss > self._memory_limit_bytes
 
         # Add to queue if at capacity or memory exceeded (priority-aware)
@@ -378,6 +390,21 @@ class UnifiedWebIntelligence:
         self._queued_op_times.pop(operation_id, None)
         asyncio.create_task(self._execute_operation_async(target, op_types, operation_id))
         logger.info(f"⏭️ Processing queued operation: {operation_id}")
+
+    async def _ensure_components_initialized(self) -> None:
+        """Lazy initialization — spustí komponenty a aging task pouze jednou při první operaci."""
+        if self._components_initialized:
+            return
+
+        # Start aging task lazily (ne v __init__)
+        if self._aging_task is None:
+            self._aging_task = asyncio.create_task(self._age_queued_priorities())
+
+        # Initialize components (one-time)
+        try:
+            await self._initialize_components()
+        finally:
+            self._components_initialized = True
 
     async def _age_queued_priorities(self) -> None:
         """Age queued operations to improve priority over time (Fix 0)."""
@@ -768,6 +795,11 @@ class UnifiedWebIntelligence:
                 'flashattention_enabled': self.enable_flashattention,
                 'osint_enabled': self.enable_osint,
                 'stealth_enabled': self.enable_stealth
+            },
+            'health': {
+                'is_degraded': self.is_degraded,
+                'degradation_reason': self.degradation_reason,
+                'psutil_available': psutil is not None
             }
         }
 

@@ -13,6 +13,13 @@ Sprint F150I: product_value_summary — přenáší do exportu to, co runtime u�
   - gnn_predictions signal
   - phase_durations timing truth
   - robustnější seed derivation (divný input → skip, ne pád)
+Sprint F150J: Enhanced next-seed derivation driven by product_value_summary:
+  - 4 seed categories: ioc_followup, query_suggestion, source_revisit, low_signal_recommendation
+  - signal_quality → query direction (refine/broaden/narrow/new_approach)
+  - reject_breakdown → query strategy (low_info_ratio → narrow scope)
+  - cb_open_domains → source_revisit with backoff
+  - depleted signal → retry_known_sources or new_approach
+  - Bounded output: max 12 seeds total, sorted by priority
 """
 
 from __future__ import annotations
@@ -162,7 +169,8 @@ async def export_sprint(
     # Sprint F500B §2 + F500D §3: seeds land alongside JSON report (colocation)
     # Primary: get_sprint_next_seeds_path() from paths.py (canonical)
     # Fallback: SPRINT_STORE_ROOT.parent/"reports" if report_path is None (write failed)
-    seeds_path = _generate_next_sprint_seeds(top_nodes, _sprint_id, report_path)
+    # Sprint F150J: pvs drives enhanced seed derivation — signal_quality + reject_breakdown + cb state
+    seeds_path = _generate_next_sprint_seeds(top_nodes, _sprint_id, report_path, pvs)
 
     return {
         "report_json": str(report_path) if report_path else "",
@@ -175,46 +183,34 @@ def _generate_next_sprint_seeds(
     top_nodes: list,
     sprint_id: str,
     report_path: pathlib.Path | None,
+    pvs: dict[str, Any] | None = None,
 ) -> pathlib.Path:
     """
-    Generuje PivotTask seed JSON pro příští sprint.
+    Sprint F150J: Enhanced seed derivation driven by product_value_summary.
 
-    Zdroj: top_nodes z ExportHandoff.top_nodes (kanonicky post-8VZ).
-    Fallback: store.get_top_seed_nodes() — store-facing seam (post-8VX).
+    4 seed categories derived from pvs:
+      1. ioc_followup — top graph nodes (existing _type_aware_seeds logic)
+      2. query_suggestion — based on signal_quality + reject_breakdown
+      3. source_revisit — circuit-breaker open domains + depleted signal
+      4. low_signal_recommendation — when sprint found almost nothing
 
-    Post-8VZ canonical path:
-      __main__._print_scorecard_report() → store.get_top_seed_nodes(n=10)
-        → ExportHandoff(top_nodes=...) → export_sprint() → _generate_next_sprint_seeds()
-    Žádný přístup k scheduler._ioc_graph internals.
+    Bounded: max ~10 seeds total. No combinatorial explosion.
 
     Canonical next-seeds path (Sprint F500D):
       - Primary: get_sprint_next_seeds_path(sprint_id) z paths.py
-      - Colocation: when report_path write succeeded, seeds land in same dir as JSON report
-      - Fallback: SPRINT_STORE_ROOT.parent/"reports" if report_path is None (write failed)
-
-    Type-aware seed generation (Sprint F500G §H2):
-      - domain → rdap_lookup + domain_to_ct
-      - ip/ipv4/ipv6 → rdap_lookup only
-      - url → rdap_lookup only
-      - infohash → dht_infohash_lookup only
-      - onion/cve/hash/unknown → NO seeds (truthful skip)
-
-    Sprint F150I §5: Robust seed derivation — divný input → skip, not crash.
+      - Fallback: SPRINT_STORE_ROOT.parent/"reports" if report_path is None
     """
-    # Sprint F500D §3: Use canonical helper; colocation via report_path parent
     from hledac.universal.paths import get_sprint_next_seeds_path, SPRINT_STORE_ROOT
     if report_path is not None:
-        # Colocation with JSON report — canonical sibling path
         seeds_path = get_sprint_next_seeds_path(sprint_id)
     else:
-        # Fallback: report write failed, use same fallback dir as JSON would have
         seeds_path = SPRINT_STORE_ROOT.parent / "reports" / f"{sprint_id}_next_seeds.json"
         seeds_path.parent.mkdir(parents=True, exist_ok=True)
     seeds: list[dict[str, Any]] = []
 
     try:
+        # 1. IOC follow-up seeds from top_nodes (existing logic, now with reason tag)
         for node in top_nodes:
-            # Sprint F150I §5: Defensive extraction — malformed node never crashes
             try:
                 if isinstance(node, dict):
                     ioc_value = str(node.get("value", "")) if node else ""
@@ -223,42 +219,208 @@ def _generate_next_sprint_seeds(
                     ioc_value = str(node[0]) if node[0] else ""
                     ioc_type = str(node[1]) if node[1] else "unknown"
                 elif isinstance(node, (list, tuple)) and len(node) == 1:
-                    # Single-element tuple — treat as value with unknown type
                     ioc_value = str(node[0]) if node[0] else ""
                     ioc_type = "unknown"
                 elif isinstance(node, str):
-                    # Plain string node — use as value, unknown type
                     ioc_value = node
                     ioc_type = "unknown"
                 elif isinstance(node, (int, float)):
-                    # Numeric node — convert to string, unknown type
                     ioc_value = str(node)
                     ioc_type = "unknown"
                 else:
                     continue
             except Exception:
-                # Sprint F150I §5: Any extraction error → skip this node, continue
                 continue
 
             if not ioc_value or len(ioc_value) < 3:
                 continue
 
-            # Sprint F500G §H2: type-aware seed generation
-            # Generate tasky JEN pro typy kde dávají smysl.
-            # Neriskuj falsy seeds pro typy ktere nedávají smysl.
-            node_seeds = _type_aware_seeds(ioc_value, ioc_type)
+            node_seeds = _type_aware_seeds(ioc_value, ioc_type, reason="ioc_followup")
             seeds.extend(node_seeds)
 
+        # 2. Sprint F150J: query_suggestion — derive next queries from sprint signal
+        if pvs:
+            query_seeds = _derive_query_seeds(pvs)
+            seeds.extend(query_seeds)
+
+        # 3. Sprint F150J: source_revisit — circuit breaker + depleted signal
+        if pvs:
+            revisit_seeds = _derive_source_revisit_seeds(pvs)
+            seeds.extend(revisit_seeds)
+
+        # 4. Sprint F150J: low_signal_recommendation — when sprint was nearly empty
+        if pvs:
+            low_signal_seeds = _derive_low_signal_seeds(pvs)
+            seeds.extend(low_signal_seeds)
+
+        # Bounded output — keep total seed count manageable
+        MAX_SEEDS = 12
+        if len(seeds) > MAX_SEEDS:
+            # Sort by priority descending, keep top N
+            seeds.sort(key=lambda s: s.get("priority", 0.5), reverse=True)
+            seeds = seeds[:MAX_SEEDS]
+
         seeds_path.write_text(json.dumps(seeds, indent=2, default=str))
-        logger.info(f"[EXPORT] {len(seeds)} seed tasks → {seeds_path}")
+        logger.info(f"[EXPORT] {len(seeds)} enhanced seeds ({', '.join(_seed_type_counts(seeds))}) → {seeds_path}")
     except Exception as e:
-        logger.warning(f"[EXPORT] Seed generation failed: {e}")
+        logger.warning(f"[EXPORT] Enhanced seed generation failed: {e}")
         seeds_path.write_text(json.dumps([], indent=2))
 
     return seeds_path
 
 
-def _type_aware_seeds(value: str, ioc_type: str) -> list[dict[str, Any]]:
+def _seed_type_counts(seeds: list[dict[str, Any]]) -> dict[str, int]:
+    """Count seeds by their seed_type."""
+    counts: dict[str, int] = {}
+    for s in seeds:
+        t = s.get("task_type", "unknown")
+        counts[t] = counts.get(t, 0) + 1
+    return counts
+
+
+def _derive_query_seeds(pvs: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Sprint F150J: query_suggestion — derive next query seeds from sprint signal.
+
+    Reads: signal_quality, reject_breakdown, accepted, ioc_density.
+
+    Logic:
+      - high_density + accepted > 0 → suggest more of the same queries (query refinement)
+      - medium_density → suggest broadening scope
+      - low_density / slow_novelty → suggest different query strategy
+      - depleted → no query seeds (already tried hard, switch approach)
+    """
+    signal = pvs.get("signal_quality", "unknown")
+    accepted = pvs.get("accepted", 0)
+    ioc_density = pvs.get("ioc_density", 0.0)
+    findings_per_minute = pvs.get("findings_per_minute", 0.0)
+    reject_breakdown = pvs.get("reject_breakdown") or {}
+
+    seeds: list[dict[str, Any]] = []
+
+    # Low-information rejection ratio — if most rejects were low-info, queries may be too broad
+    total_rejected = pvs.get("total_rejected", 0)
+    low_info_rejected = reject_breakdown.get("low_information", 0)
+    low_info_ratio = low_info_rejected / total_rejected if total_rejected > 0 else 0.0
+
+    if signal == "high_density":
+        # Good sprint: suggest refining current query approach
+        seeds.append({
+            "task_type": "query_suggestion",
+            "suggested_action": "refine",
+            "priority": 0.75,
+            "reason": f"signal=high_density/accepted={accepted}/ioc_density={ioc_density:.2f}",
+        })
+    elif signal == "medium_density":
+        if low_info_ratio > 0.5:
+            # Many low-info rejects → queries are too broad, suggest narrowing
+            seeds.append({
+                "task_type": "query_suggestion",
+                "suggested_action": "narrow_scope",
+                "priority": 0.70,
+                "reason": f"low_info_ratio={low_info_ratio:.2f}/broad_queries",
+            })
+        else:
+            # Mixed signal → suggest broadening
+            seeds.append({
+                "task_type": "query_suggestion",
+                "suggested_action": "broaden",
+                "priority": 0.65,
+                "reason": f"signal=medium_density/ioc_density={ioc_density:.2f}",
+            })
+    elif signal == "slow_novelty":
+        # Few findings but they exist — suggest faster queries or different sources
+        seeds.append({
+            "task_type": "query_suggestion",
+            "suggested_action": "accelerate",
+            "priority": 0.60,
+            "reason": f"signal=slow_novelty/fpm={findings_per_minute:.2f}",
+        })
+    elif signal == "depleted":
+        # Exhausted this query space — suggest fundamentally different queries
+        seeds.append({
+            "task_type": "query_suggestion",
+            "suggested_action": "new_approach",
+            "priority": 0.80,
+            "reason": "signal=depleted/exhausted_query_space",
+        })
+
+    return seeds[:3]  # Hard cap: max 3 query suggestions
+
+
+def _derive_source_revisit_seeds(pvs: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Sprint F150J: source_revisit — domains/hosts that need re-visiting.
+
+    Reads: cb_open_domains (circuit breaker open domains), signal_quality.
+
+    Logic:
+      - cb_open_domains → retry with longer backoff
+      - depleted signal → revisit domains that previously timed out
+    """
+    seeds: list[dict[str, Any]] = []
+    cb_open: list[str] = pvs.get("cb_open_domains") or []
+    signal = pvs.get("signal_quality", "unknown")
+
+    if cb_open:
+        for domain in cb_open[:3]:  # Max 3 domains from circuit breaker
+            seeds.append({
+                "task_type": "source_revisit",
+                "value": domain,
+                "priority": 0.55,
+                "reason": "circuit_breaker_open",
+                "backoff_seconds": 3600,  # 1h backoff recommendation
+            })
+    elif signal == "depleted":
+        # No cb state but depleted — suggest retrying known sources with backoff
+        seeds.append({
+            "task_type": "source_revisit",
+            "suggested_action": "retry_known_sources",
+            "priority": 0.50,
+            "reason": "signal=depleted/retry_after_backoff",
+        })
+
+    return seeds[:3]
+
+
+def _derive_low_signal_seeds(pvs: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Sprint F150J: low_signal_recommendation — when sprint found almost nothing.
+
+    Reads: accepted, total_rejected, findings_per_minute.
+
+    Trigger: accepted <= 2 AND findings_per_minute < 0.5.
+
+    Generates practical starting points for next sprint instead of
+    continuing with same approach that yielded near-zero results.
+    """
+    accepted = pvs.get("accepted", 0)
+    findings_per_minute = pvs.get("findings_per_minute", 0.0)
+    total_rejected = pvs.get("total_rejected", 0)
+
+    seeds: list[dict[str, Any]] = []
+
+    if accepted <= 2 and findings_per_minute < 0.5 and total_rejected > 0:
+        # Sprint was nearly empty — offer practical restart suggestions
+        seeds.append({
+            "task_type": "low_signal_recommendation",
+            "suggested_action": "start_fresh",
+            "priority": 0.70,
+            "reason": f"accepted={accepted}/fpm={findings_per_minute:.2f}/near_empty_sprint",
+        })
+        # If dedup was effective but we still found nothing, sources may be exhausted
+        if pvs.get("dedup_effective"):
+            seeds.append({
+                "task_type": "low_signal_recommendation",
+                "suggested_action": "new_seed_sources",
+                "priority": 0.65,
+                "reason": "dedup_effective_but_depleted/switch_sources",
+            })
+
+    return seeds[:2]  # Hard cap: max 2 low-signal recommendations
+
+
+def _type_aware_seeds(value: str, ioc_type: str, reason: str = "top_graph_node") -> list[dict[str, Any]]:
     """
     Sprint F500G §H2: Type-aware seed generation.
 
@@ -287,13 +449,13 @@ def _type_aware_seeds(value: str, ioc_type: str) -> list[dict[str, Any]]:
                 "task_type": "rdap_lookup",
                 "value": value,
                 "priority": 0.85,
-                "reason": f"top_graph_node/{ioc_type}",
+                "reason": f"{reason}/{ioc_type}",
             },
             {
                 "task_type": "domain_to_ct",
                 "value": value,
                 "priority": 0.80,
-                "reason": f"top_graph_node/{ioc_type}",
+                "reason": f"{reason}/{ioc_type}",
             },
         ]
     elif t in ("ip", "ipv4", "ipv6"):
@@ -302,7 +464,7 @@ def _type_aware_seeds(value: str, ioc_type: str) -> list[dict[str, Any]]:
                 "task_type": "rdap_lookup",
                 "value": value,
                 "priority": 0.85,
-                "reason": f"top_graph_node/{ioc_type}",
+                "reason": f"{reason}/{ioc_type}",
             },
         ]
     elif t == "url":
@@ -313,7 +475,7 @@ def _type_aware_seeds(value: str, ioc_type: str) -> list[dict[str, Any]]:
                 "task_type": "rdap_lookup",
                 "value": value,
                 "priority": 0.80,
-                "reason": f"top_graph_node/{ioc_type}",
+                "reason": f"{reason}/{ioc_type}",
             },
         ]
     elif t == "infohash":
@@ -322,7 +484,7 @@ def _type_aware_seeds(value: str, ioc_type: str) -> list[dict[str, Any]]:
                 "task_type": "dht_infohash_lookup",
                 "value": value,
                 "priority": 0.90,
-                "reason": f"top_graph_node/{ioc_type}",
+                "reason": f"{reason}/{ioc_type}",
             },
         ]
     elif t == "onion":
