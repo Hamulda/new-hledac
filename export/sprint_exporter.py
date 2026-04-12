@@ -36,6 +36,14 @@ Sprint F150L: Operator finish layer — derived seams integrated:
   - Rozhraní mezi feed/public branch recommendation
   - enriched next seeds z branch_value + sprint_trend
   - VŠECHNO derived only, žádný new business engine
+Sprint F150P: Finish-layer truth fields — canonical surfaces from scheduler/core:
+  - runtime_truth, feed_verdict, public_verdict, signal_path, hypothesis_pack
+    z ExportHandoff.scorecard (compute_sprint_intelligence output)
+  - run_truth_note: operator-facing sprint characterization (meaningful vs smoke)
+  - branch_truth: definitive feed/public balance summary
+  - best_first_move: immediate next action (single sentence)
+  - why_this_run_matters: one-liner significance statement
+  - No new store reads, no write-back, additive only
 """
 
 from __future__ import annotations
@@ -202,7 +210,21 @@ async def export_sprint(
     source_leaderboard = _get_source_leaderboard(store, days=7)
     # Sprint F150M: correlation from handoff + store fallback (fail-soft)
     correlation = _get_correlation_from_handoff(eh)
-    operator_brief = _build_operator_brief(pvs, branch_value, sprint_trend, source_leaderboard, seeds_count, correlation) if pvs else None
+
+    # Sprint F150P: finish-layer truth fields from scheduler/core canonical surfaces
+    runtime_truth = _get_runtime_truth(eh)
+    feed_verdict = _get_feed_verdict(eh)
+    public_verdict = _get_public_verdict(eh)
+    signal_path = _get_signal_path(eh)
+    hypothesis_pack = _get_hypothesis_pack(eh)
+
+    # Sprint F150P: derived finish-layer operator notes
+    run_truth_note = _derive_run_truth_note(runtime_truth, pvs) if pvs else ""
+    branch_truth = _derive_branch_truth(feed_verdict, public_verdict, branch_value)
+    best_first_move = _derive_best_first_move(runtime_truth, signal_path, pvs, correlation) if pvs else ""
+    why_this_run_matters = _derive_why_this_run_matters(runtime_truth, signal_path, hypothesis_pack, pvs, correlation) if pvs else ""
+
+    operator_brief = _build_operator_brief(pvs, branch_value, sprint_trend, source_leaderboard, seeds_count, correlation, runtime_truth, feed_verdict, public_verdict, signal_path, hypothesis_pack) if pvs else None
 
     return {
         "report_json": str(report_path) if report_path else "",
@@ -210,6 +232,11 @@ async def export_sprint(
         "product_value_summary": pvs,
         "sprint_summary": sprint_summary,
         "operator_brief": operator_brief,
+        # Sprint F150P: finish-layer fields
+        "run_truth_note": run_truth_note,
+        "branch_truth": branch_truth,
+        "best_first_move": best_first_move,
+        "why_this_run_matters": why_this_run_matters,
     }
 
 
@@ -1052,6 +1079,295 @@ def _get_correlation_from_handoff(eh: "ExportHandoff") -> dict[str, Any] | None:
     return None
 
 
+def _get_runtime_truth(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
+    """
+    Sprint F150P: runtime_truth z ExportHandoff.scorecard.
+
+    compute_sprint_intelligence() v scheduleru produkuje kompletní runtime_truth dict.
+    Ten se pak ukládá do scorecard["runtime_truth"] v __main__ windup path.
+
+    Seam: scorecard["runtime_truth"]
+    Fail-soft: returns None when not present (older sprints, smoke runs).
+
+    NO new store reads. NO new planner. NO write-back.
+    """
+    scorecard = eh.scorecard if eh.scorecard else {}
+    rt = scorecard.get("runtime_truth") or scorecard.get("run_truth")
+    if rt and isinstance(rt, dict):
+        return rt
+    return None
+
+
+def _get_feed_verdict(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
+    """
+    Sprint F150P: feed_verdict z ExportHandoff.scorecard.
+
+    Aggregated feed economics verdict across sprint cycles.
+    Produced by compute_sprint_intelligence() → scorecard["feed_verdict"].
+
+    Seam: scorecard["feed_verdict"]
+    Fail-soft: returns None when not present.
+    """
+    scorecard = eh.scorecard if eh.scorecard else {}
+    fv = scorecard.get("feed_verdict")
+    if fv and isinstance(fv, dict):
+        return fv
+    return None
+
+
+def _get_public_verdict(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
+    """
+    Sprint F150P: public_verdict z ExportHandoff.scorecard.
+
+    Aggregated public branch verdict across sprint cycles.
+    Produced by compute_sprint_intelligence() → scorecard["public_verdict"].
+
+    Seam: scorecard["public_verdict"]
+    Fail-soft: returns None when not present.
+    """
+    scorecard = eh.scorecard if eh.scorecard else {}
+    pv = scorecard.get("public_verdict")
+    if pv and isinstance(pv, dict):
+        return pv
+    return None
+
+
+def _get_signal_path(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
+    """
+    Sprint F150P: signal_path z ExportHandoff.scorecard.
+
+    Dominant signal path, next pivot recommendation, corroboration health.
+    Produced by compute_sprint_intelligence() → scorecard["signal_path"].
+
+    Seam: scorecard["signal_path"]
+    Fail-soft: returns None when not present.
+    """
+    scorecard = eh.scorecard if eh.scorecard else {}
+    sp = scorecard.get("signal_path")
+    if sp and isinstance(sp, dict):
+        return sp
+    return None
+
+
+def _get_hypothesis_pack(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
+    """
+    Sprint F150P: hypothesis_pack z ExportHandoff.scorecard.
+
+    Operator shortlist + actionability summary z hypothesis_engine.
+    Produced by compute_sprint_intelligence() → scorecard["hypothesis_pack"].
+
+    Seam: scorecard["hypothesis_pack"]
+    Fail-soft: returns None when not present.
+    """
+    scorecard = eh.scorecard if eh.scorecard else {}
+    hp = scorecard.get("hypothesis_pack")
+    if hp and isinstance(hp, dict):
+        return hp
+    return None
+
+
+def _derive_run_truth_note(
+    runtime_truth: dict[str, Any] | None,
+    pvs: dict[str, Any],
+) -> str:
+    """
+    Sprint F150P §1: run_truth_note — operator-facing sprint characterization.
+
+    One-liner: meaningful_run vs smoke_vs_import vs entrypoint_smoke vs unknown.
+
+    Reads:
+    - runtime_truth["is_meaningful"] (bool) — primary signal
+    - runtime_truth["evidence_note"] (str) — contextual note
+    - pvs.signal_quality as fallback when runtime_truth unavailable
+
+    Fail-soft: falls back to signal_quality-based characterization.
+    """
+    if runtime_truth:
+        is_meaningful = runtime_truth.get("is_meaningful")
+        evidence_note = runtime_truth.get("evidence_note") or ""
+        if is_meaningful is True:
+            return f"meaningful_run: {evidence_note}" if evidence_note else "meaningful_run"
+        elif is_meaningful is False:
+            return f"smoke_run: {evidence_note}" if evidence_note else "smoke_run"
+        elif isinstance(is_meaningful, str):
+            return f"{is_meaningful}: {evidence_note}" if evidence_note else is_meaningful
+
+    # Fallback: signal-based characterization
+    signal = pvs.get("signal_quality", "unknown")
+    if signal == "high_density":
+        return "meaningful_run: high signal density"
+    elif signal == "medium_density":
+        return "meaningful_run: mixed signal detected"
+    elif signal == "depleted":
+        return "smoke_run: depleted signal, near-zero output"
+    elif signal == "slow_novelty":
+        return "meaningful_run: slow but real signal"
+    return "unknown_run"
+
+
+def _derive_branch_truth(
+    feed_verdict: dict[str, Any] | None,
+    public_verdict: dict[str, Any] | None,
+    branch_value: dict[str, Any] | None,
+) -> str:
+    """
+    Sprint F150P §1: branch_truth — definitive feed/public balance summary.
+
+    Combines feed_verdict + public_verdict + branch_value into single sentence.
+
+    Reads:
+    - feed_verdict["dominant_tag"], feed_verdict["avg_quality"]
+    - public_verdict["avg_value_ratio"], public_verdict["dominant_next_action"]
+    - branch_value["branch_verdict"], feed/public percentages
+
+    Fail-soft: falls back to branch_value alone if verdicts unavailable.
+    """
+    parts: list[str] = []
+
+    if feed_verdict:
+        tag = feed_verdict.get("dominant_tag", "")
+        quality = feed_verdict.get("avg_quality", 0)
+        if tag:
+            parts.append(f"feed={tag}(q={quality})")
+
+    if public_verdict:
+        vr = public_verdict.get("avg_value_ratio", 0)
+        action = public_verdict.get("dominant_next_action", "")
+        if vr > 0:
+            parts.append(f"public=val_ratio({vr:.2f})")
+        if action:
+            parts.append(f"public_action={action[:20]}")
+
+    if branch_value:
+        verdict = branch_value.get("branch_verdict", "")
+        feed_pct = branch_value.get("feed_pct", 0)
+        pub_pct = branch_value.get("public_pct", 0)
+        if verdict:
+            parts.append(f"verdict={verdict}(feed={feed_pct:.0f}%/pub={pub_pct:.0f}%)")
+
+    if not parts:
+        return "branch_truth: insufficient data"
+    return " | ".join(parts)
+
+
+def _derive_best_first_move(
+    runtime_truth: dict[str, Any] | None,
+    signal_path: dict[str, Any] | None,
+    pvs: dict[str, Any],
+    correlation: dict[str, Any] | None,
+) -> str:
+    """
+    Sprint F150P §1: best_first_move — immediate next action (single sentence).
+
+    Priority order:
+    1. High-risk findings → investigate high-risk branch
+    2. runtime_truth is_meaningful=False → pivot immediately
+    3. signal_path next_pivot_recommendation=pivot_immediately
+    4. pvs signal quality guidance
+    5. correlation operator_shortlist first item
+
+    Single sentence, max 80 chars.
+    """
+    # 1. High-risk first
+    if correlation:
+        high_risk = correlation.get("high_risk_branch") or correlation.get("high_risk") or []
+        if high_risk and len(high_risk) > 0:
+            return "investigate high-risk branch — critical findings present"
+
+    # 2. Non-meaningful run → pivot
+    if runtime_truth:
+        is_meaningful = runtime_truth.get("is_meaningful")
+        if is_meaningful is False:
+            return "pivot: sprint was smoke, change approach immediately"
+
+    # 3. Signal path next pivot
+    if signal_path:
+        next_pivot = signal_path.get("next_pivot_recommendation", "")
+        if next_pivot == "pivot_immediately":
+            return "pivot: signal path recommends immediate pivot"
+
+    # 4. pvs signal guidance
+    signal = pvs.get("signal_quality", "unknown")
+    if signal == "depleted":
+        return "new approach: current query space exhausted"
+    elif signal == "high_density":
+        return "expand: broaden successful query approach"
+    elif signal == "medium_density":
+        return "narrow: reduce query scope to reduce low-info noise"
+    elif signal == "slow_novelty":
+        return "accelerate: real signal exists, speed up sources"
+
+    # 5. Correlation operator shortlist
+    if correlation:
+        shortlist = correlation.get("operator_shortlist") or []
+        if shortlist and isinstance(shortlist, list) and len(shortlist) > 0:
+            first = shortlist[0]
+            if isinstance(first, dict):
+                action = first.get("action", "")
+                target = first.get("target", "")
+                if action:
+                    return f"{action}: {target[:40]}" if target else action[:80]
+
+    return "continue: maintain current approach"
+
+
+def _derive_why_this_run_matters(
+    runtime_truth: dict[str, Any] | None,
+    signal_path: dict[str, Any] | None,
+    hypothesis_pack: dict[str, Any] | None,
+    pvs: dict[str, Any],
+    correlation: dict[str, Any] | None,
+) -> str:
+    """
+    Sprint F150P §1: why_this_run_matters — one-liner significance statement.
+
+    Tells operator why this sprint's output matters for future decisions.
+
+    Reads:
+    - runtime_truth["primary_signal_source"]
+    - signal_path["dominant_signal_path"]
+    - hypothesis_pack["what_matters_first"]
+    - correlation["so_what"]
+    - pvs.signal_quality + accepted count
+
+    Max 100 chars.
+    """
+    # Priority: correlation so_what (most synthesized)
+    if correlation:
+        so_what = correlation.get("so_what") or ""
+        if so_what and len(so_what) > 5:
+            return so_what[:100]
+
+    # hypothesis_pack what_matters_first
+    if hypothesis_pack:
+        wmf = hypothesis_pack.get("what_matters_first") or ""
+        if wmf and len(wmf) > 5:
+            return wmf[:100]
+
+    # runtime_truth primary signal source
+    if runtime_truth:
+        pss = runtime_truth.get("primary_signal_source") or ""
+        if pss and len(pss) > 3:
+            return f"signal from {pss}"
+
+    # signal_path dominant path
+    if signal_path:
+        dsp = signal_path.get("dominant_signal_path", "")
+        if dsp:
+            return f"dominant path: {dsp}"
+
+    # pvs-based fallback
+    signal = pvs.get("signal_quality", "unknown")
+    accepted = pvs.get("accepted", 0)
+    if signal == "high_density" and accepted > 0:
+        return f"{accepted} quality findings at high density signal"
+    elif signal == "depleted":
+        return "exhausted space — strategic pivot needed"
+    elif signal == "slow_novelty":
+        return "real but slow signal — rate vs quality tradeoff"
+    return "insufficient signal for significance statement"
+
+
 def _get_branch_value(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
     """
     Sprint F150L: branch_value z scorecard — feed vs public branch analysis.
@@ -1068,6 +1384,11 @@ def _build_operator_brief(
     source_leaderboard: list[dict],
     seeds_count: int,
     correlation: dict[str, Any] | None = None,
+    runtime_truth: dict[str, Any] | None = None,
+    feed_verdict: dict[str, Any] | None = None,
+    public_verdict: dict[str, Any] | None = None,
+    signal_path: dict[str, Any] | None = None,
+    hypothesis_pack: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Sprint F150L: Praktický operator brief — co sprint našel, která branch nesla signál,
@@ -1210,6 +1531,12 @@ def _build_operator_brief(
         "what_not_to_do": what_not_to_do,
         "priority_stack": priority_stack,
         "high_value_findings": high_value_findings,
+        # Sprint F150P: finish-layer canonical truth fields
+        "runtime_truth": runtime_truth,
+        "feed_verdict": feed_verdict,
+        "public_verdict": public_verdict,
+        "signal_path": signal_path,
+        "hypothesis_pack": hypothesis_pack,
     }
 
 

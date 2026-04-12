@@ -255,6 +255,16 @@ class FeedPipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     # Sprint F150I: condensed economics verdict (analogous to public branch economics)
     feed_economics_verdict: tuple[str, int, int, int, int] = ("", 0, 0, 0, 0)
     # (verdict_tag, feed_branch_signal_present_int, fallback_useful, fallback_waste, feed_signal_quality)
+    # Sprint F150J: dict-style additive feed branch verdict
+    feed_branch_verdict: dict[str, Any] = dict()
+    # Sprint F150J: derived feed counters with real scheduling value
+    squandered_high_usefulness_entries: int = 0        # fallback attempted on entries that had high-usefulness but no hits
+    fallback_value_ratio: float = 0.0                  # fallback_useful / max(1, fallback_useful + fallback_waste)
+    feed_native_yield_ratio: float = 0.0               # findings_rich / max(1, findings_rich + findings_fallback)
+    metadata_strong_but_content_weak: int = 0           # entries where metadata_boost=True but assembled_text < threshold
+    low_trust_feed_hits: int = 0                        # feed-native hits on entries with low quality_band
+    feed_next_action: str = "unknown"                   # "continue_feed" | "fallback_more" | "reassess_feed" | "stop"
+    feed_confidence_note: str = ""                       # human-readable confidence annotation
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +360,137 @@ def _compute_feed_economics_verdict(
     quality = int(rich_ratio * 100 * (1.0 - waste_ratio * 0.5))
 
     return (verdict_tag, int(feed_signal_present), fallback_useful, fallback_waste, quality)
+
+
+# Sprint F150J: dict-style additive feed branch verdict
+
+
+def _compute_feed_branch_verdict(
+    feed_signal_present: bool,
+    fallback_useful: int,
+    fallback_waste: int,
+    findings_rich: int,
+    findings_fallback: int,
+    squandered_high_usefulness: int,
+    metadata_strong_but_content_weak: int,
+    low_trust_feed_hits: int,
+    total_entries_with_hits: int,
+    entries_seen: int,
+    feed_native_yield_ratio: float,
+    fallback_value_ratio: float,
+) -> dict[str, Any]:
+    """
+    Compute a rich dict-style verdict for feed branch economics.
+
+    Provides actionable signals for scheduler/exporter:
+    - feed-native yield vs fallback yield breakdown
+    - wasted high-usefulness entries count
+    - unnecessary fallback count
+    - whether feed branch corroborates or burns fetch budget
+    - next action recommendation
+    - confidence annotation
+    """
+    total_findings = findings_rich + findings_fallback
+    verdict: dict[str, Any] = {
+        "verdict_tag": "no_signal",
+        "feed_native_yield": findings_rich,
+        "fallback_yield": findings_fallback,
+        "total_yield": total_findings,
+        "squandered_high_usefulness_entries": squandered_high_usefulness,
+        "unnecessary_fallbacks": fallback_waste,
+        "useful_fallbacks": fallback_useful,
+        "feed_corroborates": feed_signal_present and fallback_useful > 0,
+        "feed_burns_budget": fallback_waste > 0 and findings_rich == 0,
+        "feed_next_action": "unknown",
+        "feed_confidence_note": "",
+        "feed_confidence_score": 0,
+        "feed_native_yield_ratio": feed_native_yield_ratio,
+        "fallback_value_ratio": fallback_value_ratio,
+        "high_usefulness_waste_rate": 0.0,
+        "metadata_strong_content_weak": metadata_strong_but_content_weak,
+        "low_trust_feed_hits": low_trust_feed_hits,
+        "entries_with_hits": total_entries_with_hits,
+        "entries_seen": entries_seen,
+    }
+
+    if total_findings == 0:
+        verdict["verdict_tag"] = "no_signal"
+        verdict["feed_next_action"] = "reassess_feed"
+        verdict["feed_confidence_note"] = "no findings in either branch"
+        verdict["feed_confidence_score"] = 0
+        return verdict
+
+    # Waste rate for high-usefulness entries
+    total_fallbacks = fallback_useful + fallback_waste
+    if squandered_high_usefulness + fallback_waste > 0:
+        waste_denom = squandered_high_usefulness + fallback_waste
+        verdict["high_usefulness_waste_rate"] = fallback_waste / waste_denom
+
+    # Verdict tag
+    rich_ratio = feed_native_yield_ratio
+    if rich_ratio >= 0.7:
+        verdict["verdict_tag"] = "feed_lean"
+    elif rich_ratio <= 0.3:
+        verdict["verdict_tag"] = "fallback_lean"
+    else:
+        verdict["verdict_tag"] = "balanced"
+
+    # Feed corroborates: feed had hits AND fallback contributed something
+    verdict["feed_corroborates"] = feed_signal_present and fallback_useful > 0
+    # Feed burns budget: waste > 0 AND feed contributed nothing
+    verdict["feed_burns_budget"] = fallback_waste > 0 and findings_rich == 0
+
+    # Next action
+    if not feed_signal_present and fallback_useful == 0:
+        verdict["feed_next_action"] = "reassess_feed"
+        verdict["feed_confidence_note"] = "neither branch produced signal"
+    elif verdict["feed_burns_budget"]:
+        verdict["feed_next_action"] = "fallback_more"
+        verdict["feed_confidence_note"] = "feed burns budget; rely on fallback"
+    elif verdict["feed_corroborates"]:
+        verdict["feed_next_action"] = "continue_feed"
+        verdict["feed_confidence_note"] = "both branches contribute; feed is valuable"
+    elif feed_signal_present and fallback_useful == 0:
+        verdict["feed_next_action"] = "continue_feed"
+        verdict["feed_confidence_note"] = "feed-native only; fallback not needed"
+    else:
+        verdict["feed_next_action"] = "reassess_feed"
+        verdict["feed_confidence_note"] = "mixed signals; review feed quality"
+
+    # Confidence score
+    confidence = int(rich_ratio * 100 * (1.0 - verdict["high_usefulness_waste_rate"] * 0.5))
+    verdict["feed_confidence_score"] = max(0, min(100, confidence))
+
+    return verdict
+
+
+def _compute_feed_next_action_and_confidence(
+    feed_signal_present: bool,
+    fallback_useful: int,
+    fallback_waste: int,
+    findings_rich: int,
+    findings_fallback: int,
+    squandered_high_usefulness: int,
+    metadata_strong_but_content_weak: int,
+    low_trust_feed_hits: int,
+) -> tuple[str, str]:
+    """Compute feed_next_action and feed_confidence_note directly."""
+    total_findings = findings_rich + findings_fallback
+    if total_findings == 0:
+        return ("reassess_feed", "no findings in either branch")
+    if fallback_waste > 0 and findings_rich == 0:
+        return ("fallback_more", "feed burns budget; rely on fallback")
+    if feed_signal_present and fallback_useful > 0:
+        return ("continue_feed", "both branches contribute; feed is valuable")
+    if feed_signal_present and fallback_useful == 0:
+        return ("continue_feed", "feed-native only; fallback not needed")
+    if squandered_high_usefulness > 0:
+        return ("reassess_feed", f"{squandered_high_usefulness} high-usefulness entries squandered")
+    if metadata_strong_but_content_weak > 0:
+        return ("fallback_more", f"{metadata_strong_but_content_weak} entries: strong metadata but weak content")
+    if low_trust_feed_hits > 0:
+        return ("reassess_feed", f"{low_trust_feed_hits} low-trust feed hits; quality uncertain")
+    return ("reassess_feed", "mixed signals; review feed quality")
 
 
 # ---------------------------------------------------------------------------
@@ -922,6 +1063,13 @@ async def _entry_to_pattern_findings(
     feed_title = getattr(entry, "feed_title", "") or ""
     feed_language = getattr(entry, "feed_language", "") or ""
 
+    # Sprint F150J: extract adapter-derived signals (fail-soft if absent)
+    adapter_source_priority_bias: float = getattr(entry, "source_priority_bias", 0.0) or 0.0
+    adapter_timestamp_reliability: float = getattr(entry, "timestamp_reliability", 0.0) or 0.0
+    adapter_metadata_richness_band: str = getattr(entry, "metadata_richness_band", "") or ""
+    adapter_entry_usefulness_band: str = getattr(entry, "entry_usefulness_band", "") or ""
+    adapter_selection_reason: str = getattr(entry, "selection_reason", "") or ""
+
     if not entry_url:
         entry_url = f"urn:feed:entry:{title[:64]}"
 
@@ -969,12 +1117,22 @@ async def _entry_to_pattern_findings(
         and quality_signal.metadata_boost
         and not quality_signal.language_mismatch
     )
+    # Sprint F150J: adapter-derived signal refinement of fallback decisions
+    # High source priority bias + feed-native content above threshold → skip fallback even if quality_band is medium
+    if adapter_source_priority_bias >= 0.1 and assembled_text_len >= _MIN_ARTICLE_FALLBACK_CHARS:
+        should_skip_fallback = True
+    # Strong metadata richness from adapter but weak assembled text → force fallback
+    if adapter_metadata_richness_band == "high" and assembled_text_len < _MIN_ARTICLE_FALLBACK_CHARS:
+        force_fallback = True
     # Sprint F150I: aged but highly-structured entry gets benefit of doubt
+    # Sprint F150J: adapter usefulness band strengthens the signal
     aged_but_structured = (
         assembled_text_len >= _MIN_ARTICLE_FALLBACK_CHARS
         and quality_signal.quality_band == "low"
         and pre_fallback_hits_count == 0
     )
+    if aged_but_structured and adapter_entry_usefulness_band == "high":
+        aged_but_structured = False  # strong adapter signal → don't fall back
 
     article_fallback_attempted = False
     if not should_skip_fallback and (force_fallback or aged_but_structured or assembled_text_len < _MIN_ARTICLE_FALLBACK_CHARS):
@@ -1226,6 +1384,10 @@ async def async_run_live_feed_pipeline(
     _fallback_waste_count = 0
     _findings_from_rich_feed = 0
     _findings_from_fallback = 0
+    # Sprint F150J: derived feed counters
+    _squandered_high_usefulness_entries = 0
+    _metadata_strong_but_content_weak = 0
+    _low_trust_feed_hits = 0
 
     for entry in entries:
         entry_url = getattr(entry, "entry_url", "") or f"urn:feed:entry:{getattr(entry, 'title', '')[:64]}"
@@ -1324,6 +1486,25 @@ async def async_run_live_feed_pipeline(
             elif article_fallback_used and not feed_native_signal_carried:
                 # Fallback attempted but produced no findings — still counts as useful attempt signal
                 _fallback_useful_count += 1
+            # Sprint F150J: derived counters
+            # Squandered: high quality_band entry that fell back despite having high usefulness metadata
+            if (
+                article_fallback_attempted
+                and quality_signal.quality_band == "high"
+                and not feed_native_signal_carried
+                and not findings
+            ):
+                _squandered_high_usefulness_entries += 1
+            # Metadata strong but content weak: metadata boost but assembled text is short
+            if (
+                quality_signal.metadata_boost
+                and assembled_len < _MIN_ARTICLE_FALLBACK_CHARS
+                and not feed_native_signal_carried
+            ):
+                _metadata_strong_but_content_weak += 1
+            # Low trust feed hits: feed-native hits on low quality entries
+            if feed_native_signal_carried and quality_signal.quality_band == "low":
+                _low_trust_feed_hits += 1
 
         if not findings:
             pages.append(FeedPipelineEntryResult(
@@ -1441,6 +1622,34 @@ async def async_run_live_feed_pipeline(
         feed_economics_verdict=_compute_feed_economics_verdict(
             _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
             _findings_from_rich_feed, _findings_from_fallback,
+        ),
+        # Sprint F150J: derived feed counters + dict verdict
+        squandered_high_usefulness_entries=_squandered_high_usefulness_entries,
+        metadata_strong_but_content_weak=_metadata_strong_but_content_weak,
+        low_trust_feed_hits=_low_trust_feed_hits,
+        fallback_value_ratio=(
+            _fallback_useful_count / max(1, _fallback_useful_count + _fallback_waste_count)
+        ),
+        feed_native_yield_ratio=(
+            _findings_from_rich_feed / max(1, _findings_from_rich_feed + _findings_from_fallback)
+        ),
+        feed_next_action=_compute_feed_next_action_and_confidence(
+            _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
+            _findings_from_rich_feed, _findings_from_fallback,
+            _squandered_high_usefulness_entries, _metadata_strong_but_content_weak, _low_trust_feed_hits,
+        )[0],
+        feed_confidence_note=_compute_feed_next_action_and_confidence(
+            _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
+            _findings_from_rich_feed, _findings_from_fallback,
+            _squandered_high_usefulness_entries, _metadata_strong_but_content_weak, _low_trust_feed_hits,
+        )[1],
+        feed_branch_verdict=_compute_feed_branch_verdict(
+            _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
+            _findings_from_rich_feed, _findings_from_fallback,
+            _squandered_high_usefulness_entries, _metadata_strong_but_content_weak, _low_trust_feed_hits,
+            entries_with_hits, entries_seen,
+            _findings_from_rich_feed / max(1, _findings_from_rich_feed + _findings_from_fallback),
+            _fallback_useful_count / max(1, _fallback_useful_count + _fallback_waste_count),
         ),
     )
 

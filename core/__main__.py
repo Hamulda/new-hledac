@@ -26,8 +26,8 @@ from hledac.universal.knowledge.duckdb_store import DuckDBShadowStore
 from hledac.universal.knowledge.semantic_store import SemanticStore
 from hledac.universal.paths import TOR_ROOT
 from hledac.universal.runtime.sprint_scheduler import (
+    SprintScheduler,
     SprintSchedulerConfig,
-    async_run_tiered_feed_sprint_once,
 )
 from hledac.universal.transport.tor_transport import TorTransport
 from hledac.universal.runtime.sprint_lifecycle import SprintLifecycleManager
@@ -250,7 +250,7 @@ async def run_sprint(
 ) -> None:
     """
     Run a full sprint lifecycle with UMA monitoring and delta reporting.
-    Uses async_run_tiered_feed_sprint_once which handles lifecycle internally.
+    Uses SprintScheduler.run() directly to enable compute_sprint_intelligence() access.
     """
     # Sprint 8SA: Phase timing instrumentation
     _phase_times: dict[str, float] = {}
@@ -277,19 +277,27 @@ async def run_sprint(
         export_dir=export_dir,
     )
 
-    # Lifecycle (internal to async_run_tiered_feed_sprint_once)
+    # Lifecycle — owned here, passed to scheduler
     lifecycle = SprintLifecycleManager()
+    scheduler = SprintScheduler(config)
 
     try:
-        # Run sprint via convenience function (handles lifecycle correctly)
-        result = await async_run_tiered_feed_sprint_once(
-            sources=list(_SPRINT_FEED_SOURCES),
-            config=config,
+        # Run sprint via scheduler directly (enables compute_sprint_intelligence access)
+        result = await scheduler.run(
             lifecycle=lifecycle,
+            sources=list(_SPRINT_FEED_SOURCES),
             now_monotonic=time.monotonic(),
             query=query,
             duckdb_store=store,
         )
+
+        # Sprint F150H: Pull scheduler intelligence (fail-soft, additive)
+        # correlation, hypothesis_pack, signal_path, feed_verdict,
+        # public_verdict, branch_value, sprint_verdict
+        try:
+            intel = scheduler.compute_sprint_intelligence()
+        except Exception:
+            intel = {}
 
         _phase_times["WINDUP"] = time.monotonic()
 
@@ -425,6 +433,22 @@ async def run_sprint(
         logger.info(f"[NEXT] {next_hint}")
         logger.info(f"[SOURCES] {src_mix_str}")
 
+        # Sprint F150H: Log scheduler intelligence (visible operator signal)
+        sv = intel.get("sprint_verdict") or {}
+        sp = intel.get("signal_path") or {}
+        corr = intel.get("correlation") or {}
+        hyp = intel.get("hypothesis_pack") or {}
+        if sv:
+            logger.info(
+                f"[INTEL] posture={sv.get('posture','?')} | "
+                f"dominant={sv.get('dominant_signal','?')} | "
+                f"corroborated={sp.get('is_corroborated',False)} | "
+                f"noisy={sp.get('is_noisy',False)} | "
+                f"risk={corr.get('risk_score',0):.3f} | "
+                f"hypotheses={hyp.get('hypothesis_count',0)} | "
+                f"next={sv.get('first_action','?')[:60]}"
+            )
+
         # Sprint 8SA + 8UA: orjson JSON report export
         # Use /tmp directly to avoid FileExistsError when export_dir is a file
         report_path = Path(f"/tmp/{sprint_id}.json")
@@ -464,6 +488,29 @@ async def run_sprint(
                 for ph in phases if ph in _phase_times
             },
             "runtime_truth": runtime_truth,
+            # Sprint F150H: Scheduler intelligence propagated fail-soft (additive)
+            "correlation_summary": intel.get("correlation"),
+            "hypothesis_pack_summary": intel.get("hypothesis_pack"),
+            "signal_path": intel.get("signal_path"),
+            "feed_verdict": intel.get("feed_verdict"),
+            "public_verdict": intel.get("public_verdict"),
+            "branch_value": intel.get("branch_value"),
+            "sprint_verdict": intel.get("sprint_verdict"),
+            # Sprint F150H: Canonical operator summary — condensed truth on core boundary
+            "canonical_run_summary": {
+                "meaningful": runtime_truth["is_meaningful"],
+                "primary_signal": runtime_truth["primary_signal_source"],
+                "posture": (intel.get("sprint_verdict") or {}).get("posture", "unknown"),
+                "dominant_signal_path": (intel.get("signal_path") or {}).get("dominant_signal_path", "unknown"),
+                "corroborated": (intel.get("signal_path") or {}).get("is_corroborated", False),
+                "is_noisy": (intel.get("signal_path") or {}).get("is_noisy", False),
+                "next_pivot": (intel.get("signal_path") or {}).get("next_pivot_recommendation", "unknown"),
+                "branch_verdict": (intel.get("branch_value") or {}).get("branch_verdict", "unknown"),
+                "risk_score": (intel.get("correlation") or {}).get("risk_score", 0.0),
+                "hypothesis_count": (intel.get("hypothesis_pack") or {}).get("hypothesis_count", 0),
+                "first_action": (intel.get("sprint_verdict") or {}).get("first_action", ""),
+                "confidence": (intel.get("sprint_verdict") or {}).get("confidence", ""),
+            },
         }
         report_path.write_bytes(orjson.dumps(report_dict, option=orjson.OPT_INDENT_2))
         logger.info(f"[REPORT] {report_path}")

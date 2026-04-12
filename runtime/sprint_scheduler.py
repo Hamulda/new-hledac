@@ -2223,13 +2223,22 @@ class SprintScheduler:
                 value_ratios = [v.get("value_ratio", 0.0) for v in pub_vlist if "value_ratio" in v]
                 corroborations = [v.get("corroboration_vs_burn", 0.0) for v in pub_vlist if "corroboration_vs_burn" in v]
                 next_actions = [v.get("public_next_action", "") for v in pub_vlist if "public_next_action" in v]
+                confidence_notes = [v.get("public_confidence_note", "") for v in pub_vlist if "public_confidence_note" in v]
+                # Sprint F150L: additional economics signals
+                squandered_hits = [v.get("discovery_squandered", 0) for v in pub_vlist if "discovery_squandered" in v]
+                noise_ratios = [v.get("noise_fetch_ratio", 0.0) for v in pub_vlist if "noise_fetch_ratio" in v]
                 dominant_action = max(set(next_actions), key=next_actions.count) if next_actions else ""
+                dominant_conf = max(set(confidence_notes), key=confidence_notes.count) if confidence_notes else ""
                 result["public_verdict"] = {
                     "cycle_count": len(pub_vlist),
                     "avg_waste_ratio": round(sum(waste_ratios) / len(waste_ratios), 3) if waste_ratios else 0.0,
                     "avg_value_ratio": round(sum(value_ratios) / len(value_ratios), 3) if value_ratios else 0.0,
                     "avg_corroboration_vs_burn": round(sum(corroborations) / len(corroborations), 3) if corroborations else 0.0,
+                    "avg_discovery_squandered": round(sum(squandered_hits) / len(squandered_hits), 2) if squandered_hits else 0.0,
+                    "total_discovery_squandered": sum(squandered_hits),
+                    "avg_noise_fetch_ratio": round(sum(noise_ratios) / len(noise_ratios), 3) if noise_ratios else 0.0,
                     "dominant_next_action": dominant_action,
+                    "dominant_confidence_note": dominant_conf,
                     "action_distribution": {a: next_actions.count(a) for a in set(next_actions)},
                 }
         except Exception:
@@ -2325,6 +2334,77 @@ class SprintScheduler:
             }
         except Exception:
             result["branch_value"] = None
+
+        # ── Sprint F150L: Second-order condensed summary ──────────────────
+        # Derived entirely from already-computed sections above.
+        # purely additive, fail-soft, bounded, no new model/persistence deps.
+        try:
+            sig_path = result.get("signal_path") or {}
+            br_val = result.get("branch_value") or {}
+            feed_v = result.get("feed_verdict") or {}
+            pub_v = result.get("public_verdict") or {}
+            corr = result.get("correlation") or {}
+            hyp = result.get("hypothesis_pack") or {}
+
+            dominant_signal = sig_path.get("dominant_signal_path", "unknown")
+            branch_verdict = br_val.get("branch_verdict", "unknown")
+            corroboration_score = sig_path.get("corroboration_score", 0.0)
+            is_noisy = sig_path.get("is_noisy", False)
+            is_corroborated = sig_path.get("is_corroborated", False)
+            campaign_signal = sig_path.get("campaign_signal", False)
+            branch_mix = sig_path.get("branch_mix_health", "unknown")
+            next_pivot = sig_path.get("next_pivot_recommendation", "unknown")
+            avg_corr_vs_burn = pub_v.get("avg_corroboration_vs_burn", 0.0)
+            avg_noise = pub_v.get("avg_noise_fetch_ratio", 0.0)
+            dominant_action = pub_v.get("dominant_next_action", "")
+            dominant_conf = pub_v.get("dominant_confidence_note", "")
+            feed_tag = feed_v.get("dominant_tag", "")
+            feed_avg_qual = feed_v.get("avg_quality", 0.0)
+            risk_score = corr.get("risk_score", 0.0)
+            hyp_count = hyp.get("hypothesis_count", 0)
+            op_shortlist = corr.get("operator_shortlist", []) or hyp.get("operator_shortlist", [])
+            first_action = op_shortlist[0].get("action", "") if op_shortlist else ""
+            backup_action = op_shortlist[1].get("action", "") if len(op_shortlist) > 1 else ""
+
+            # Sprint posture: corroborated / mixed / noisy / depleted
+            total_findings = (br_val.get("feed_findings", 0) or 0) + (br_val.get("public_findings", 0) or 0)
+            if total_findings == 0:
+                posture = "depleted"
+            elif is_noisy and avg_noise > 0.4:
+                posture = "noisy"
+            elif is_corroborated and corroboration_score > 0.35:
+                posture = "corroborated"
+            elif campaign_signal and avg_corr_vs_burn > 0.35:
+                posture = "mixed"
+            elif dominant_signal in ("corroborated", "high_confidence"):
+                posture = "corroborated"
+            elif dominant_signal == "weak_noisy":
+                posture = "noisy"
+            else:
+                posture = "mixed"
+
+            result["sprint_verdict"] = {
+                "posture": posture,
+                "dominant_signal": dominant_signal,
+                "branch_verdict": branch_verdict,
+                "branch_mix": branch_mix,
+                "corroboration_score": corroboration_score,
+                "is_corroborated": is_corroborated,
+                "campaign_signal": campaign_signal,
+                "next_pivot": next_pivot,
+                "dominant_action": dominant_action,
+                "first_action": first_action,
+                "backup_action": backup_action,
+                "confidence": dominant_conf,
+                "feed_tag": feed_tag,
+                "feed_avg_quality": feed_avg_qual,
+                "risk_score": risk_score,
+                "hypothesis_count": hyp_count,
+                "total_findings": total_findings,
+            }
+        except Exception:
+            # Second-order condensation is purely additive — never crashes
+            pass
 
         return result
 

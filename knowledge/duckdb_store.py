@@ -2802,6 +2802,231 @@ class DuckDBShadowStore:
             return []
 
     # ------------------------------------------------------------------
+    # Sprint F150I: Variant B — high-value sprint ranking seams
+    # Reads: sprint_delta + sprint_scorecard (NO new tables, NO write-back)
+    # ------------------------------------------------------------------
+
+    def get_high_value_sprint_ranking(self, last_n: int = 8) -> list[dict]:
+        """
+        Sprint F150I: Rank last N sprints by a composite value score.
+        Composite = accepted_findings * semantic_novelty / max(duration_s, 1).
+        Higher is better. Returns sprint_id, composite_score, and component fields.
+
+        Use for: "which sprints delivered the most value per second".
+        Fail-soft, bounded.
+        """
+        if not self._initialized or self._closed:
+            return []
+        try:
+            fut = self._executor.submit(
+                self._sync_query_high_value_ranking, last_n
+            )
+            return fut.result()
+        except Exception:
+            return []
+
+    def _sync_query_high_value_ranking(self, last_n: int) -> list[dict]:
+        """Sync — MUST be called on the worker thread."""
+        try:
+            conn = self._file_conn if self._db_path else self._persistent_conn
+            if conn is None:
+                return []
+            rows = conn.execute(
+                """
+                SELECT
+                    d.sprint_id,
+                    d.ts,
+                    d.new_findings,
+                    d.duration_s,
+                    c.accepted_findings,
+                    c.semantic_novelty,
+                    d.synthesis_confidence,
+                    ROUND(
+                        CAST(c.accepted_findings AS REAL)
+                        * COALESCE(c.semantic_novelty, 1.0)
+                        / MAX(d.duration_s, 1.0),
+                        4
+                    ) AS composite_score
+                FROM sprint_delta d
+                LEFT JOIN sprint_scorecard c ON d.sprint_id = c.sprint_id
+                ORDER BY d.ts DESC
+                LIMIT ?
+                """,
+                [last_n],
+            ).fetchall()
+            return [
+                {
+                    "sprint_id": r[0],
+                    "ts": r[1],
+                    "new_findings": r[2] or 0,
+                    "duration_s": r[3] or 0.0,
+                    "accepted_findings": r[4] or 0,
+                    "semantic_novelty": r[5] or 1.0,
+                    "synthesis_confidence": r[6] or 0.0,
+                    "composite_score": r[7] or 0.0,
+                }
+                for r in rows
+            ]
+        except Exception:
+            return []
+
+    def get_scorecard_consistency_check(self, sprint_id: str) -> dict:
+        """
+        Sprint F150I: Compare findings_per_minute from sprint_scorecard vs
+        findings_per_min from sprint_delta for the same sprint.
+        Returns ratio and warns if divergence > 2x.
+
+        Use for: detecting scorecard / delta sync issues.
+        Fail-soft — returns empty dict on any error.
+        """
+        if not self._initialized or self._closed:
+            return {}
+        try:
+            fut = self._executor.submit(
+                self._sync_query_consistency_check, sprint_id
+            )
+            return fut.result()
+        except Exception:
+            return {}
+
+    def _sync_query_consistency_check(self, sprint_id: str) -> dict:
+        """Sync — MUST be called on the worker thread."""
+        try:
+            conn = self._file_conn if self._db_path else self._persistent_conn
+            if conn is None:
+                return {}
+            rows = conn.execute(
+                """
+                SELECT
+                    c.sprint_id,
+                    c.findings_per_minute,
+                    COALESCE(d.findings_per_min, 0) AS delta_fpm,
+                    d.new_findings,
+                    d.duration_s
+                FROM sprint_scorecard c
+                LEFT JOIN sprint_delta d ON c.sprint_id = d.sprint_id
+                WHERE c.sprint_id = ?
+                """,
+                [sprint_id],
+            ).fetchall()
+            if not rows:
+                return {}
+            r = rows[0]
+            scorecard_fpm = r[1] or 0.0
+            delta_fpm = r[2] or 0.0
+            ratio = round(delta_fpm / max(scorecard_fpm, 0.001), 4)
+            return {
+                "sprint_id": r[0],
+                "scorecard_fpm": scorecard_fpm,
+                "delta_fpm": delta_fpm,
+                "ratio": ratio,
+                "diverges": ratio > 2.0 or ratio < 0.5,
+                "new_findings": r[3] or 0,
+                "duration_s": r[4] or 0.0,
+            }
+        except Exception:
+            return {}
+
+    def get_recent_best_sprints(self, last_n: int = 5) -> list[dict]:
+        """
+        Sprint F150I: Return the top N sprints by yield (new_findings / duration_s).
+        Reads from sprint_delta. Fail-soft, bounded.
+        """
+        if not self._initialized or self._closed:
+            return []
+        try:
+            fut = self._executor.submit(
+                self._sync_query_best_sprints, last_n
+            )
+            return fut.result()
+        except Exception:
+            return []
+
+    def _sync_query_best_sprints(self, last_n: int) -> list[dict]:
+        """Sync — MUST be called on the worker thread."""
+        try:
+            conn = self._file_conn if self._db_path else self._persistent_conn
+            if conn is None:
+                return []
+            rows = conn.execute(
+                """
+                SELECT sprint_id, ts, new_findings, duration_s,
+                       findings_per_min, synthesis_confidence,
+                       ROUND(new_findings / MAX(duration_s / 60, 0.001), 4)
+                       AS yield_per_min
+                FROM sprint_delta
+                WHERE new_findings > 0 AND duration_s > 0
+                ORDER BY yield_per_min DESC
+                LIMIT ?
+                """,
+                [last_n],
+            ).fetchall()
+            return [
+                {
+                    "sprint_id": r[0],
+                    "ts": r[1],
+                    "new_findings": r[2] or 0,
+                    "duration_s": r[3] or 0.0,
+                    "findings_per_min": r[4] or 0.0,
+                    "synthesis_confidence": r[5] or 0.0,
+                    "yield_per_min": r[6] or 0.0,
+                }
+                for r in rows
+            ]
+        except Exception:
+            return []
+
+    def get_recent_worst_sprints(self, last_n: int = 5) -> list[dict]:
+        """
+        Sprint F150I: Return the bottom N sprints by yield (new_findings / duration_s).
+        Only sprints with new_findings > 0 are included (exclude zero-yield noise).
+        Reads from sprint_delta. Fail-soft, bounded.
+        """
+        if not self._initialized or self._closed:
+            return []
+        try:
+            fut = self._executor.submit(
+                self._sync_query_worst_sprints, last_n
+            )
+            return fut.result()
+        except Exception:
+            return []
+
+    def _sync_query_worst_sprints(self, last_n: int) -> list[dict]:
+        """Sync — MUST be called on the worker thread."""
+        try:
+            conn = self._file_conn if self._db_path else self._persistent_conn
+            if conn is None:
+                return []
+            rows = conn.execute(
+                """
+                SELECT sprint_id, ts, new_findings, duration_s,
+                       findings_per_min, synthesis_confidence,
+                       ROUND(new_findings / MAX(duration_s / 60, 0.001), 4)
+                       AS yield_per_min
+                FROM sprint_delta
+                WHERE new_findings > 0 AND duration_s > 0
+                ORDER BY yield_per_min ASC
+                LIMIT ?
+                """,
+                [last_n],
+            ).fetchall()
+            return [
+                {
+                    "sprint_id": r[0],
+                    "ts": r[1],
+                    "new_findings": r[2] or 0,
+                    "duration_s": r[3] or 0.0,
+                    "findings_per_min": r[4] or 0.0,
+                    "synthesis_confidence": r[5] or 0.0,
+                    "yield_per_min": r[6] or 0.0,
+                }
+                for r in rows
+            ]
+        except Exception:
+            return []
+
+    # ------------------------------------------------------------------
     # Public Activation API — WAL-first async wrappers (Sprint 8B)
     # ------------------------------------------------------------------
 

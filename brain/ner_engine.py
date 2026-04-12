@@ -1271,6 +1271,154 @@ def build_entity_cooccurrence_map(
     }
 
 
+def _top_by_score(entities: list[dict], k: int = 10) -> list[dict]:
+    """Return top-k entities sorted by count * confidence."""
+    if not entities:
+        return []
+    scored = sorted(entities, key=lambda e: e["count"] * e.get("confidence", 0.5), reverse=True)
+    return scored[:k]
+
+
+def _corroborated_findings(entities: list[dict], min_sources: int = 2) -> list[dict]:
+    """Filter entities seen across multiple sources (corroborated)."""
+    return [e for e in entities if len(e.get("sources", [])) >= min_sources]
+
+
+def _dominant_type(entities: list[dict]) -> str | None:
+    """Return the most frequent entity type by total count."""
+    if not entities:
+        return None
+    type_counts: dict[str, int] = {}
+    for e in entities:
+        t = e.get("type", "unknown")
+        type_counts[t] = type_counts.get(t, 0) + e.get("count", 1)
+    if not type_counts:
+        return None
+    return max(type_counts, key=type_counts.get)
+
+
+def _build_cooccurrence_pivots(co_map: dict, top_k: int = 5) -> list[dict]:
+    """
+    Extract useful co-occurrence pivots from cooccurrence map.
+    Returns small list of readable pivot dicts.
+    """
+    pivots: list[dict] = []
+    for rel_type, pairs in [
+        ("domain_org", co_map.get("domain_org", [])),
+        ("domain_ip",  co_map.get("domain_ip",  [])),
+    ]:
+        for domain, target, count in pairs[:top_k]:
+            pivots.append({
+                "pivot": domain,
+                "relation": rel_type,
+                "target": target,
+                "count": count,
+            })
+    return pivots
+
+
+def build_entity_summary(
+    findings: list[dict],
+    *,
+    max_entities: int = 20,
+    max_cooccurrence_findings: int = 30,
+) -> dict:
+    """
+    Condensed entity summary from findings — second-level condensation.
+
+    Produkuje malý, praktický output vhodný pro scheduler / export / core wiring:
+    - top_entities:       ranked list (top 20 by count*confidence)
+    - corroborated:       entities seen in multiple sources
+    - co_occurrence_pivots: useful cross-entity pivots (domain↔org, domain↔ip)
+    - dominant_type:      most frequent entity type across all findings
+    - entity_takeaway:    one-line so-what string
+    - type_breakdown:     count per type
+
+    Args:
+        findings: List of dicts with 'text', optional 'url', 'source'.
+        max_entities: Max top entities to include (default 20).
+        max_cooccurrence_findings: Max findings for cooccurrence (default 30).
+
+    Returns:
+        Condensed entity summary dict:
+            {
+                "top_entities": list[dict],
+                "corroborated": list[dict],
+                "co_occurrence_pivots": list[dict],
+                "dominant_type": str | None,
+                "entity_takeaway": str,
+                "type_breakdown": dict[str, int],
+                "total_entities": int,
+            }
+    """
+    if not findings:
+        return {
+            "top_entities": [],
+            "corroborated": [],
+            "co_occurrence_pivots": [],
+            "dominant_type": None,
+            "entity_takeaway": "No findings to analyze.",
+            "type_breakdown": {},
+            "total_entities": 0,
+        }
+
+    # Step 1: extract entities from findings
+    entities = extract_entities_from_findings(
+        findings,
+        min_count=1,
+        max_entities=200,  # extract wide, filter at output
+    )
+
+    # Step 2: build cooccurrence map
+    co_map = build_entity_cooccurrence_map(
+        findings[:max_cooccurrence_findings],
+        max_findings=max_cooccurrence_findings,
+    )
+
+    # Step 3: build top N
+    top_entities = _top_by_score(entities, k=max_entities)
+
+    # Step 4: corroborated entities (seen in 2+ sources)
+    corroborated = _corroborated_findings(entities, min_sources=2)[:10]
+
+    # Step 5: cooccurrence pivots
+    pivots = _build_cooccurrence_pivots(co_map, top_k=5)
+
+    # Step 6: dominant type
+    dominant = _dominant_type(entities)
+
+    # Step 7: type breakdown
+    type_breakdown: dict[str, int] = {}
+    for e in entities:
+        t = e.get("type", "unknown")
+        type_breakdown[t] = type_breakdown.get(t, 0) + e.get("count", 1)
+
+    # Step 8: entity takeaway
+    total_count = sum(e.get("count", 1) for e in entities)
+    unique_count = len(entities)
+    top_type = dominant or "unknown"
+    top_entity_val = top_entities[0]["value"] if top_entities else None
+
+    if top_entity_val:
+        takeaway = (
+            f"{unique_count} unique entities ({total_count} total hits); "
+            f"dominant type={top_type}; "
+            f"top entity={top_entity_val}"
+        )
+    else:
+        takeaway = f"{unique_count} unique entities across {len(findings)} findings."
+
+    return {
+        "top_entities": top_entities,
+        "corroborated": corroborated,
+        "co_occurrence_pivots": pivots,
+        "dominant_type": dominant,
+        "entity_takeaway": takeaway,
+        "type_breakdown": type_breakdown,
+        "total_entities": unique_count,
+    }
+
+
 __all__ = [
     "extract_iocs_from_text",
     "_IOC_PATTERNS",
@@ -1283,4 +1431,6 @@ __all__ = [
     "extract_entities_from_texts",
     "extract_entities_from_findings",
     "build_entity_cooccurrence_map",
+    # F150J condensed entity summary
+    "build_entity_summary",
 ]
