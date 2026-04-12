@@ -1177,6 +1177,19 @@ def _build_operator_brief(
     # --- F150M: trust_note — operator confidence flag ---
     trust_note = _derive_trust_note(pvs, correlation, so_what, campaign_hints, high_risk_branch)
 
+    # Sprint F150N §1: confidence_band — HIGH/MEDIUM/LOW triage na jeden pohled
+    confidence_band = _derive_confidence_band(pvs, correlation, so_what, campaign_hints, high_risk_branch)
+
+    # Sprint F150N §1: what_not_to_do — explicitní anti-patterny (inverze next-step)
+    what_not_to_do = _derive_what_not_to_do(signal, branch_value, correlation, pvs)
+
+    # Sprint F150N §2: priority_stack — rankované akce s důvody
+    enriched = _enrich_follow_ups(signal, branch_value, sprint_trend, source_leaderboard, pvs, correlation)
+    priority_stack = _derive_priority_stack(enriched, signal, correlation)
+
+    # Sprint F150N §2: high_value_findings — top corroborated findings
+    high_value_findings = _derive_high_value_findings(correlation, campaign_hints, high_risk_branch, dominant_cluster)
+
     return {
         "finding_summary": finding_summary,
         "branch_signal": branch_signal,
@@ -1192,6 +1205,11 @@ def _build_operator_brief(
         "high_risk_branch": high_risk_branch,
         # F150M: trust note
         "trust_note": trust_note,
+        # Sprint F150N: new derived operator-facing fields
+        "confidence_band": confidence_band,
+        "what_not_to_do": what_not_to_do,
+        "priority_stack": priority_stack,
+        "high_value_findings": high_value_findings,
     }
 
 
@@ -1343,6 +1361,265 @@ def _derive_trust_note(
         return "nízká spolehlivost — vyčerpaný prostor, minimální data"
 
     return ""
+
+
+def _derive_confidence_band(
+    pvs: dict[str, Any],
+    correlation: dict[str, Any] | None,
+    so_what: str,
+    campaign_hints: list[dict],
+    high_risk_branch: list[dict],
+) -> str:
+    """
+    Sprint F150N §1: confidence_band — HIGH/MEDIUM/LOW triage na jeden pohled.
+
+    Operator vidí na první pohled, jak důvěřovat sprint outputu.
+    Derived z pvs.signal_quality + correlation presence + corroboration depth.
+
+    Fail-soft: returns "MEDIUM" as safe default when correlation unavailable.
+    """
+    # High-risk branch presence = HIGH (operational stakes are real)
+    if high_risk_branch and len(high_risk_branch) > 0:
+        return "HIGH"
+
+    # Campaign hints with 2+ corroborations = HIGH
+    if campaign_hints and len(campaign_hints) >= 2:
+        return "HIGH"
+
+    # so_what present + high_density signal = HIGH
+    if so_what and len(so_what) > 5 and pvs.get("signal_quality") == "high_density":
+        return "HIGH"
+
+    # so_what present alone = MEDIUM
+    if so_what and len(so_what) > 5:
+        return "MEDIUM"
+
+    # High density signal = MEDIUM (good data, no correlation)
+    if pvs.get("signal_quality") == "high_density":
+        return "MEDIUM"
+
+    # Depleted = LOW (minimální data)
+    if pvs.get("signal_quality") == "depleted":
+        return "LOW"
+
+    # Medium/other = MEDIUM
+    return "MEDIUM"
+
+
+def _derive_what_not_to_do(
+    signal: str,
+    branch_value: dict[str, Any] | None,
+    correlation: dict[str, Any] | None,
+    pvs: dict[str, Any],
+) -> list[str]:
+    """
+    Sprint F150N §1: what_not_to_do — explicitní anti-patterny.
+
+    Inverze _derive_next_step: co rozhodně NEDĚLAT příště.
+    Operator quickly sees what to avoid.
+
+    Fail-soft: returns empty list when nothing specific to avoid.
+    """
+    anti: list[str] = []
+
+    # Depleted signal — don't continue same approach
+    if signal == "depleted":
+        anti.append("nepokračovat ve stejných dotazech — prostor je vyčerpaný")
+        dedup = pvs.get("reject_breakdown")
+        if dedup and dedup.get("persistent_duplicate", 0) > 0:
+            anti.append("nezkoušet stejné zdroje znovu — dedup efektivní, zdroje jsou dry")
+
+    # Feed or public zero — don't ignore the silent branch
+    if branch_value:
+        feed_f = branch_value.get("feed_findings", 0)
+        public_f = branch_value.get("public_findings", 0)
+        if feed_f == 0 and public_f > 0:
+            anti.append("neignorovat feed branch — je tichá, může nést jiný typ signálu")
+        elif public_f == 0 and feed_f > 0:
+            anti.append("neignorovat veřejné zdroje — jsou tiché, ale mohou mít jinou tematiku")
+
+    # Low-info rejections dominant — don't broaden scope
+    dedup = pvs.get("reject_breakdown")
+    total_rejected = pvs.get("total_rejected", 0)
+    if total_rejected > 0 and dedup:
+        low_info = dedup.get("low_information", 0)
+        if low_info / total_rejected > 0.5:
+            anti.append("nezůžovat scope — problém je šíře, ne úzkost dotazů")
+
+    # Circuit breaker open domains
+    cb_open = pvs.get("cb_open_domains", [])
+    if cb_open and len(cb_open) >= 3:
+        anti.append(f"nezkoušet {len(cb_open)} domains s otevřeným circuit breaker — počkat na backoff")
+
+    # High-risk branch present — don't deprioritize investigation
+    if correlation:
+        high_risk = correlation.get("high_risk_branch") or correlation.get("high_risk") or []
+        if high_risk and len(high_risk) > 0:
+            anti.append("nepřehližet high-risk branch — kritické nálezy vyžadují akci")
+
+    # Slow novelty — don't slow down further
+    if signal == "slow_novelty":
+        anti.append("nezpomalhodit — už je to pomalé, fokus na rychlejší zdroje")
+
+    return anti[:5]  # Hard cap: max 5 anti-patterns
+
+
+def _enrich_follow_ups(
+    signal: str,
+    branch_value: dict[str, Any] | None,
+    sprint_trend: list[dict],
+    source_leaderboard: list[dict],
+    pvs: dict[str, Any],
+    correlation: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Sprint F150N §2: Enrich follow-ups with priority metadata.
+
+    Converts flat string list from _derive_follow_ups into ranked dicts
+    with: action, priority_score (0-1), rationale.
+
+    All data from existing seams — no new store reads.
+    """
+    raw = _derive_follow_ups(signal, branch_value, sprint_trend, source_leaderboard, pvs, correlation)
+
+    # Correlation-driven priority boosts
+    corr_priority_boost = 0.0
+    if correlation:
+        high_risk = correlation.get("high_risk_branch") or correlation.get("high_risk") or []
+        if high_risk and len(high_risk) > 0:
+            corr_priority_boost = 0.15  # High-risk adds urgency
+
+    # Signal-based baseline priority
+    signal_priority = {
+        "high_density": 0.60,
+        "medium_density": 0.55,
+        "slow_novelty": 0.50,
+        "depleted": 0.70,  # Depleted = high urgency to change
+        "unknown": 0.40,
+    }.get(signal, 0.50)
+
+    enriched: list[dict[str, Any]] = []
+    for i, item in enumerate(raw):
+        if isinstance(item, str):
+            # Correlation-campaign items get boost
+            boost = corr_priority_boost if "kampaň" in item or "dominantní téma" in item else 0.0
+            enriched.append({
+                "action": item,
+                "priority_score": min(1.0, signal_priority + boost + (0.05 * (len(raw) - i) / len(raw))),
+                "rationale": "correlation_derived" if boost > 0 else "signal_derived",
+            })
+        elif isinstance(item, dict):
+            enriched.append(item)
+
+    # Sort by priority_score descending
+    enriched.sort(key=lambda x: x.get("priority_score", 0.5), reverse=True)
+    return enriched
+
+
+def _derive_priority_stack(
+    enriched: list[dict[str, Any]],
+    signal: str,
+    correlation: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    """
+    Sprint F150N §2: priority_stack — ranked list of actions with reasons.
+
+    Takes enriched follow-ups and returns top-5 as structured stack:
+    [{"rank": 1, "action": "...", "why": "..."}]
+
+    Uses correlation truth for ranking when available.
+    """
+    stack: list[dict[str, Any]] = []
+
+    # High-risk branch always goes first if present
+    if correlation:
+        high_risk = correlation.get("high_risk_branch") or correlation.get("high_risk") or []
+        if high_risk and len(high_risk) > 0:
+            stack.append({
+                "rank": len(stack) + 1,
+                "action": "investigate high-risk branch",
+                "why": f"{len(high_risk)} kritických nálezů — operační priorita",
+            })
+
+    # Correlation campaign hints
+    if correlation:
+        campaign = correlation.get("campaign_hints") or []
+        if campaign and isinstance(campaign, list) and len(campaign) > 0:
+            stack.append({
+                "rank": len(stack) + 1,
+                "action": f"expand campaign investigation ({len(campaign)} correlated findings)",
+                "why": "propojené nálezy signalizují aktivní kampaň",
+            })
+
+    # Signal-driven actions
+    for item in enriched[:5 - len(stack)]:
+        action = item.get("action", "") if isinstance(item, dict) else str(item)
+        if not action or any(action == s["action"] for s in stack):
+            continue
+        rationale = item.get("rationale", "signal_derived") if isinstance(item, dict) else "signal_derived"
+        stack.append({
+            "rank": len(stack) + 1,
+            "action": action,
+            "why": f"signal={signal} / {rationale}",
+        })
+
+    return stack[:5]  # Hard cap: max 5 stack entries
+
+
+def _derive_high_value_findings(
+    correlation: dict[str, Any] | None,
+    campaign_hints: list[dict],
+    high_risk_branch: list[dict],
+    dominant_cluster: str | None,
+) -> list[dict[str, Any]]:
+    """
+    Sprint F150N §2: high_value_findings — top corroborated findings.
+
+    Sources:
+      - correlation.campaign_hints (list of corroborated findings)
+      - correlation.high_risk_branch (critical/high findings)
+      - dominant_cluster theme
+
+    Returns top-5 findings with their corroboration signal.
+    Fail-soft: returns empty list when no correlation data available.
+    """
+    findings: list[dict[str, Any]] = []
+
+    # High-risk findings — highest confidence (operationally verified)
+    for r in (high_risk_branch or [])[:3]:
+        if isinstance(r, dict):
+            finding_val = r.get("value") or r.get("ioc_value") or r.get("indicator") or "?"
+            finding_type = r.get("ioc_type") or r.get("type") or "unknown"
+            findings.append({
+                "value": str(finding_val)[:100],
+                "type": str(finding_type),
+                "confidence": "HIGH",
+                "signal": "high_risk_branch",
+                "rationale": r.get("rationale") or r.get("reason") or "critical severity + infra hints",
+            })
+
+    # Campaign hints — corroborated findings
+    for h in (campaign_hints or [])[:3]:
+        if isinstance(h, dict):
+            findings.append({
+                "value": str(h.get("value") or h.get("indicator") or "?")[:100],
+                "type": str(h.get("ioc_type") or h.get("type") or "unknown"),
+                "confidence": "MEDIUM-HIGH",
+                "signal": "campaign_hint",
+                "rationale": h.get("rationale") or h.get("campaign_id") or "corroborated by multiple sources",
+            })
+
+    # Dominant cluster — theme summary
+    if dominant_cluster and isinstance(dominant_cluster, str) and len(dominant_cluster) > 2:
+        findings.append({
+            "value": dominant_cluster[:80],
+            "type": "theme",
+            "confidence": "MEDIUM",
+            "signal": "dominant_cluster",
+            "rationale": f"dominantní téma: {dominant_cluster}",
+        })
+
+    return findings[:5]  # Hard cap: max 5 findings
 
 
 def _build_sprint_summary(pvs: dict[str, Any], seeds_count: int) -> dict[str, Any]:

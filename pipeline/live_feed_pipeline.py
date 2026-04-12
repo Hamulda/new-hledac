@@ -245,6 +245,16 @@ class FeedPipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     sample_enriched_texts: tuple[str, ...] = ()
     enrichment_phase_used: str = "none"   # "feed_rich_content" / "article_fallback" / "mixed"
     temporal_feed_vocabulary_mismatch: bool = False
+    # Sprint F150I: feed economics verdicts
+    feed_branch_signal_present: bool = False        # True if >=1 entry had feed-native hits (no fallback needed)
+    fallback_useful_count: int = 0                  # Fallback entries that produced new findings vs no-signal fallbacks
+    fallback_waste_count: int = 0                   # Fallback entries where feed-native already had signal (unnecessary)
+    findings_from_rich_feed: int = 0                 # Findings where feed-native content carried the hit
+    findings_from_fallback: int = 0                  # Findings where article fallback was the winning source
+    feed_branch_hint: str = "unknown"                # "feed_strong" | "feed_weak" | "mixed" | "unknown" — next-sprint signal
+    # Sprint F150I: condensed economics verdict (analogous to public branch economics)
+    feed_economics_verdict: tuple[str, int, int, int, int] = ("", 0, 0, 0, 0)
+    # (verdict_tag, feed_branch_signal_present_int, fallback_useful, fallback_waste, feed_signal_quality)
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +291,65 @@ def diagnose_feed_signal_stage(
     if findings_built_pre_store > 0:
         return "prestore_findings_present"
     return "unknown"
+
+
+# Sprint F150I: feed economics verdict helpers
+
+
+def _compute_feed_branch_hint(
+    feed_signal_present: bool,
+    fallback_useful: int,
+    fallback_waste: int,
+    findings_rich: int,
+    findings_fallback: int,
+    entries_with_hits: int,
+) -> str:
+    """
+    Compute a hint for next sprint about feed branch quality.
+    """
+    if entries_with_hits == 0:
+        return "unknown"
+    if feed_signal_present and fallback_waste == 0:
+        return "feed_strong"
+    if feed_signal_present and fallback_waste > 0 and fallback_useful == 0:
+        return "feed_weak"
+    if fallback_useful > 0 and findings_fallback > 0:
+        return "fallback_valuable"
+    if feed_signal_present or fallback_useful > 0:
+        return "mixed"
+    return "unknown"
+
+
+def _compute_feed_economics_verdict(
+    feed_signal_present: bool,
+    fallback_useful: int,
+    fallback_waste: int,
+    findings_rich: int,
+    findings_fallback: int,
+) -> tuple[str, int, int, int, int]:
+    """
+    Compute condensed economics verdict for the run.
+    Returns (verdict_tag, feed_signal_int, fallback_useful, fallback_waste, feed_signal_quality).
+    verdict_tag: "feed_lean" | "fallback_lean" | "balanced" | "no_signal"
+    """
+    total_findings = findings_rich + findings_fallback
+    if total_findings == 0:
+        return ("no_signal", int(feed_signal_present), fallback_useful, fallback_waste, 0)
+
+    rich_ratio = findings_rich / total_findings if total_findings > 0 else 0.0
+    waste_ratio = fallback_waste / (fallback_useful + fallback_waste) if (fallback_useful + fallback_waste) > 0 else 0.0
+
+    if rich_ratio >= 0.7:
+        verdict_tag = "feed_lean"
+    elif rich_ratio <= 0.3:
+        verdict_tag = "fallback_lean"
+    else:
+        verdict_tag = "balanced"
+
+    # Signal quality: 0-100 based on feed-native hit rate and waste ratio
+    quality = int(rich_ratio * 100 * (1.0 - waste_ratio * 0.5))
+
+    return (verdict_tag, int(feed_signal_present), fallback_useful, fallback_waste, quality)
 
 
 # ---------------------------------------------------------------------------
@@ -833,15 +902,16 @@ async def _entry_to_pattern_findings(
     feed_url: str,
     entry: Any,
     query_context: str | None,
-) -> tuple[list[dict], int, int, int, str, str, bool, bool, EntryQualitySignal]:
+) -> tuple[list[dict], int, int, int, str, str, bool, bool, EntryQualitySignal, bool]:
     """
     Entry -> pattern-backed CanonicalFinding dicts.
 
-    Returns (findings, patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted, quality_signal).
+    Returns (findings, patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted, quality_signal, feed_native_signal_carried).
     Empty registry = valid zero-findings state (patterns_configured=0, matched=0).
     enrichment_phase: "feed_rich_content" | "article_fallback" | "none"
     article_fallback_used: True if article was fetched and enriched
     quality_signal: EntryQualitySignal with metadata-aware quality assessment
+    feed_native_signal_carried: True if feed-native content (before fallback) produced hits
     """
     title = getattr(entry, "title", "") or ""
     summary = getattr(entry, "summary", "") or ""
@@ -871,6 +941,19 @@ async def _entry_to_pattern_findings(
     )
     assembled_text_len = len(clean_text)
     article_fallback_used = False
+    feed_native_signal_carried = False
+
+    # Sprint F150I: scan feed-native text BEFORE fallback decision
+    # If feed-native already has hits, fallback is wasteful unless entry is aged+structured
+    pre_fallback_hits_count = 0
+    try:
+        pre_hits = await _async_scan_feed_text(clean_text)
+        pre_fallback_hits_count = len(pre_hits)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pre_hits = []
+    feed_native_signal_carried = pre_fallback_hits_count > 0
 
     # Sprint 8BE PHASE 2 + F150H: smarter article fallback decision
     # Rule: skip fallback if feed-native content is already high-quality.
@@ -886,9 +969,15 @@ async def _entry_to_pattern_findings(
         and quality_signal.metadata_boost
         and not quality_signal.language_mismatch
     )
+    # Sprint F150I: aged but highly-structured entry gets benefit of doubt
+    aged_but_structured = (
+        assembled_text_len >= _MIN_ARTICLE_FALLBACK_CHARS
+        and quality_signal.quality_band == "low"
+        and pre_fallback_hits_count == 0
+    )
 
     article_fallback_attempted = False
-    if not should_skip_fallback and (force_fallback or assembled_text_len < _MIN_ARTICLE_FALLBACK_CHARS):
+    if not should_skip_fallback and (force_fallback or aged_but_structured or assembled_text_len < _MIN_ARTICLE_FALLBACK_CHARS):
         article_text = ""
         article_success = False
         try:
@@ -932,7 +1021,7 @@ async def _entry_to_pattern_findings(
     matched_patterns = len(hits)
 
     if not hits:
-        return ([], patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted, quality_signal)
+        return ([], patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted, quality_signal, feed_native_signal_carried)
 
     # Per-entry dedup by (label, pattern, value)
     entry_deduper = _EntryDeduper()
@@ -951,7 +1040,7 @@ async def _entry_to_pattern_findings(
         )
         findings.append(finding)
 
-    return (findings, patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted, quality_signal)
+    return (findings, patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted, quality_signal, feed_native_signal_carried)
 
 
 # ---------------------------------------------------------------------------
@@ -1131,6 +1220,12 @@ async def async_run_live_feed_pipeline(
     # Sprint F300C: separate enriched sample (post-enrichment text)
     _sample_enriched_texts: list[str] = []
     _sample_enriched_texts_truncated = False
+    # Sprint F150I: feed economics counters
+    _feed_branch_signal_present = False
+    _fallback_useful_count = 0
+    _fallback_waste_count = 0
+    _findings_from_rich_feed = 0
+    _findings_from_fallback = 0
 
     for entry in entries:
         entry_url = getattr(entry, "entry_url", "") or f"urn:feed:entry:{getattr(entry, 'title', '')[:64]}"
@@ -1149,7 +1244,7 @@ async def async_run_live_feed_pipeline(
 
         # Pattern scan + mapping — fail-soft per entry
         try:
-            findings, patterns_cfg, matched, assembled_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted, quality_signal = await _entry_to_pattern_findings(
+            findings, patterns_cfg, matched, assembled_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted, quality_signal, feed_native_signal_carried = await _entry_to_pattern_findings(
                 feed_url, entry, query_context
             )
         except asyncio.CancelledError:
@@ -1214,6 +1309,21 @@ async def async_run_live_feed_pipeline(
             if matched > 0:
                 entries_with_hits += 1
                 findings_built_pre_store += len(findings)
+            # Sprint F150I: feed economics tracking
+            # Track feed-native signal presence across the run
+            if feed_native_signal_carried:
+                _feed_branch_signal_present = True
+                _findings_from_rich_feed += len(findings)
+            # Track fallback economics: wasteful = had feed-native signal but still fell back
+            if article_fallback_attempted and feed_native_signal_carried:
+                _fallback_waste_count += 1
+            # Useful fallback = no feed-native signal but fallback produced findings
+            if article_fallback_used and not feed_native_signal_carried and findings:
+                _fallback_useful_count += 1
+                _findings_from_fallback += len(findings)
+            elif article_fallback_used and not feed_native_signal_carried:
+                # Fallback attempted but produced no findings — still counts as useful attempt signal
+                _fallback_useful_count += 1
 
         if not findings:
             pages.append(FeedPipelineEntryResult(
@@ -1318,6 +1428,20 @@ async def async_run_live_feed_pipeline(
         sample_enriched_texts=tuple(_sample_enriched_texts),
         enrichment_phase_used="article_fallback" if entries_with_article_fallback > 0 else ("feed_rich_content" if entries_with_rich_feed_content > 0 else "none"),
         temporal_feed_vocabulary_mismatch=False,
+        # Sprint F150I: feed economics verdicts
+        feed_branch_signal_present=_feed_branch_signal_present,
+        fallback_useful_count=_fallback_useful_count,
+        fallback_waste_count=_fallback_waste_count,
+        findings_from_rich_feed=_findings_from_rich_feed,
+        findings_from_fallback=_findings_from_fallback,
+        feed_branch_hint=_compute_feed_branch_hint(
+            _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
+            _findings_from_rich_feed, _findings_from_fallback, entries_with_hits,
+        ),
+        feed_economics_verdict=_compute_feed_economics_verdict(
+            _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
+            _findings_from_rich_feed, _findings_from_fallback,
+        ),
     )
 
 

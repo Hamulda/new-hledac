@@ -449,6 +449,10 @@ class SprintScheduler:
         self._correlation_cache: Optional[dict] = None
         self._hypothesis_pack_cache: Optional[dict] = None
         self._branch_value_summary: Optional[dict] = None
+        # Sprint 8VN §C: Feed + public branch verdict accumulators (additive, fail-soft)
+        # Capped at 10 entries to stay M1 8GB safe
+        self._feed_verdicts: list[tuple[str, int, int, int, int]] = []  # (verdict_tag, s, f, w, q)
+        self._public_verdicts: list[dict] = []  # public_branch_verdict dicts
 
     # ── Sprint 8VI §B: RL Adaptive Pivot ────────────────────────────────
 
@@ -790,6 +794,10 @@ class SprintScheduler:
 
             # Sprint 8VD §F: Track public findings in scorecard count
             self._finding_count += public_result.accepted_findings
+            # Sprint 8VN §C: Accumulate public branch verdict (additive, fail-soft)
+            pbv = getattr(public_result, 'public_branch_verdict', None)
+            if pbv and isinstance(pbv, dict) and len(self._public_verdicts) < 10:
+                self._public_verdicts.append(pbv)
 
             log.debug(
                 f"[8XE] Public discovery: discovered={public_result.discovered} "
@@ -842,6 +850,11 @@ class SprintScheduler:
         self._result.accepted_findings += result.accepted_findings
         # Sprint 8VD §F: Track finding count for scorecard
         self._finding_count += result.accepted_findings
+        # Sprint 8VN §C: Accumulate feed economics verdict (additive, fail-soft)
+        if hasattr(result, 'feed_economics_verdict'):
+            verdict = result.feed_economics_verdict
+            if verdict and isinstance(verdict, (list, tuple)) and len(verdict) == 5:
+                self._feed_verdicts.append(tuple(verdict))
         # Sprint 8VN: Accumulate findings for correlation + hypothesis seams
         # Bounded to 500 to stay M1 8GB safe
         if hasattr(result, 'matched_patterns') and result.matched_patterns > 0:
@@ -2082,33 +2095,36 @@ class SprintScheduler:
         """
         Sprint 8VN: Lazy fail-soft computation of correlation + hypothesis seams.
 
-        Both seams run only when findings exist. Returns a dict with:
-        - correlation: from correlate_findings() (workflow_orchestrator.py)
-        - hypothesis_pack: from build_hypothesis_pack() (hypothesis_engine.py)
+        Returns a dict with:
+        - correlation: from correlate_findings() — full second-order condensation
+        - hypothesis_pack: from build_hypothesis_pack() — operator shortlist + actionability
         - branch_value: feed vs public branch value comparison
+        - signal_path: dominant signal path, next pivot, corroboration health
+        - feed_verdict: aggregated feed economics verdict across cycles
+        - public_verdict: aggregated public branch verdict across cycles
 
         All computation is bounded and M1 8GB safe:
         - correlation: max 500 findings
-        - hypothesis: max 1000 text chars
+        - hypothesis: max 200 finding texts
+        - feed/public verdict accumulation: max 10 entries each
         - no model dependency
         - fail-soft throughout
         """
         findings = getattr(self, "_all_findings", []) or []
 
-        if not findings:
-            return {
-                "correlation": None,
-                "hypothesis_pack": None,
-                "branch_value": None,
-            }
-
         result: dict[str, Any] = {
             "correlation": None,
             "hypothesis_pack": None,
             "branch_value": None,
+            "signal_path": None,
+            "feed_verdict": None,
+            "public_verdict": None,
         }
 
-        # ── Correlation seam ────────────────────────────────────────────────
+        if not findings:
+            return result
+
+        # ── Correlation seam (second-order condensation) ────────────────────
         try:
             correlate_fn = _import_correlate_findings()
             corr = correlate_fn(findings[:500])
@@ -2116,23 +2132,37 @@ class SprintScheduler:
                 "risk_score": round(corr.risk_score, 3),
                 "verdict": corr.verdict,
                 "anomaly_count": corr.anomaly_count,
-                "top_themes": corr.top_themes[:5],
+                "top_themes": list(corr.top_themes[:5]),
                 "theme_count": len(corr.themes),
+                # Sprint 8VN §C: second-order — actionable condensation
+                "signal_quality": getattr(corr, 'signal_quality', "weak"),
+                "cross_source_confidence": round(getattr(corr, 'cross_source_confidence', 0.0), 3),
+                "campaign_confidence": round(getattr(corr, 'campaign_confidence', 0.0), 3),
+                "dominant_cluster": getattr(corr, 'dominant_cluster', None),
+                "so_what": getattr(corr, 'so_what', ""),
+                "what_matters_first": getattr(corr, 'what_matters_first', ""),
+                "operator_shortlist": [
+                    {"action": item.get("action", ""), "target": item.get("target", ""),
+                     "rationale": item.get("rationale", "")[:80]}
+                    for item in (getattr(corr, 'operator_shortlist', None) or [])[:3]
+                    if isinstance(item, dict)
+                ],
+                "confidence_note": getattr(corr, 'confidence_note', ""),
+                "corroborated_iocs_count": len(getattr(corr, 'corroborated_iocs', []) or []),
+                "top_priority_pivots_count": len(getattr(corr, 'top_priority_pivots', []) or []),
             }
         except Exception:
             result["correlation"] = None
 
-        # ── Hypothesis pack seam ───────────────────────────────────────────
+        # ── Hypothesis pack seam (operator shortlist) ───────────────────────
         try:
             HypEng = _import_hypothesis_engine()
             eng = HypEng()
-            # Build finding strings for hypothesis engine
             finding_texts: list[str] = []
             for f in findings[:200]:
                 desc = f.get("description", "")
                 src = f.get("source", "")
-                if desc:
-                    finding_texts.append(f"[{src}] {desc}" if src else desc)
+                finding_texts.append(f"[{src}] {desc}" if (src and desc) else (desc or ""))
             if finding_texts:
                 pack = eng.build_hypothesis_pack(finding_texts)
                 result["hypothesis_pack"] = {
@@ -2141,14 +2171,126 @@ class SprintScheduler:
                     "ioc_follow_ups": len(pack.ioc_follow_ups),
                     "source_hints_count": len(pack.source_hints),
                     "provenance": pack.provenance,
+                    "signal_quality": getattr(pack, 'signal_quality', "weak"),
+                    "what_matters_first": getattr(pack, 'what_matters_first', ""),
+                    "confidence_note": getattr(pack, 'confidence_note', ""),
                     "top_queries": [
                         {"query": q.get("query", ""), "rationale": q.get("rationale", "")[:80]}
                         for q in (pack.suggested_queries or [])[:5]
                         if isinstance(q, dict)
                     ],
+                    "operator_shortlist": [
+                        {"action": item.get("action", ""), "target": item.get("target", ""),
+                         "rationale": item.get("rationale", "")[:80]}
+                        for item in (getattr(pack, 'operator_shortlist', None) or [])[:3]
+                        if isinstance(item, dict)
+                    ],
                 }
         except Exception:
             result["hypothesis_pack"] = None
+
+        # ── Feed branch verdict (aggregated across cycles) ─────────────────
+        try:
+            feed_vlist: list[tuple[str, int, int, int, int]] = getattr(self, '_feed_verdicts', []) or []
+            if feed_vlist:
+                verdict_tags: dict[str, int] = {}
+                total_signal = 0
+                total_fallback_waste = 0
+                for tag, sig, fb_use, fb_waste, qual in feed_vlist:
+                    verdict_tags[tag] = verdict_tags.get(tag, 0) + 1
+                    total_signal += sig
+                    total_fallback_waste += fb_waste
+                dominant_tag = max(verdict_tags, key=verdict_tags.get) if verdict_tags else ""
+                avg_quality = round(
+                    sum(v[4] for v in feed_vlist) / len(feed_vlist), 2
+                ) if feed_vlist else 0.0
+                result["feed_verdict"] = {
+                    "dominant_tag": dominant_tag,
+                    "cycle_count": len(feed_vlist),
+                    "total_signal_strength": total_signal,
+                    "total_fallback_waste": total_fallback_waste,
+                    "avg_quality": avg_quality,
+                    "tag_distribution": verdict_tags,
+                }
+        except Exception:
+            result["feed_verdict"] = None
+
+        # ── Public branch verdict (aggregated across cycles) ───────────────
+        try:
+            pub_vlist: list[dict] = getattr(self, '_public_verdicts', []) or []
+            if pub_vlist:
+                waste_ratios = [v.get("waste_ratio", 0.0) for v in pub_vlist if "waste_ratio" in v]
+                value_ratios = [v.get("value_ratio", 0.0) for v in pub_vlist if "value_ratio" in v]
+                corroborations = [v.get("corroboration_vs_burn", 0.0) for v in pub_vlist if "corroboration_vs_burn" in v]
+                next_actions = [v.get("public_next_action", "") for v in pub_vlist if "public_next_action" in v]
+                dominant_action = max(set(next_actions), key=next_actions.count) if next_actions else ""
+                result["public_verdict"] = {
+                    "cycle_count": len(pub_vlist),
+                    "avg_waste_ratio": round(sum(waste_ratios) / len(waste_ratios), 3) if waste_ratios else 0.0,
+                    "avg_value_ratio": round(sum(value_ratios) / len(value_ratios), 3) if value_ratios else 0.0,
+                    "avg_corroboration_vs_burn": round(sum(corroborations) / len(corroborations), 3) if corroborations else 0.0,
+                    "dominant_next_action": dominant_action,
+                    "action_distribution": {a: next_actions.count(a) for a in set(next_actions)},
+                }
+        except Exception:
+            result["public_verdict"] = None
+
+        # ── Signal path + branch mix health ────────────────────────────────
+        try:
+            corr = result.get("correlation") or {}
+            sig_quality = corr.get("signal_quality", "weak")
+            cross_conf = corr.get("cross_source_confidence", 0.0)
+            camp_conf = corr.get("campaign_confidence", 0.0)
+            feed_f = self._result.accepted_findings or 0
+            pub_f = self._result.public_accepted_findings or 0
+            total_findings = feed_f + pub_f
+
+            # Dominant signal path
+            if sig_quality == "strong":
+                dominant_path = "corroborated" if cross_conf > 0.5 else "high_confidence"
+            elif sig_quality == "mixed":
+                dominant_path = "multi_source" if cross_conf > 0.3 else "degraded"
+            else:
+                dominant_path = "weak_noisy"
+
+            # Next pivot derived from correlation
+            top_pivots_count = corr.get("top_priority_pivots_count", 0)
+            next_pivot = "pivot_immediately" if (top_pivots_count > 0 and sig_quality != "weak") else "hold_pivoting"
+
+            # Corroboration score
+            corroboration_score = round(cross_conf * 0.6 + camp_conf * 0.4, 3)
+
+            # Branch mix health
+            if total_findings == 0:
+                branch_mix_health = "empty"
+            elif feed_f == 0 and pub_f == 0:
+                branch_mix_health = "empty"
+            elif feed_f == 0:
+                branch_mix_health = "public_only" if pub_f > 3 else "public_sparse"
+            elif pub_f == 0:
+                branch_mix_health = "feed_only" if feed_f > 3 else "feed_sparse"
+            else:
+                ratio = feed_f / pub_f
+                if ratio > 5:
+                    branch_mix_health = "feed_heavy"
+                elif ratio < 0.2:
+                    branch_mix_health = "public_heavy"
+                elif sig_quality == "strong":
+                    branch_mix_health = "healthy_balanced"
+                else:
+                    branch_mix_health = "balanced_low_yield"
+
+            result["signal_path"] = {
+                "dominant_signal_path": dominant_path,
+                "next_pivot_recommendation": next_pivot,
+                "corroboration_score": corroboration_score,
+                "branch_mix_health": branch_mix_health,
+                "is_noisy": sig_quality == "weak" and cross_conf < 0.2,
+                "is_corroborated": cross_conf > 0.4,
+                "campaign_signal": camp_conf > 0.3,
+            }
+        except Exception:
+            result["signal_path"] = None
 
         # ── Branch value comparison ────────────────────────────────────────
         try:
@@ -2162,7 +2304,6 @@ class SprintScheduler:
                 pub_pct = round(pub_f / total * 100, 1)
             else:
                 feed_pct = pub_pct = 0.0
-            # Sprint 8VN §B: Branch value verdict
             if pub_f > feed_f * 1.5:
                 branch_verdict = "public_dominant"
                 recommendation = "expand_public_branch"
@@ -2214,6 +2355,9 @@ class SprintScheduler:
         self._correlation_cache = None
         self._hypothesis_pack_cache = None
         self._branch_value_summary = None
+        # Sprint 8VN §C: Clear branch verdict accumulators
+        self._feed_verdicts.clear()
+        self._public_verdicts.clear()
 
 
 # ---------------------------------------------------------------------------

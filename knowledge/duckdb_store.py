@@ -2560,6 +2560,248 @@ class DuckDBShadowStore:
             return []
 
     # ------------------------------------------------------------------
+    # Sprint Delta Read Seams — output / delta truth (Sprint F150H)
+    # ------------------------------------------------------------------
+
+    def get_sprint_scorecard_trend(self, last_n: int = 6) -> list[dict]:
+        """
+        Sprint F150H: Convenience sync wrapper — returns last N scorecards
+        ordered by ts DESC. Covers ioc_density, semantic_novelty, accepted_findings,
+        findings_per_minute, and outlines_used. Fail-soft, bounded.
+
+        Use for: yield trend reporting, retrospektiva, sprint-to-sprint
+        quality comparison without ad-hoc SQL.
+        """
+        if not self._initialized or self._closed:
+            return []
+        try:
+            fut = self._executor.submit(self._sync_query_scorecard_trend, last_n)
+            return fut.result()
+        except Exception:
+            return []
+
+    def _sync_query_scorecard_trend(self, last_n: int) -> list[dict]:
+        """Sync — MUST be called on the worker thread."""
+        try:
+            conn = self._file_conn if self._db_path else self._persistent_conn
+            if conn is None:
+                return []
+            rows = conn.execute(
+                """
+                SELECT sprint_id, ts, findings_per_minute, ioc_density,
+                       semantic_novelty, outlines_used, accepted_findings, ioc_nodes
+                FROM sprint_scorecard
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                [last_n],
+            ).fetchall()
+            return [
+                {
+                    "sprint_id": r[0],
+                    "ts": r[1],
+                    "findings_per_minute": r[2] or 0.0,
+                    "ioc_density": r[3] or 0.0,
+                    "semantic_novelty": r[4] or 1.0,
+                    "outlines_used": bool(r[5]) if r[5] is not None else False,
+                    "accepted_findings": r[6] or 0,
+                    "ioc_nodes": r[7] or 0,
+                }
+                for r in rows
+            ]
+        except Exception:
+            return []
+
+    def get_sprint_delta_comparison(self, current_sprint_id: str, lookback: int = 4) -> dict:
+        """
+        Sprint F150H: Compare current sprint against the average of the last
+        `lookback` sprints. Returns a delta dict with absolute values of
+        current sprint and the delta vs the rolling mean of prior sprints.
+
+        Covers: new_findings, ioc_new_this_sprint, dedup_hits, findings_per_min,
+        uma_peak_gib, synthesis_confidence.
+
+        Use for: "how is this sprint tracking vs history" without ad-hoc SQL.
+        Fail-soft — returns empty/near-zero fields on any error.
+        """
+        if not self._initialized or self._closed:
+            return {}
+        try:
+            fut = self._executor.submit(
+                self._sync_query_delta_comparison, current_sprint_id, lookback
+            )
+            return fut.result()
+        except Exception:
+            return {}
+
+    def _sync_query_delta_comparison(
+        self, current_sprint_id: str, lookback: int
+    ) -> dict:
+        """Sync — MUST be called on the worker thread."""
+        try:
+            conn = self._file_conn if self._db_path else self._persistent_conn
+            if conn is None:
+                return {}
+
+            current_rows = conn.execute(
+                """
+                SELECT new_findings, ioc_new_this_sprint, dedup_hits,
+                       findings_per_min, uma_peak_gib, synthesis_confidence
+                FROM sprint_delta
+                WHERE sprint_id = ?
+                """,
+                [current_sprint_id],
+            ).fetchall()
+
+            if not current_rows:
+                return {}
+
+            prior_rows = conn.execute(
+                """
+                SELECT new_findings, ioc_new_this_sprint, dedup_hits,
+                       findings_per_min, uma_peak_gib, synthesis_confidence
+                FROM sprint_delta
+                WHERE sprint_id != ?
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                [current_sprint_id, lookback],
+            ).fetchall()
+
+            cur = current_rows[0]
+            fields = [
+                "new_findings", "ioc_new_this_sprint", "dedup_hits",
+                "findings_per_min", "uma_peak_gib", "synthesis_confidence",
+            ]
+            cur_vals = [cur[0] or 0, cur[1] or 0, cur[2] or 0,
+                        cur[3] or 0.0, cur[4] or 0.0, cur[5] or 0.0]
+
+            if prior_rows:
+                prior_avg = [0.0] * len(fields)
+                for pr in prior_rows:
+                    for i in range(len(fields)):
+                        v = pr[i] or (0 if i < 3 else 0.0)
+                        prior_avg[i] += v / len(prior_rows)
+                deltas = {
+                    f: round(cur_vals[i] - prior_avg[i], 4)
+                    for i, f in enumerate(fields)
+                }
+            else:
+                deltas = {f: 0.0 for f in fields}
+
+            return {
+                "sprint_id": current_sprint_id,
+                "current": {f: cur_vals[i] for i, f in enumerate(fields)},
+                "vs_prior_mean": deltas,
+            }
+        except Exception:
+            return {}
+
+    def get_source_mix_trend(self, days: int = 14) -> list[dict]:
+        """
+        Sprint F150H: Convenience sync wrapper — returns source_type distribution
+        broken down by sprint for the last `days`. Each row contains
+        source_type, sprint_id, total_findings, and hit_rate.
+
+        Use for: source mix reporting — is web growing vs feed vs document,
+        and is each source getting more productive over time.
+        """
+        if not self._initialized or self._closed:
+            return []
+        try:
+            fut = self._executor.submit(
+                self._sync_query_source_mix_trend,
+                _time.time() - days * 86400,
+            )
+            return fut.result()
+        except Exception:
+            return []
+
+    def _sync_query_source_mix_trend(self, since_ts: float) -> list[dict]:
+        """Sync — MUST be called on the worker thread."""
+        try:
+            conn = self._file_conn if self._db_path else self._persistent_conn
+            if conn is None:
+                return []
+            rows = conn.execute(
+                """
+                SELECT source_type, sprint_id,
+                       SUM(findings_count) as total_findings,
+                       AVG(hit_rate) as avg_hit_rate,
+                       SUM(ioc_count) as total_iocs
+                FROM source_hit_log
+                WHERE ts > ?
+                GROUP BY source_type, sprint_id
+                ORDER BY sprint_id DESC, total_findings DESC
+                """,
+                [since_ts],
+            ).fetchall()
+            return [
+                {
+                    "source_type": r[0],
+                    "sprint_id": r[1],
+                    "total_findings": r[2] or 0,
+                    "avg_hit_rate": r[3] or 0.0,
+                    "total_iocs": r[4] or 0,
+                }
+                for r in rows
+            ]
+        except Exception:
+            return []
+
+    def get_yield_trend(self, last_n: int = 8) -> list[dict]:
+        """
+        Sprint F150H: Derived yield metrics per sprint — new_findings / duration_s,
+        dedup_hits ratio (dedup_hits / new_findings), and ioc_rate
+        (ioc_new_this_sprint / new_findings). Returns last N sprints.
+
+        Use for: "are we getting better at extracting unique findings from sources"
+        — track yield improvement or degradation across sprints.
+        """
+        if not self._initialized or self._closed:
+            return []
+        try:
+            fut = self._executor.submit(self._sync_query_yield_trend, last_n)
+            return fut.result()
+        except Exception:
+            return []
+
+    def _sync_query_yield_trend(self, last_n: int) -> list[dict]:
+        """Sync — MUST be called on the worker thread."""
+        try:
+            conn = self._file_conn if self._db_path else self._persistent_conn
+            if conn is None:
+                return []
+            rows = conn.execute(
+                """
+                SELECT sprint_id, ts, new_findings, duration_s,
+                       dedup_hits, ioc_new_this_sprint
+                FROM sprint_delta
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                [last_n],
+            ).fetchall()
+            result = []
+            for r in rows:
+                new_findings = r[2] or 0
+                duration_s = r[3] or 0.0
+                dedup_hits = r[4] or 0
+                ioc_new = r[5] or 0
+                result.append({
+                    "sprint_id": r[0],
+                    "ts": r[1],
+                    "new_findings": new_findings,
+                    "duration_s": duration_s,
+                    "yield_per_min": round(new_findings / max(duration_s / 60, 0.001), 4),
+                    "dedup_ratio": round(dedup_hits / max(new_findings, 1), 4),
+                    "ioc_rate": round(ioc_new / max(new_findings, 1), 4),
+                })
+            return result
+        except Exception:
+            return []
+
+    # ------------------------------------------------------------------
     # Public Activation API — WAL-first async wrappers (Sprint 8B)
     # ------------------------------------------------------------------
 

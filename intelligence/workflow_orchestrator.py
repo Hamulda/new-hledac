@@ -1039,6 +1039,12 @@ class CorrelationResult:
     top_priority_pivots: List[Dict[str, Any]] = field(default_factory=list)  # bounded action shortlist
     campaign_confidence: float = 0.0           # 0.0-1.0: campaign cluster confidence
 
+    # --- SECOND-ORDER: OPERATOR ACTIONABLE SHORTLIST (sprint delta) ---
+    what_matters_first: str = ""                # single primary action/takeaway for operator
+    operator_shortlist: List[Dict[str, Any]] = field(default_factory=list)  # max 3 bounded prioritised items
+    confidence_note: str = ""                  # human-readable confidence explanation
+    signal_quality: str = "weak"               # "strong" | "mixed" | "weak" — scheduler filter
+
 
 def correlate_findings(
     findings: List[Dict[str, Any]],
@@ -1202,6 +1208,16 @@ def correlate_findings(
         len(high_risk_branch), anomaly_count, repeated_domains
     )
 
+    # --- Second-order condensation (compute before return to avoid shadowing) ---
+    _cross_src_conf = _calc_cross_source_confidence(
+        normalized, theme_source_overlap, campaign_hints
+    )
+    _corr_iocs = _get_corroborated_iocs(normalized, repeated_iocs)
+    _top_pivots = _get_top_priority_pivots(
+        normalized, dominant_cluster, high_risk_branch, repeated_domains
+    )
+    _camp_conf = _calc_campaign_confidence(campaign_hints, theme_source_overlap)
+
     return CorrelationResult(
         themes=themes,
         risk_score=risk_score,
@@ -1221,14 +1237,15 @@ def correlate_findings(
         coupling_pairs=coupling_pairs,
         so_what=so_what,
         # Second-order condensation
-        cross_source_confidence=_calc_cross_source_confidence(
-            normalized, theme_source_overlap, campaign_hints
-        ),
-        corroborated_iocs=_get_corroborated_iocs(normalized, repeated_iocs),
-        top_priority_pivots=_get_top_priority_pivots(
-            normalized, dominant_cluster, high_risk_branch, repeated_domains
-        ),
-        campaign_confidence=_calc_campaign_confidence(campaign_hints, theme_source_overlap),
+        cross_source_confidence=_cross_src_conf,
+        corroborated_iocs=_corr_iocs,
+        top_priority_pivots=_top_pivots,
+        campaign_confidence=_camp_conf,
+        # Operator actionable shortlist
+        what_matters_first=_get_what_matters_first(verdict, dominant_cluster, high_risk_branch, _corr_iocs),
+        operator_shortlist=_build_operator_shortlist(dominant_cluster, high_risk_branch, _corr_iocs, risk_score),
+        confidence_note=_build_confidence_note(risk_score, _cross_src_conf, _camp_conf),
+        signal_quality=_classify_signal_quality(risk_score, _cross_src_conf, _camp_conf, _corr_iocs),
     )
 
 
@@ -1667,6 +1684,135 @@ def _extract_primary_entity(finding: Dict[str, Any]) -> str:
         return hash_match.group(0)[:32]
 
     return ""
+
+
+# =============================================================================
+# OPERATOR SHORTLIST — SECOND-ORDER CONDENSATION HELPERS
+# Bounded, fail-soft, pure functions
+# =============================================================================
+
+def _get_what_matters_first(
+    verdict: str,
+    dominant_cluster: Optional[str],
+    high_risk_branch: List[Dict[str, Any]],
+    corroborated_iocs: List[Dict[str, Any]],
+) -> str:
+    """Return single primary action/takeaway for operator."""
+    if verdict == "HIGH_RISK":
+        if dominant_cluster:
+            return f"Investigate cluster '{dominant_cluster}' — highest-risk theme"
+        if high_risk_branch:
+            return f"Pivot on {len(high_risk_branch)} critical/high findings with infra signals"
+        if corroborated_iocs:
+            top = corroborated_iocs[0]
+            return f"Corroborated IOC: {top.get('type','ioc')}={top.get('value','?')} (sources={top.get('source_count',1)})"
+        return "HIGH_RISK verdict — review all high-severity findings"
+    elif verdict == "SUSPICIOUS":
+        if dominant_cluster:
+            return f"Monitor cluster '{dominant_cluster}' for escalation"
+        return "Anomalies detected — verify with additional sources"
+    return "No immediate action required"
+
+
+def _build_operator_shortlist(
+    dominant_cluster: Optional[str],
+    high_risk_branch: List[Dict[str, Any]],
+    corroborated_iocs: List[Dict[str, Any]],
+    risk_score: float,
+) -> List[Dict[str, Any]]:
+    """Build max-3 bounded prioritised shortlist for scheduler/export.
+
+    Returns items with: pivot_type, value, reason, priority
+    """
+    shortlist: List[Dict[str, Any]] = []
+
+    # 1. Dominant cluster (always first if present)
+    if dominant_cluster:
+        shortlist.append({
+            "pivot_type": "dominant_cluster",
+            "value": dominant_cluster,
+            "reason": "highest-risk theme with most critical findings",
+            "priority": 1,
+        })
+
+    # 2. Top corroborated IOC (infra signal with multi-source evidence)
+    for ioc in corroborated_iocs[:2]:
+        if len(shortlist) >= 3:
+            break
+        shortlist.append({
+            "pivot_type": "corroborated_ioc",
+            "value": ioc.get("value", ""),
+            "reason": f"{ioc.get('type')} seen across {ioc.get('source_count',1)} sources (conf={ioc.get('confidence',0):.2f})",
+            "priority": 2,
+        })
+
+    # 3. High-risk with infra
+    for f in high_risk_branch[:2]:
+        if len(shortlist) >= 3:
+            break
+        shortlist.append({
+            "pivot_type": "high_risk_infra",
+            "value": _extract_primary_entity(f),
+            "reason": f["severity"].upper() + " + infra hint",
+            "priority": 3,
+        })
+
+    return shortlist[:3]
+
+
+def _build_confidence_note(
+    risk_score: float,
+    cross_source_confidence: float,
+    campaign_confidence: float,
+) -> str:
+    """Human-readable confidence explanation."""
+    if risk_score >= 0.7:
+        base = "HIGH RISK verdict"
+    elif risk_score >= 0.3:
+        base = "SUSPICIOUS verdict"
+    else:
+        base = "CLEAN verdict"
+
+    if cross_source_confidence >= 0.6:
+        corroboration = "strong multi-source corroboration"
+    elif cross_source_confidence >= 0.3:
+        corroboration = "moderate cross-source agreement"
+    else:
+        corroboration = "limited source corroboration"
+
+    if campaign_confidence >= 0.5:
+        campaign = "campaign cluster likely"
+    elif campaign_confidence >= 0.2:
+        campaign = "possible campaign cluster"
+    else:
+        campaign = "no campaign signals"
+
+    return f"{base} | {corroboration} | {campaign}"
+
+
+def _classify_signal_quality(
+    risk_score: float,
+    cross_source_confidence: float,
+    campaign_confidence: float,
+    corroborated_iocs: List[Dict[str, Any]],
+) -> str:
+    """Classify signal as strong/mixed/weak for scheduler filtering."""
+    strong_indicators = (
+        risk_score >= 0.6 and
+        cross_source_confidence >= 0.5 and
+        len(corroborated_iocs) >= 2
+    )
+    weak_indicators = (
+        risk_score < 0.3 and
+        cross_source_confidence < 0.2 and
+        not corroborated_iocs
+    )
+
+    if strong_indicators:
+        return "strong"
+    elif weak_indicators:
+        return "weak"
+    return "mixed"
 
 
 def create_workflow_orchestrator(

@@ -1723,6 +1723,45 @@ class EvidenceLog:
             "recent_high_conf_decisions": recent_high_conf_decisions,
         }
 
+    @staticmethod
+    def _derive_continue_reason(
+        continue_or_pivot: str,
+        health_status: str,
+        decision_count: int,
+        biggest_weakness: str,
+    ) -> str:
+        """Derive one-line continue reason from health signals."""
+        if continue_or_pivot == "pivot":
+            return "pivot: errors/errors dominate — cannot trust signal"
+        if continue_or_pivot == "inspect":
+            if biggest_weakness:
+                return f"inspect: {biggest_weakness[:70]}"
+            return f"inspect: health={health_status}, check signals"
+        # continue
+        if decision_count == 0:
+            return "continue: no decisions made yet — gather more signal"
+        return f"continue: healthy sprint with {decision_count} decisions"
+
+    @staticmethod
+    def _derive_trust_level(
+        total: int,
+        health_status: str,
+        low_conf_pressure: str,
+        error_rate: float,
+    ) -> str:
+        """Derive trust level enum from health signals."""
+        if total < 10:
+            return "low"
+        if health_status == "noisy":
+            return "low"
+        if low_conf_pressure == "high":
+            return "moderate"
+        if health_status == "degraded" or error_rate > 10:
+            return "moderate"
+        if health_status == "warning" or error_rate > 5:
+            return "moderate"
+        return "high"
+
     def get_retrospective_bundle(self) -> Dict[str, Any]:
         """
         Single-call retrospective seam for private sprint retro.
@@ -1892,6 +1931,12 @@ class EvidenceLog:
             "operator_takeaway": operator_takeaway,
             "top_retro_actions": top_retro_actions,
             "health_confidence_note": health_confidence_note,
+            # Compact operator retrospective delta (Sprint F150H)
+            "operator_retro_brief": operator_takeaway,  # canonical one-liner
+            "continue_reason": self._derive_continue_reason(continue_or_pivot, health_status, decision_count, biggest_weakness),
+            "trust_level": self._derive_trust_level(total, health_status, health.get("low_conf_pressure", "none"), error_rate),
+            "biggest_win": what_worked[0] if what_worked else "",
+            "retro_priority": top_retro_actions[0] if top_retro_actions else "",
             # Underlying signals (for deep dive)
             "_health": health,
         }

@@ -34,6 +34,101 @@ from hledac.universal.runtime.sprint_lifecycle import SprintLifecycleManager
 
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# Smoke vs meaningful runtime guard
+# =============================================================================
+
+
+def _is_meaningful_run(
+    actual_duration_s: float,
+    cycles_completed: int,
+    cycles_started: int,
+    accepted_findings: int,
+    total_pattern_hits: int,
+) -> tuple[bool, str]:
+    """
+    Distinguish smoke from meaningful active evidence.
+
+    Returns (is_meaningful, evidence_note).
+    Smoke: too short, too few cycles, no signal whatsoever.
+    Meaningful: enough runtime or evidence of real work.
+    """
+    # Hard smoke: no cycles ran at all
+    if cycles_started == 0:
+        return False, "zero cycles started — entry only, no active work"
+
+    # Short but found something: counts as minimal meaningful
+    if accepted_findings > 0:
+        return True, f"found {accepted_findings} findings despite short runtime"
+
+    # Short but pattern activity: minimal signal
+    if total_pattern_hits > 0 and actual_duration_s >= 15:
+        return True, f"pattern activity ({total_pattern_hits} hits) despite short run"
+
+    # Hard smoke thresholds
+    if actual_duration_s < 30 and cycles_completed < 3:
+        return False, f"runtime {actual_duration_s:.0f}s and {cycles_completed} cycles below minimum"
+
+    if actual_duration_s < 10:
+        return False, f"runtime {actual_duration_s:.1f}s — entry/import only"
+
+    # Normal meaningful run
+    return True, (
+        f"{actual_duration_s:.0f}s runtime, "
+        f"{cycles_completed}/{cycles_started} cycles completed, "
+        f"no findings but within normal parameters"
+    )
+
+
+def _runtime_truth(
+    actual_duration_s: float,
+    query: str,
+    duration_s: float,
+    cycles_completed: int,
+    cycles_started: int,
+    accepted_findings: int,
+    total_pattern_hits: int,
+    public_accepted_findings: int,
+    feed_findings: int,
+) -> dict:
+    """Build canonical runtime-truth record from scheduler result data."""
+    is_meaningful, evidence_note = _is_meaningful_run(
+        actual_duration_s, cycles_completed, cycles_started,
+        accepted_findings, total_pattern_hits
+    )
+
+    # Branch mix — dominant signal source
+    branch_mix = {
+        "feed_findings": feed_findings,
+        "public_findings": public_accepted_findings,
+    }
+
+    # Primary signal source label
+    if feed_findings > 0 and public_accepted_findings == 0:
+        primary = "feed"
+    elif public_accepted_findings > 0 and feed_findings == 0:
+        primary = "public"
+    elif feed_findings > 0 and public_accepted_findings > 0:
+        primary = "mixed"
+    else:
+        primary = "none"
+
+    return {
+        "is_meaningful": is_meaningful,
+        "evidence_note": evidence_note,
+        "command_params": {
+            "query": query,
+            "requested_duration_s": duration_s,
+        },
+        "actual_duration_s": round(actual_duration_s, 2),
+        "cycles_completed": cycles_completed,
+        "cycles_started": cycles_started,
+        "branch_mix": branch_mix,
+        "primary_signal_source": primary,
+        "total_pattern_hits": total_pattern_hits,
+        "accepted_findings": accepted_findings,
+    }
+
 # Sprint 8RA: Hardcoded feed sources for live sprint
 _SPRINT_FEED_SOURCES = [
     "cisa_kev",
@@ -283,6 +378,36 @@ async def run_sprint(
         else:
             next_hint = "current query and source mix working — continue as-is"
 
+        # --- Runtime truth (smoke vs meaningful) ---------------------------------
+        runtime_truth = _runtime_truth(
+            actual_duration_s=actual_duration,
+            query=query,
+            duration_s=duration_s,
+            cycles_completed=result.cycles_completed,
+            cycles_started=result.cycles_started,
+            accepted_findings=result.accepted_findings,
+            total_pattern_hits=result.total_pattern_hits,
+            public_accepted_findings=result.public_accepted_findings,
+            feed_findings=feed_fnd,
+        )
+        is_meaningful = runtime_truth["is_meaningful"]
+        evidence_note = runtime_truth["evidence_note"]
+
+        # Clear separation: [SMOKE] vs [ACTIVE]
+        if is_meaningful:
+            logger.info(
+                f"[RUNTIME TRUTH] ✅ MEANINGFUL ACTIVE RUN | {evidence_note} | "
+                f"primary: {runtime_truth['primary_signal_source']} | "
+                f"cycles: {result.cycles_completed}/{result.cycles_started} | "
+                f"actual: {actual_duration:.0f}s"
+            )
+        else:
+            logger.warning(
+                f"[RUNTIME TRUTH] 🚨 SMOKE ONLY | {evidence_note} | "
+                f"cycles: {result.cycles_completed}/{result.cycles_started} | "
+                f"actual: {actual_duration:.0f}s"
+            )
+
         logger.info(
             f"[SPRINT DONE] {sprint_id} | "
             f"findings: {result.accepted_findings} | "
@@ -338,6 +463,7 @@ async def run_sprint(
                 ph: round(_phase_times.get(ph, 0) - _phase_times.get("BOOT", 0), 2)
                 for ph in phases if ph in _phase_times
             },
+            "runtime_truth": runtime_truth,
         }
         report_path.write_bytes(orjson.dumps(report_dict, option=orjson.OPT_INDENT_2))
         logger.info(f"[REPORT] {report_path}")

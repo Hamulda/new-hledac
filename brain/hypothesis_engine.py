@@ -1463,23 +1463,37 @@ class HypothesisPack:
         Each action has: action_type, query, rationale, priority, pivot_type.
         """
         actions: List[Dict[str, Any]] = []
+        seen_queries: Set[str] = set()
+
+        # Pre-populate dedup set from all sources (IOC + queries + source hints)
+        # so source_hints never collide with existing queries
+        for pivot in self.ioc_follow_ups:
+            q = pivot.get("query", "")
+            if q:
+                seen_queries.add(q)
+        for q in self.suggested_queries:
+            q_str = q.get("query", "")
+            if q_str:
+                seen_queries.add(q_str)
 
         # 1. IOC pivots (highest priority - actionable domain-specific paths)
         for pivot in sorted(self.ioc_follow_ups, key=lambda x: x.get("priority", 0.5), reverse=True)[:2]:
-            actions.append({
-                "action_type": "ioc_pivot",
-                "query": pivot.get("query", ""),
-                "from_ioc": pivot.get("from", ""),
-                "to_field": pivot.get("to", ""),
-                "rationale": pivot.get("rationale", ""),
-                "priority": pivot.get("priority", 0.8),
-                "pivot_type": "ioc",
-            })
+            q = pivot.get("query", "")
+            if q and q not in seen_queries:
+                actions.append({
+                    "action_type": "ioc_pivot",
+                    "query": q,
+                    "from_ioc": pivot.get("from", ""),
+                    "to_field": pivot.get("to", ""),
+                    "rationale": pivot.get("rationale", ""),
+                    "priority": pivot.get("priority", 0.8),
+                    "pivot_type": "ioc",
+                })
+                seen_queries.add(q)
 
-        # 2. Top ranked queries (high priority, not already covered by IOC)
-        covered_queries = {a["query"] for a in actions}
+        # 2. Top ranked queries (high priority, not already covered)
         for q in sorted(self.suggested_queries, key=lambda x: x.get("priority", 0.5), reverse=True):
-            if q["query"] not in covered_queries and len(actions) < max_actions:
+            if q["query"] not in seen_queries and len(actions) < max_actions:
                 actions.append({
                     "action_type": "query",
                     "query": q.get("query", ""),
@@ -1487,7 +1501,7 @@ class HypothesisPack:
                     "priority": q.get("priority", 0.5),
                     "pivot_type": q.get("pivot_type", "general"),
                 })
-                covered_queries.add(q["query"])
+                seen_queries.add(q["query"])
 
         # 3. Source hints (only if we still have room)
         for hint in self.source_hints[:2]:
@@ -1502,6 +1516,278 @@ class HypothesisPack:
             })
 
         return actions[:max_actions]
+
+    # -------------------------------------------------------------------------
+    # Sprint F150H.2: why_best_first - explain the best_first_path choice
+    # -------------------------------------------------------------------------
+
+    def why_best_first(self) -> Optional[Dict[str, Any]]:
+        """
+        Explain why best_first_path chose its action.
+
+        Returns a dict with:
+        - chosen_action: the best_first_path result
+        - reason: human-readable explanation of priority ordering
+        - alternatives: what else was available and why it ranked lower
+        - pivot_type_rank: where this pivot_type sits in the priority order
+
+        Returns None if pack is empty.
+        """
+        if self.is_empty():
+            return None
+
+        pivot_type_rank = {
+            "ioc": 0,
+            "ioc_lookup": 0,
+            "entity_pair": 1,
+            "relationship": 2,
+            "ioc_entity": 3,
+            "entity": 4,
+            "entity_expansion": 5,
+            "source": 6,
+            "organization": 7,
+            "temporal": 8,
+            "general": 9,
+        }
+
+        chosen = self.best_first_path()
+        if not chosen:
+            return None
+
+        pt = chosen.get("pivot_type", "general")
+        rank = pivot_type_rank.get(pt, 9)
+        alternatives: List[Dict[str, Any]] = []
+
+        # Collect what ranked lower
+        for pivot in self.ioc_follow_ups:
+            if pivot.get("query") != chosen.get("query"):
+                alternatives.append({
+                    "action_type": "ioc_pivot",
+                    "query": pivot.get("query", ""),
+                    "pivot_type": "ioc",
+                    "priority": pivot.get("priority", 0.5),
+                    "rank": 0,
+                })
+
+        for q in self.suggested_queries:
+            if q.get("query") != chosen.get("query"):
+                q_pt = q.get("pivot_type", "general")
+                alternatives.append({
+                    "action_type": "query",
+                    "query": q.get("query", ""),
+                    "pivot_type": q_pt,
+                    "priority": q.get("priority", 0.5),
+                    "rank": pivot_type_rank.get(q_pt, 9),
+                })
+
+        # Sort alternatives by priority desc, then rank asc
+        alternatives.sort(key=lambda x: (-x.get("priority", 0.5), x.get("rank", 9)))
+        alternatives = alternatives[:3]
+
+        if pt == "ioc":
+            reason = "IOC pivot selected as highest-priority actionable domain path"
+        elif pt == "entity_pair":
+            reason = "Entity-pair query selected as most specific relationship probe"
+        elif pt == "relationship":
+            reason = "Relationship query selected for direct connection verification"
+        elif pt == "source":
+            reason = "Source check selected as lowest-risk verification path"
+        else:
+            reason = f"{pt} query selected by priority {chosen.get('priority', 0.5):.2f}"
+
+        return {
+            "chosen_action": chosen,
+            "reason": reason,
+            "pivot_type": pt,
+            "pivot_type_rank": rank,
+            "alternatives": alternatives,
+            "total_ioc_pivots": len(self.ioc_follow_ups),
+            "total_queries": len(self.suggested_queries),
+            "total_sources": len(self.source_hints),
+        }
+
+    # -------------------------------------------------------------------------
+    # Sprint F150H.2: discarded_as_redundant - what was dropped and why
+    # -------------------------------------------------------------------------
+
+    def discarded_as_redundant(self, max_items: int = 5) -> List[Dict[str, Any]]:
+        """
+        Return items from the pack that were dropped by actionable_shortlist dedup.
+
+        Useful for understanding what was intentionally left out.
+        Each item has: action_type, query, reason_discarded, pivot_type, priority.
+
+        Reason codes:
+        - 'query_deduped': same query string already in shortlist
+        - 'below_priority_threshold': priority below 0.5 and shortlist already full
+        - 'low_pivot_type_priority': general/organization pivot types deprioritized
+        """
+        shortlist_queries: Set[str] = set(
+            a.get("query", "") for a in self.actionable_shortlist(max_items=999)
+        )
+        discarded: List[Dict[str, Any]] = []
+
+        # Check IOC follow-ups
+        for pivot in self.ioc_follow_ups:
+            q = pivot.get("query", "")
+            if q in shortlist_queries:
+                discarded.append({
+                    "action_type": "ioc_pivot",
+                    "query": q,
+                    "reason_discarded": "query_deduped",
+                    "pivot_type": "ioc",
+                    "priority": pivot.get("priority", 0.5),
+                    "from_ioc": pivot.get("from", ""),
+                })
+            elif pivot.get("priority", 0.5) < 0.5:
+                discarded.append({
+                    "action_type": "ioc_pivot",
+                    "query": q,
+                    "reason_discarded": "below_priority_threshold",
+                    "pivot_type": "ioc",
+                    "priority": pivot.get("priority", 0.5),
+                    "from_ioc": pivot.get("from", ""),
+                })
+
+        # Check suggested queries
+        for q in self.suggested_queries:
+            q_str = q.get("query", "")
+            pt = q.get("pivot_type", "general")
+            if q_str in shortlist_queries:
+                discarded.append({
+                    "action_type": "query",
+                    "query": q_str,
+                    "reason_discarded": "query_deduped",
+                    "pivot_type": pt,
+                    "priority": q.get("priority", 0.5),
+                })
+            elif pt in ("general", "organization") and q.get("priority", 0.5) < 0.6:
+                discarded.append({
+                    "action_type": "query",
+                    "query": q_str,
+                    "reason_discarded": "low_pivot_type_priority",
+                    "pivot_type": pt,
+                    "priority": q.get("priority", 0.5),
+                })
+
+        # Sort by priority desc
+        discarded.sort(key=lambda x: -x.get("priority", 0.5))
+        return discarded[:max_items]
+
+    # -------------------------------------------------------------------------
+    # Sprint F150H.2: action_confidence - confidence score for an action
+    # -------------------------------------------------------------------------
+
+    def action_confidence(self, action: Dict[str, Any]) -> float:
+        """
+        Score an action's confidence (0-1) based on pack context.
+
+        Factors:
+        - Base priority from the action itself (40%)
+        - Whether it's an IOC pivot (bonus +0.15)
+        - Source quality if source hint (from source_hints quality field)
+        - Provenance: heuristic vs model-assisted (10% boost for model-assisted)
+
+        Fail-soft: returns 0.5 for malformed actions.
+        """
+        if not action or not isinstance(action, dict):
+            return 0.5
+
+        base_priority = action.get("priority", 0.5)
+        pivot_type = action.get("pivot_type", "general")
+
+        # Pivot type bonus
+        pt_bonus = 0.0
+        if pivot_type in ("ioc", "ioc_lookup"):
+            pt_bonus = 0.15
+        elif pivot_type in ("entity_pair", "relationship"):
+            pt_bonus = 0.10
+        elif pivot_type == "source":
+            # Source hints already encode quality in priority
+            pt_bonus = 0.0
+
+        # Source quality lookup (for source_check actions)
+        source_bonus = 0.0
+        if action.get("action_type") == "source_check":
+            source_name = action.get("query", "").strip('"')
+            for hint in self.source_hints:
+                if hasattr(hint, "source") and hint.source == source_name:
+                    source_bonus = (hint.quality - 0.5) * 0.2
+                    break
+
+        # Provenance bonus
+        provenance_bonus = 0.10 if self.provenance == "model-assisted" else 0.0
+
+        confidence = base_priority * 0.4 + min(base_priority + pt_bonus, 1.0) * 0.4 + source_bonus + provenance_bonus
+        return max(0.0, min(1.0, confidence))
+
+    # -------------------------------------------------------------------------
+    # Sprint F150H.2: track_recommendation + best_track - track-level guidance
+    # -------------------------------------------------------------------------
+
+    def track_recommendation(self) -> Dict[str, Any]:
+        """
+        Recommend which investigation track to pursue next.
+
+        Returns dict with:
+        - recommended_track: name of the highest-value track
+        - track_scores: dict of track -> score (0-1)
+        - reasoning: why this track was recommended
+        - next_action: first action from that track's shortlist
+        """
+        tracks = self.investigation_tracks()
+        if not tracks:
+            return {"recommended_track": None, "track_scores": {}, "reasoning": "empty pack", "next_action": None}
+
+        # Score each track
+        track_scores: Dict[str, float] = {}
+        for track_name, items in tracks.items():
+            if not items:
+                track_scores[track_name] = 0.0
+                continue
+
+            # Score based on: item count, avg priority, IOC presence
+            avg_priority = sum(i.get("priority", 0.5) for i in items) / len(items)
+            ioc_count = sum(1 for i in items if i.get("action_type") == "ioc_pivot")
+            high_conf_count = sum(1 for i in items if i.get("priority", 0.5) >= 0.7)
+
+            # Weighted score
+            score = (avg_priority * 0.4) + (min(ioc_count / 3, 1.0) * 0.3) + (high_conf_count / len(items) * 0.3)
+            track_scores[track_name] = max(0.0, min(1.0, score))
+
+        recommended = max(track_scores, key=lambda k: track_scores.get(k, 0.0))
+        reasoning_map = {
+            "ioc_pivots": "IOC pivot track has highest actionable domain value",
+            "entity_tracking": "Entity tracking track has strong specific targets",
+            "relationship_verification": "Relationship verification has direct connection probes",
+            "source_investigation": "Source investigation is lowest-risk verification path",
+            "cluster_analysis": "Cluster analysis offers broad correlation overview",
+        }
+
+        # Get next action from recommended track
+        next_action = None
+        if recommended in tracks and tracks[recommended]:
+            first_item = tracks[recommended][0]
+            next_action = {
+                "action_type": first_item.get("action_type", "query"),
+                "query": first_item.get("query", ""),
+                "rationale": f"Track: {recommended}",
+                "priority": first_item.get("priority", 0.5),
+            }
+
+        return {
+            "recommended_track": recommended,
+            "track_scores": track_scores,
+            "reasoning": reasoning_map.get(recommended, f"{recommended} selected by score"),
+            "next_action": next_action,
+        }
+
+    def best_track(self) -> Optional[str]:
+        """Return the name of the highest-scoring track. Shortcut for track_recommendation."""
+        tracks = self.investigation_tracks()
+        if not tracks:
+            return None
+        return max(tracks, key=lambda t: sum(i.get("priority", 0.5) for i in tracks[t]) / max(1, len(tracks[t])))
 
     # -------------------------------------------------------------------------
     # Sprint F150H.1: investigation_tracks - multi-pronged paths

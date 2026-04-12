@@ -102,6 +102,12 @@ class PipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     # Sprint F150J: derived value counters
     discovery_strong_content_weak: int = 0  # discovery signal but zero pattern yield
     discovery_and_content_strong: int = 0  # both discovery signal and pattern yield
+    # Sprint F150K: additional derived economics signals (additive)
+    discovery_squandered: int = 0  # strong discovery hit but page quality weak
+    noise_fetch_ratio: float = 0.0  # ratio of fetched pages that yielded zero patterns
+    corroboration_vs_burn: float = 0.0  # corroboration signal vs pure budget burn
+    public_next_action: str = ""  # operator-facing one-liner next action hint
+    public_confidence_note: str = ""  # operator-facing confidence note
     # Sprint F150J: condensed public-branch verdict (additive dict)
     public_branch_verdict: dict = {}
 
@@ -908,19 +914,25 @@ async def async_run_live_public_pipeline(
         1 for p in all_page_results
         if p.discovery_signal and p.matched_patterns > 0
     )
-
-    run_error: str | None = None
-    if discovery_error:
-        run_error = discovery_error
-    elif error_results:
-        # Surface first error
-        err = error_results[0]
-        run_error = f"batch_error:{type(err).__name__}:{err}"
-
-    # Sprint F150J: build condensed public-branch verdict
-    # waste_ratio = pages that consumed budget but yielded nothing
+    # Sprint F150K: discovery_squandered — strong discovery score but page quality weak
+    # (promarněný strong discovery hit = high score but got SKIP_WEAK or weak_low_signal)
+    discovery_squandered = sum(
+        1 for p in all_page_results
+        if p.discovery_score is not None
+        and p.discovery_score >= 0.7
+        and p.quality_reason in ("weak_low_signal", "SKIP_WEAK:weak_discovery", "SKIP_WEAK:very_low_text")
+    )
+    # Sprint F150K: build derived value metrics
     fetched_pages = [p for p in all_page_results if p.fetched]
     fetched_count = len(fetched_pages)
+
+    # noise_fetch_ratio: what fraction of fetched pages yielded zero patterns
+    noise_fetch_ratio = (
+        round(low_value_fetches / fetched_count, 3)
+        if fetched_count > 0
+        else 0.0
+    )
+    # waste_ratio = pages that consumed budget but yielded nothing
     waste_ratio = (
         round(low_value_fetches / fetched_count, 3)
         if fetched_count > 0
@@ -944,6 +956,40 @@ async def async_run_live_public_pipeline(
     else:
         public_branch_hint = "low_value"
 
+    # corroboration_vs_burn: strong signal corroboration vs pure budget drain
+    # = (discovery_and_content_strong + strong_pages) / max(total_discovered, 1)
+    corroboration_vs_burn = (
+        round((discovery_and_content_strong + strong_pages) / max(total_discovered, 1), 3)
+    )
+
+    run_error: str | None = None
+    if discovery_error:
+        run_error = discovery_error
+    elif error_results:
+        # Surface first error
+        err = error_results[0]
+        run_error = f"batch_error:{type(err).__name__}:{err}"
+
+    # Sprint F150K: operator-facing hints
+    if strong_pages >= 2 and discovery_and_content_strong >= 2:
+        public_next_action = "expand_public_branch"
+        public_confidence_note = "high_yield_run"
+    elif discovery_and_content_strong >= 1 and discovery_squandered == 0:
+        public_next_action = "continue_public_branch"
+        public_confidence_note = "positive_signal"
+    elif discovery_squandered >= 1 and discovery_strong_content_weak >= 1:
+        public_next_action = "review_discovery_quality"
+        public_confidence_note = "squandered_hits_detected"
+    elif noise_fetch_ratio >= 0.5:
+        public_next_action = "drain_public_branch"
+        public_confidence_note = "high_noise_ratio"
+    elif weak_pages_skipped >= total_discovered * 0.5:
+        public_next_action = "throttle_public_branch"
+        public_confidence_note = "low_quality_majority"
+    else:
+        public_next_action = "hold_public_branch"
+        public_confidence_note = "marginal_signal"
+
     public_branch_verdict = {
         "waste_ratio": waste_ratio,
         "value_ratio": value_ratio,
@@ -953,6 +999,11 @@ async def async_run_live_public_pipeline(
         "discovery_strong_content_weak": discovery_strong_content_weak,
         "discovery_and_content_strong": discovery_and_content_strong,
         "low_value_fetches": low_value_fetches,
+        "discovery_squandered": discovery_squandered,
+        "noise_fetch_ratio": noise_fetch_ratio,
+        "corroboration_vs_burn": corroboration_vs_burn,
+        "public_next_action": public_next_action,
+        "public_confidence_note": public_confidence_note,
     }
 
     return PipelineRunResult(
@@ -970,6 +1021,11 @@ async def async_run_live_public_pipeline(
         low_value_fetches=low_value_fetches,
         discovery_strong_content_weak=discovery_strong_content_weak,
         discovery_and_content_strong=discovery_and_content_strong,
+        discovery_squandered=discovery_squandered,
+        noise_fetch_ratio=noise_fetch_ratio,
+        corroboration_vs_burn=corroboration_vs_burn,
+        public_next_action=public_next_action,
+        public_confidence_note=public_confidence_note,
         public_branch_verdict=public_branch_verdict,
     )
 

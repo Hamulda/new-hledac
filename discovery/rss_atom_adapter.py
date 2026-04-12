@@ -91,6 +91,10 @@ class FeedEntryHit(msgspec.Struct, frozen=True, gc=False):
     freshness_tier: str = ""
     # F150J: human-readable reason for selection/rank
     selection_reason: str = ""
+    # F150K: source-side credibility signal — derived from curated seed priority
+    source_priority_bias: float = 0.0
+    # F150K: lightweight timestamp quality label
+    time_signal_reason: str = ""
 
 
 class FeedBatchResult(msgspec.Struct, frozen=True, gc=False):
@@ -980,7 +984,7 @@ async def async_fetch_feed_entries(
         deduped.append(entry)
 
     # ---- F150J: Score + pre-filter + deterministic rerank ----
-    scored: list[tuple[FeedEntryHit, float, float, str, str, float, float, str, str]] = []
+    scored: list[tuple[FeedEntryHit, float, float, str, str, float, float, str, str, float, str]] = []
 
     for entry in deduped:
         # Light pre-filter: skip obvious noise
@@ -1042,19 +1046,52 @@ async def async_fetch_feed_entries(
                   else ("low" if combined >= 0.3 else "noise"))
         )
 
+        # F150K: source_priority_bias — credibility lift from curated seed domain hints.
+        # Fail-soft: 0.0 when no signal. Range [0.0, 0.15].
+        # High-priority OSINT domains (CISA, NVD, Krebs, SANS ISC) get small positive bias.
+        # This is additive with combined so recent+high+trustworthy rises above stale+high.
+        spb = 0.0
+        feed_url_lower = entry.feed_url.lower()
+        if "cisa.gov" in feed_url_lower or "nvd.nist.gov" in feed_url_lower:
+            spb = 0.15
+        elif "krebs" in feed_url_lower or "sans.edu" in feed_url_lower:
+            spb = 0.12
+        elif "abuse.ch" in feed_url_lower or "urlhaus" in feed_url_lower:
+            spb = 0.10
+        elif "welivesecurity" in feed_url_lower:
+            spb = 0.08
+        elif "bleepingcomputer" in feed_url_lower or "thehackersnews" in feed_url_lower:
+            spb = 0.06
+
+        # F150K: time_signal_reason — lightweight timestamp quality label
+        if entry.published_ts is None:
+            time_signal = "no_timestamp"
+        elif freshness_tier == "future":
+            time_signal = "future_ts_penalized"
+        elif freshness_tier == "unknown":
+            time_signal = "unparseable_ts"
+        elif ts_rel >= 1.0:
+            time_signal = "ts_recent_high_conf"
+        elif ts_rel >= 0.9:
+            time_signal = "ts_fresh_high_conf"
+        else:
+            time_signal = "ts_aged_low_conf"
+
         scored.append((
             entry, freshness_score, quality_score, freshness_tier, "", combined,
-            ts_rel, richness_band, usefulness_band,
+            ts_rel, richness_band, usefulness_band, spb, time_signal,
         ))
 
     # Sort: highest combined score desc; preserve-first tie-break via stable sort
-    # BUG FIX: was sorting by quality_score (x[2]) instead of combined (x[5]).
-    scored.sort(key=lambda x: (-x[5], scored.index(x)))
+    # F150K: source_priority_bias is additive bias — fold into sort key.
+    # BUG FIX (F150J): was sorting by quality_score (x[2]) instead of combined (x[5]).
+    scored.sort(key=lambda x: (-(x[5] + x[9]), scored.index(x)))
 
     # Clamp to max_entries and rebuild with scoring metadata
     entries: list[FeedEntryHit] = []
-    for rank, (entry, freshness_score, quality_score, freshness_tier, _, combined,
-               ts_rel, richness_band, usefulness_band) in enumerate(scored[:max_entries]):
+    for rank, (entry, freshness_score, quality_score, freshness_tier, _,
+               combined, ts_rel, richness_band, usefulness_band,
+               spb, time_signal) in enumerate(scored[:max_entries]):
 
         # Determine selection_reason
         if freshness_tier == "future":
@@ -1080,10 +1117,10 @@ async def async_fetch_feed_entries(
         if is_enhanced and not reason.startswith("enhanced_"):
             reason = "enhanced_" + reason
 
-        # Append downstream-significant bands to reason
-        reason = f"{reason}|ts_rel={ts_rel:.2f}|richness={richness_band}|usefulness={usefulness_band}"
+        # Append downstream-significant bands to reason (F150K adds time_signal)
+        reason = f"{reason}|ts_rel={ts_rel:.2f}|richness={richness_band}|usefulness={usefulness_band}|src_bias={spb:.2f}|ts_signal={time_signal}"
 
-        # Build final entry with additive metadata (F150J delta)
+        # Build final entry with additive metadata (F150J + F150K delta)
         entries.append(
             FeedEntryHit(
                 feed_url=entry.feed_url,
@@ -1104,6 +1141,8 @@ async def async_fetch_feed_entries(
                 quality_score=quality_score,
                 freshness_tier=freshness_tier,
                 selection_reason=reason,
+                source_priority_bias=spb,
+                time_signal_reason=time_signal,
             )
         )
 

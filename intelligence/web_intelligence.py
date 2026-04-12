@@ -154,18 +154,25 @@ class UnifiedWebIntelligence:
         self.operation_queue: List[tuple] = []
         self._queue_counter = 0  # Tiebreaker for deterministic ordering
 
-        # Queued operations storage (Fix 0)
+        # Queue bounds (LANDMINE FIX 1: was unbounded — grew without limit)
+        self._MAX_QUEUE = 500
         self._queued_ops: Dict[str, Tuple[IntelligenceTarget, List[IntelligenceOperationType]]] = {}
 
-        # Priority aging for queued operations (Fix 0)
+        # Priority aging for queued operations (LANDMINE FIX 2: aging task was orphaned on cleanup)
         self._aging_threshold_seconds = 30  # age after 30 seconds
         self._aging_interval_seconds = 5    # check every 5 seconds
         self._aging_task: Optional[asyncio.Task] = None
+        self._aging_shutdown = asyncio.Event()  # graceful exit for aging loop
         self._queued_op_times: Dict[str, float] = {}  # operation_id -> enqueue timestamp
 
-        # Memory budget enforcement (optional psutil)
+        # Memory budget enforcement (LANDMINE FIX 3: psutil.Process() created at init even if never used)
         self._memory_limit_bytes = 512 * 1024 * 1024  # 512 MB
-        self._process = psutil.Process() if psutil else None
+        self._process: Optional["psutil.Process"] = None  # lazy, created on first memory check
+        self._process_initialized: bool = False
+
+        # Lazy init coordination (LANDMINE FIX 4: race condition on _components_initialized)
+        self._init_lock = asyncio.Lock()
+        self._components_init_error: Optional[Exception] = None  # surface init failures
 
         # Performance metrics
         self.metrics = {
@@ -202,6 +209,49 @@ class UnifiedWebIntelligence:
     def degradation_reason(self) -> Optional[str]:
         """Důvod degraded módu, pokud existuje."""
         return str(_IMPORT_ERROR) if _IMPORT_ERROR else None
+
+    @property
+    def queue_health(self) -> Dict[str, Any]:
+        """Read-only seam: queue pressure and aging status at a glance."""
+        return {
+            'queued_count': len(self.operation_queue),
+            'queue_limit': self._MAX_QUEUE,
+            'queue_pressure_pct': round(len(self.operation_queue) / self._MAX_QUEUE * 100, 1),
+            'aging_task_alive': (
+                self._aging_task is not None
+                and not self._aging_task.done()
+            ),
+            'oldest_queued_seconds': (
+                round(time.time() - min(self._queued_op_times.values()), 1)
+                if self._queued_op_times else None
+            ),
+        }
+
+    @property
+    def memory_posture(self) -> Dict[str, Any]:
+        """Read-only seam: memory pressure state for M1 8GB."""
+        try:
+            rss_mb = self._process.memory_info().rss / 1024 / 1024 if self._process else None
+            limit_mb = self._memory_limit_bytes / 1024 / 1024
+            return {
+                'rss_mb': round(rss_mb, 1) if rss_mb else None,
+                'limit_mb': round(limit_mb, 1),
+                'pressure_pct': round(rss_mb / limit_mb * 100, 1) if rss_mb else None,
+                'psutil_available': psutil is not None,
+            }
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            return {'rss_mb': None, 'limit_mb': self._memory_limit_bytes / 1024 / 1024, 'error': 'unavailable'}
+
+    @property
+    def active_posture(self) -> Dict[str, Any]:
+        """Read-only seam: active vs queued posture."""
+        return {
+            'active_count': len(self.active_operations),
+            'active_limit': self.max_concurrent_operations,
+            'is_queued': len(self.active_operations) >= self.max_concurrent_operations,
+            'components_initialized': self._components_initialized,
+            'init_error': str(self._components_init_error) if self._components_init_error else None,
+        }
 
     @property
     def completed_operations(self) -> Dict[str, IntelligenceResult]:
@@ -304,9 +354,22 @@ class UnifiedWebIntelligence:
         # Map priority string to numeric priority (lower = higher priority)
         priority_map = {"low": 3, "medium": 2, "high": 1, "critical": 0}
 
-        # Memory budget enforcement (optional psutil)
-        current_rss = self._process.memory_info().rss if self._process else 0
+        # Memory budget enforcement — lazy psutil.Process(), catch permission errors
+        try:
+            if psutil is not None and not self._process_initialized:
+                self._process = psutil.Process()
+                self._process_initialized = True
+            current_rss = self._process.memory_info().rss if self._process else 0
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            current_rss = 0  # treat as unknown memory state = don't block
         memory_exceeded = current_rss > self._memory_limit_bytes
+
+        # HARD BOUND: reject new operations if queue itself is at limit
+        if len(self.operation_queue) >= self._MAX_QUEUE:
+            raise RuntimeError(
+                f"web_intelligence queue FULL ({self._MAX_QUEUE}), "
+                f"cannot accept operation {operation_id}"
+            )
 
         # Add to queue if at capacity or memory exceeded (priority-aware)
         if len(self.active_operations) >= self.max_concurrent_operations or memory_exceeded:
@@ -392,24 +455,42 @@ class UnifiedWebIntelligence:
         logger.info(f"⏭️ Processing queued operation: {operation_id}")
 
     async def _ensure_components_initialized(self) -> None:
-        """Lazy initialization — spustí komponenty a aging task pouze jednou při první operaci."""
+        """Lazy initialization — spustí komponenty a aging task pouze jednou při první operaci.
+
+        Uses lock to prevent race condition when multiple operations race to init.
+        """
         if self._components_initialized:
             return
 
-        # Start aging task lazily (ne v __init__)
-        if self._aging_task is None:
-            self._aging_task = asyncio.create_task(self._age_queued_priorities())
-
-        # Initialize components (one-time)
-        try:
-            await self._initialize_components()
-        finally:
-            self._components_initialized = True
+        async with self._init_lock:
+            # Double-check after acquiring lock
+            if self._components_initialized:
+                return
+            if self._aging_task is None:
+                self._aging_task = asyncio.create_task(self._age_queued_priorities())
+            try:
+                await self._initialize_components()
+                self._components_initialized = True
+            except Exception as e:
+                self._components_init_error = e
+                self._components_initialized = True  # mark done even on failure — don't retry
+                raise
 
     async def _age_queued_priorities(self) -> None:
-        """Age queued operations to improve priority over time (Fix 0)."""
+        """Age queued operations to improve priority over time.
+
+        HARD EXIT: waits on shutdown event so task terminates immediately on cleanup.
+        """
         while True:
-            await asyncio.sleep(self._aging_interval_seconds)
+            try:
+                await asyncio.wait_for(
+                    self._aging_shutdown.wait(),
+                    timeout=self._aging_interval_seconds
+                )
+                # shutdown event set — exit gracefully
+                break
+            except asyncio.TimeoutError:
+                pass  # normal tick
             if not self.operation_queue:
                 continue
             now = time.time()
@@ -806,13 +887,15 @@ class UnifiedWebIntelligence:
     async def cleanup(self) -> None:
         """Cleanup all system resources."""
         try:
-            # Cancel aging task (Fix 0)
+            # Signal aging task shutdown and wait for graceful exit
+            self._aging_shutdown.set()
             if self._aging_task:
                 self._aging_task.cancel()
                 try:
                     await self._aging_task
                 except asyncio.CancelledError:
                     pass
+                self._aging_task = None
 
             # Cancel active operations
             for operation_id in list(self.active_operations.keys()):
