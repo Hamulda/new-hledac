@@ -265,6 +265,10 @@ class FeedPipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     low_trust_feed_hits: int = 0                        # feed-native hits on entries with low quality_band
     feed_next_action: str = "unknown"                   # "continue_feed" | "fallback_more" | "reassess_feed" | "stop"
     feed_confidence_note: str = ""                       # human-readable confidence annotation
+    # Sprint F151A: surf feed_confidence_score from verdict dict into flat field
+    feed_confidence_score: int = 0                       # 0-100, adapter-informed confidence
+    # Sprint F151A: winning source breakdown for scheduler/exporter
+    winning_source_breakdown: dict[str, int] = dict()     # {"feed_native": N, "fallback": N, "mixed": N}
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +495,98 @@ def _compute_feed_next_action_and_confidence(
     if low_trust_feed_hits > 0:
         return ("reassess_feed", f"{low_trust_feed_hits} low-trust feed hits; quality uncertain")
     return ("reassess_feed", "mixed signals; review feed quality")
+
+
+# Sprint F151A: winning source breakdown helper
+
+
+def _compute_winning_source_breakdown(
+    feed_native_signal_carried: bool,
+    article_fallback_used: bool,
+    findings: list[dict],
+    adapter_selection_reason: str,
+) -> dict[str, int]:
+    """
+    Breakdown of which source layer produced the winning findings.
+
+    Fallback is 'mixed' when article fallback was used alongside existing feed-native signal
+    (both contributed to findings). 'feed_native' when only feed-native had hits.
+    'fallback' when only fallback produced findings.
+
+    adapter_selection_reason is used fail-soft to annotate mixed cases.
+    """
+    breakdown: dict[str, int] = {"feed_native": 0, "fallback": 0, "mixed": 0}
+
+    if not findings:
+        return breakdown
+
+    if feed_native_signal_carried and article_fallback_used:
+        breakdown["mixed"] = len(findings)
+    elif feed_native_signal_carried:
+        breakdown["feed_native"] = len(findings)
+    elif article_fallback_used:
+        breakdown["fallback"] = len(findings)
+    else:
+        # Neither — shouldn't happen, but count as feed_native by convention
+        breakdown["feed_native"] = len(findings)
+
+    return breakdown
+
+
+def _compute_adapter_adjusted_confidence(
+    base_confidence_score: int,
+    adapter_source_priority_bias: float,
+    adapter_timestamp_reliability: float,
+    adapter_metadata_richness_band: str,
+    adapter_entry_usefulness_band: str,
+    adapter_selection_reason: str,
+    feed_native_signal_carried: bool,
+) -> int:
+    """
+    Fail-soft adjustment of feed_confidence_score using adapter-derived signals.
+
+    adapter_selection_reason is used fail-soft: if it contains keywords like
+    "curated", "priority", "high" it adds a small boost; if it contains
+    "fallback", "retry", "low" it reduces confidence slightly.
+    """
+    adjusted = base_confidence_score
+
+    # Source priority bias: +5 bonus per 0.1 of bias (capped at +20)
+    if adapter_source_priority_bias > 0:
+        bias_bonus = int(adapter_source_priority_bias * 50)
+        adjusted += min(bias_bonus, 20)
+
+    # Timestamp reliability: +10 bonus if high reliability (>0.7)
+    if adapter_timestamp_reliability > 0.7:
+        adjusted += 10
+
+    # Metadata richness: +10 if "high"
+    if adapter_metadata_richness_band == "high":
+        adjusted += 10
+
+    # Entry usefulness: +5 if "high"
+    if adapter_entry_usefulness_band == "high":
+        adjusted += 5
+
+    # Selection reason keywords — small positive/negative adjustments
+    if adapter_selection_reason:
+        reason_lower = adapter_selection_reason.lower()
+        positive_keywords = ("curated", "priority", "high", "authoritative", "manual")
+        negative_keywords = ("fallback", "retry", "low", "unknown", "derived")
+        for kw in positive_keywords:
+            if kw in reason_lower:
+                adjusted += 5
+                break
+        for kw in negative_keywords:
+            if kw in reason_lower:
+                adjusted -= 5
+                break
+
+    # If feed-native signal carried hits, give a small additional nudge
+    if feed_native_signal_carried:
+        adjusted += 5
+
+    return max(0, min(100, adjusted))
 
 
 # ---------------------------------------------------------------------------
@@ -1388,6 +1484,13 @@ async def async_run_live_feed_pipeline(
     _squandered_high_usefulness_entries = 0
     _metadata_strong_but_content_weak = 0
     _low_trust_feed_hits = 0
+    # Sprint F151A: winning source breakdown accumulator
+    _winning_source_breakdown_acc: dict[str, int] = {"feed_native": 0, "fallback": 0, "mixed": 0}
+    _adapter_source_priority_bias_acc: float = 0.0
+    _adapter_timestamp_reliability_acc: float = 0.0
+    _adapter_metadata_richness_band_acc: str = ""
+    _adapter_entry_usefulness_band_acc: str = ""
+    _adapter_selection_reason_acc: str = ""
 
     for entry in entries:
         entry_url = getattr(entry, "entry_url", "") or f"urn:feed:entry:{getattr(entry, 'title', '')[:64]}"
@@ -1505,6 +1608,18 @@ async def async_run_live_feed_pipeline(
             # Low trust feed hits: feed-native hits on low quality entries
             if feed_native_signal_carried and quality_signal.quality_band == "low":
                 _low_trust_feed_hits += 1
+            # Sprint F151A: accumulate adapter-derived signals fail-soft
+            _adapter_source_priority_bias_acc = getattr(entry, "source_priority_bias", 0.0) or 0.0
+            _adapter_timestamp_reliability_acc = getattr(entry, "timestamp_reliability", 0.0) or 0.0
+            _adapter_metadata_richness_band_acc = getattr(entry, "metadata_richness_band", "") or ""
+            _adapter_entry_usefulness_band_acc = getattr(entry, "entry_usefulness_band", "") or ""
+            _adapter_selection_reason_acc = getattr(entry, "selection_reason", "") or ""
+            # Sprint F151A: winning source breakdown
+            entry_breakdown = _compute_winning_source_breakdown(
+                feed_native_signal_carried, article_fallback_used, findings, _adapter_selection_reason_acc
+            )
+            for k, v in entry_breakdown.items():
+                _winning_source_breakdown_acc[k] = _winning_source_breakdown_acc.get(k, 0) + v
 
         if not findings:
             pages.append(FeedPipelineEntryResult(
@@ -1650,6 +1765,19 @@ async def async_run_live_feed_pipeline(
             entries_with_hits, entries_seen,
             _findings_from_rich_feed / max(1, _findings_from_rich_feed + _findings_from_fallback),
             _fallback_useful_count / max(1, _fallback_useful_count + _fallback_waste_count),
+        ),
+        # Sprint F151A: winning source breakdown + adapter-adjusted confidence
+        winning_source_breakdown=dict(_winning_source_breakdown_acc),
+        feed_confidence_score=_compute_adapter_adjusted_confidence(
+            max(0, min(100, int(
+                (_findings_from_rich_feed / max(1, _findings_from_rich_feed + _findings_from_fallback)) * 100
+            ))),
+            _adapter_source_priority_bias_acc,
+            _adapter_timestamp_reliability_acc,
+            _adapter_metadata_richness_band_acc,
+            _adapter_entry_usefulness_band_acc,
+            _adapter_selection_reason_acc,
+            _feed_branch_signal_present,
         ),
     )
 

@@ -31,6 +31,7 @@ from hledac.universal.runtime.sprint_scheduler import (
 )
 from hledac.universal.transport.tor_transport import TorTransport
 from hledac.universal.runtime.sprint_lifecycle import SprintLifecycleManager
+from hledac.universal.export.sprint_exporter import export_sprint
 
 logger = logging.getLogger(__name__)
 
@@ -528,6 +529,42 @@ async def run_sprint(
         }
         report_path.write_bytes(orjson.dumps(report_dict, option=orjson.OPT_INDENT_2))
         logger.info(f"[REPORT] {report_path}")
+
+        # Sprint F151D: Wire existing exporter seam over already-computed truth surfaces.
+        # Reuse: ExportHandoff, ensure_export_handoff, store.get_top_seed_nodes(),
+        # intel (correlation/hypothesis_pack/signal_path/feed_verdict/
+        # public_verdict/branch_value/sprint_verdict), runtime_truth, canonical_run_summary.
+        # Additive + fail-soft only — exporter failure does not crash sprint.
+        try:
+            from hledac.universal.types import ExportHandoff
+
+            top_seed_nodes: list = []
+            try:
+                top_seed_nodes = store.get_top_seed_nodes(n=5) if store else []
+            except Exception:
+                pass
+
+            handoff = ExportHandoff(
+                sprint_id=sprint_id,
+                scorecard={
+                    "synthesis_engine_used": "hermes3",
+                    "gnn_predicted_links": 0,
+                    "top_graph_nodes": top_seed_nodes,
+                    "phase_duration_seconds": {
+                        ph: round(_phase_times.get(ph, 0) - _phase_times.get("BOOT", 0), 2)
+                        for ph in phases if ph in _phase_times
+                    },
+                },
+                top_nodes=top_seed_nodes,
+                phase_durations={
+                    ph: round(_phase_times.get(ph, 0) - _phase_times.get("BOOT", 0), 2)
+                    for ph in phases if ph in _phase_times
+                },
+            )
+            export_result = await export_sprint(store=store, handoff=handoff, sprint_id=sprint_id)
+            logger.info(f"[EXPORT] finish layer → seeds={export_result.get('seeds_json','')}")
+        except Exception as ex:
+            logger.warning(f"[EXPORT] sprint_exporter seam failed (non-fatal): {ex}")
 
     finally:
         await store.aclose()

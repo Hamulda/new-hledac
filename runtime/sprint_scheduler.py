@@ -2383,6 +2383,23 @@ class SprintScheduler:
             else:
                 posture = "mixed"
 
+            # Sprint F151A: Additive derived fields — bounded, derived-only, fail-soft
+            # export_ready: findings accumulated and verdict computed → ready for export
+            export_ready = total_findings > 0 and bool(corr or hyp)
+            # proof_grade: evidence quality heuristic from corroboration + noise
+            if is_corroborated and corroboration_score > 0.4 and avg_noise < 0.3:
+                proof_grade = "strong"
+            elif is_corroborated and corroboration_score > 0.25:
+                proof_grade = "moderate"
+            elif total_findings > 0:
+                proof_grade = "weak"
+            else:
+                proof_grade = "none"
+            # operator_ready: operator shortlist populated with actionable next step
+            operator_ready = bool(op_shortlist and first_action)
+            # decision_pressure: high when posture != "corroborated" but findings > 0
+            decision_pressure = "high" if posture in ("noisy", "mixed") and total_findings > 0 else "low"
+
             result["sprint_verdict"] = {
                 "posture": posture,
                 "dominant_signal": dominant_signal,
@@ -2401,6 +2418,11 @@ class SprintScheduler:
                 "risk_score": risk_score,
                 "hypothesis_count": hyp_count,
                 "total_findings": total_findings,
+                # Sprint F151A: additive derived
+                "export_ready": export_ready,
+                "proof_grade": proof_grade,
+                "operator_ready": operator_ready,
+                "decision_pressure": decision_pressure,
             }
         except Exception:
             # Second-order condensation is purely additive — never crashes

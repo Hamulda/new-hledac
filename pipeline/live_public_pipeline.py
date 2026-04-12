@@ -81,6 +81,10 @@ class PipelinePageResult(msgspec.Struct, frozen=True, gc=False):
     discovery_score: float | None = None  # signal strength from discovery hit
     discovery_reason: str | None = None  # reason from discovery hit
     discovery_signal: bool = False  # True if hit had score >= 0.3 or reason
+    # Sprint F150L: usable-value layer — conversion story per page
+    usable_signal: bool = False  # True if page converted to usable value
+    value_tier: str = "none"  # high | medium | low | waste
+    resolution_reason: str = ""  # why this page resolved the way it did
 
 
 class PipelineRunResult(msgspec.Struct, frozen=True, gc=False):
@@ -110,6 +114,13 @@ class PipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     public_confidence_note: str = ""  # operator-facing confidence note
     # Sprint F150J: condensed public-branch verdict (additive dict)
     public_branch_verdict: dict = {}
+    # Sprint F150L: usable-value run-level aggregates
+    usable_findings_ratio: float = 0.0  # stored_findings / max(discovered, 1)
+    discovery_to_findings_efficiency: float = 0.0  # discovery_and_content_strong / max(discovered, 1)
+    quality_mix: str = ""  # high|medium|low|waste composition summary
+    public_proof_grade: str = ""  # proof quality of the public branch run
+    public_value_density: float = 0.0  # stored_findings / max(fetched, 1)
+    top_waste_pattern: str = ""  # dominant reason pages went to waste (heuristic)
 
 
 # -----------------------------------------------------------------------------
@@ -391,6 +402,67 @@ def _score_page_quality(
 
 
 # -----------------------------------------------------------------------------
+# Per-page usable-value computation (Sprint F150L)
+# Bounded heuristic — no new analysis, purely derived from existing buckets.
+# -----------------------------------------------------------------------------
+
+
+def _compute_page_usable_fields(
+    *,
+    fetched: bool,
+    matched_patterns: int,
+    stored_findings: int,
+    quality_reason: str | None,
+    discovery_signal: bool,
+    discovery_score: float | None,
+    error: str | None,
+) -> tuple[bool, str, str]:
+    """
+    Derive usable_signal, value_tier, resolution_reason from existing page data.
+
+    usable_signal: page contributed to real output (stored findings or strong signal).
+    value_tier: conversion quality — high/medium/low/waste.
+    resolution_reason: human-readable why the page resolved as it did.
+
+    All derived from existing fields — no new heavy analysis.
+    """
+    if not fetched or error is not None:
+        tier = "waste"
+        reason = f"unfetched_or_error:{error or 'none'}"
+        return False, tier, reason
+
+    if stored_findings > 0:
+        tier = "high"
+        reason = "stored_findings"
+        return True, tier, reason
+
+    if matched_patterns > 0 and discovery_signal:
+        tier = "medium"
+        reason = "patterns_found_discovery_signal"
+        return True, tier, reason
+
+    if matched_patterns > 0:
+        tier = "medium"
+        reason = "patterns_found_no_discovery"
+        return True, tier, reason
+
+    # Fetched but nothing matched
+    if discovery_signal and discovery_score is not None and discovery_score >= 0.5:
+        tier = "low"
+        reason = "discovery_signal_no_patterns"
+        return False, tier, reason
+
+    if quality_reason is not None and quality_reason.startswith("SKIP_WEAK"):
+        tier = "waste"
+        reason = f"quality_skip:{quality_reason}"
+        return False, tier, reason
+
+    tier = "waste"
+    reason = quality_reason or "no_match_no_signal"
+    return False, tier, reason
+
+
+# -----------------------------------------------------------------------------
 # PatternMatcher helpers
 # -----------------------------------------------------------------------------
 
@@ -505,6 +577,13 @@ async def _fetch_and_process_page(
     async with semaphore:
         # ---- Fetch -----------------------------------------------------------
         if skip_fetch:
+            usable_signal, value_tier, resolution_reason = _compute_page_usable_fields(
+                fetched=False, matched_patterns=0, stored_findings=0,
+                quality_reason="SKIP_WEAK:weak_discovery",
+                discovery_signal=has_signal,
+                discovery_score=discovery_score,
+                error="skipped:weak_discovery",
+            )
             return PipelinePageResult(
                 url=hit_url,
                 fetched=False,
@@ -516,6 +595,9 @@ async def _fetch_and_process_page(
                 discovery_score=discovery_score,
                 discovery_reason=discovery_reason,
                 discovery_signal=has_signal,
+                usable_signal=usable_signal,
+                value_tier=value_tier,
+                resolution_reason=resolution_reason,
             )
 
         try:
@@ -524,6 +606,12 @@ async def _fetch_and_process_page(
                 timeout=effective_timeout + 5.0,
             )
         except asyncio.TimeoutError:
+            usable_signal, value_tier, resolution_reason = _compute_page_usable_fields(
+                fetched=False, matched_patterns=0, stored_findings=0,
+                quality_reason=None, discovery_signal=has_signal,
+                discovery_score=discovery_score,
+                error=f"fetch_timeout_after_{effective_timeout:.1f}s",
+            )
             return PipelinePageResult(
                 url=hit_url, fetched=False, matched_patterns=0,
                 accepted_findings=0, stored_findings=0,
@@ -531,10 +619,19 @@ async def _fetch_and_process_page(
                 discovery_score=discovery_score,
                 discovery_reason=discovery_reason,
                 discovery_signal=has_signal,
+                usable_signal=usable_signal,
+                value_tier=value_tier,
+                resolution_reason=resolution_reason,
             )
         except asyncio.CancelledError:
             raise  # [I6] propagate, never swallow
         except Exception as exc:
+            usable_signal, value_tier, resolution_reason = _compute_page_usable_fields(
+                fetched=False, matched_patterns=0, stored_findings=0,
+                quality_reason=None, discovery_signal=has_signal,
+                discovery_score=discovery_score,
+                error=f"fetch_exception:{type(exc).__name__}:{exc}",
+            )
             return PipelinePageResult(
                 url=hit_url, fetched=False, matched_patterns=0,
                 accepted_findings=0, stored_findings=0,
@@ -542,6 +639,9 @@ async def _fetch_and_process_page(
                 discovery_score=discovery_score,
                 discovery_reason=discovery_reason,
                 discovery_signal=has_signal,
+                usable_signal=usable_signal,
+                value_tier=value_tier,
+                resolution_reason=resolution_reason,
             )
 
         # Unpack fetch result (FetchResult frozen struct)
@@ -552,6 +652,12 @@ async def _fetch_and_process_page(
             fetched_text = None
 
         if not fetched_text:
+            usable_signal, value_tier, resolution_reason = _compute_page_usable_fields(
+                fetched=True, matched_patterns=0, stored_findings=0,
+                quality_reason=None, discovery_signal=has_signal,
+                discovery_score=discovery_score,
+                error="fetch_text_none_or_empty",
+            )
             return PipelinePageResult(
                 url=hit_url, fetched=True, matched_patterns=0,
                 accepted_findings=0, stored_findings=0,
@@ -559,6 +665,9 @@ async def _fetch_and_process_page(
                 discovery_score=discovery_score,
                 discovery_reason=discovery_reason,
                 discovery_signal=has_signal,
+                usable_signal=usable_signal,
+                value_tier=value_tier,
+                resolution_reason=resolution_reason,
             )
 
         # ---- Extract ---------------------------------------------------------
@@ -568,6 +677,12 @@ async def _fetch_and_process_page(
                 None, _html_to_text, fetched_text
             )
         except Exception as exc:
+            usable_signal, value_tier, resolution_reason = _compute_page_usable_fields(
+                fetched=True, matched_patterns=0, stored_findings=0,
+                quality_reason=None, discovery_signal=has_signal,
+                discovery_score=discovery_score,
+                error=f"html_extract_failed:{exc}",
+            )
             return PipelinePageResult(
                 url=hit_url, fetched=True, matched_patterns=0,
                 accepted_findings=0, stored_findings=0,
@@ -575,6 +690,9 @@ async def _fetch_and_process_page(
                 discovery_score=discovery_score,
                 discovery_reason=discovery_reason,
                 discovery_signal=has_signal,
+                usable_signal=usable_signal,
+                value_tier=value_tier,
+                resolution_reason=resolution_reason,
             )
 
         # Hard cap
@@ -596,6 +714,12 @@ async def _fetch_and_process_page(
 
         # Skip very-low-quality pages early — preserve fetch budget
         if quality_reason.startswith("SKIP_WEAK"):
+            usable_signal, value_tier, resolution_reason = _compute_page_usable_fields(
+                fetched=True, matched_patterns=0, stored_findings=0,
+                quality_reason=quality_reason, discovery_signal=has_signal,
+                discovery_score=discovery_score,
+                error=None,
+            )
             return PipelinePageResult(
                 url=hit_url, fetched=True, matched_patterns=0,
                 accepted_findings=0, stored_findings=0,
@@ -603,6 +727,9 @@ async def _fetch_and_process_page(
                 discovery_score=discovery_score,
                 discovery_reason=discovery_reason,
                 discovery_signal=has_signal,
+                usable_signal=usable_signal,
+                value_tier=value_tier,
+                resolution_reason=resolution_reason,
             )
 
         # Sprint F150I: enrich extracted text with discovery metadata
@@ -626,12 +753,22 @@ async def _fetch_and_process_page(
 
         matched_count = len(hits)
         if matched_count == 0:
+            usable_signal, value_tier, resolution_reason = _compute_page_usable_fields(
+                fetched=True, matched_patterns=0, stored_findings=0,
+                quality_reason=quality_reason, discovery_signal=has_signal,
+                discovery_score=discovery_score,
+                error=None,
+            )
             return PipelinePageResult(
                 url=hit_url, fetched=True, matched_patterns=0,
                 accepted_findings=0, stored_findings=0,
+                quality_reason=quality_reason,
                 discovery_score=discovery_score,
                 discovery_reason=discovery_reason,
                 discovery_signal=has_signal,
+                usable_signal=usable_signal,
+                value_tier=value_tier,
+                resolution_reason=resolution_reason,
             )
 
         # ---- Per-page dedup: (value, label, pattern) exact dedup -----------
@@ -680,6 +817,14 @@ async def _fetch_and_process_page(
                 # Fail-soft: storage error does not fail the page
                 pass
 
+        usable_signal, value_tier, resolution_reason = _compute_page_usable_fields(
+            fetched=True, matched_patterns=matched_count,
+            stored_findings=stored_count,
+            quality_reason=quality_reason,
+            discovery_signal=has_signal,
+            discovery_score=discovery_score,
+            error=None,
+        )
         return PipelinePageResult(
             url=hit_url,
             fetched=True,
@@ -690,6 +835,9 @@ async def _fetch_and_process_page(
             discovery_score=discovery_score,
             discovery_reason=discovery_reason,
             discovery_signal=has_signal,
+            usable_signal=usable_signal,
+            value_tier=value_tier,
+            resolution_reason=resolution_reason,
         )
 
 
@@ -1006,6 +1154,43 @@ async def async_run_live_public_pipeline(
         "public_confidence_note": public_confidence_note,
     }
 
+    # Sprint F150L: usable-value run-level aggregates
+    usable_findings_ratio = round(total_stored / max(total_discovered, 1), 3)
+    discovery_to_findings_efficiency = round(
+        discovery_and_content_strong / max(total_discovered, 1), 3
+    )
+    public_value_density = round(total_stored / max(total_fetched, 1), 3)
+
+    # quality_mix: composition summary from per-page value_tiers
+    tier_counts: dict[str, int] = {"high": 0, "medium": 0, "low": 0, "waste": 0, "none": 0}
+    for p in all_page_results:
+        tier = getattr(p, "value_tier", "none")
+        tier_counts[tier] = tier_counts.get(tier, 0) + 1
+    mix_parts = [f"{v}{k[0]}" for k, v in tier_counts.items() if v > 0]
+    quality_mix = "|".join(mix_parts) if mix_parts else "empty"
+
+    # top_waste_pattern: dominant waste reason from existing buckets
+    waste_reasons: dict[str, int] = {}
+    for p in all_page_results:
+        if getattr(p, "value_tier", "none") == "waste":
+            reason = getattr(p, "resolution_reason", "unknown") or "unknown"
+            waste_reasons[reason] = waste_reasons.get(reason, 0) + 1
+    top_waste_pattern = (
+        max(waste_reasons, key=lambda r: waste_reasons[r]) if waste_reasons else ""
+    )
+
+    # public_proof_grade: overall proof quality of public branch run
+    if usable_findings_ratio >= 0.5 and discovery_to_findings_efficiency >= 0.3:
+        public_proof_grade = "strong"
+    elif usable_findings_ratio >= 0.2 and discovery_to_findings_efficiency >= 0.1:
+        public_proof_grade = "moderate"
+    elif usable_findings_ratio > 0 or discovery_to_findings_efficiency > 0:
+        public_proof_grade = "weak"
+    elif total_discovered > 0:
+        public_proof_grade = "empty"
+    else:
+        public_proof_grade = "no_discovery"
+
     return PipelineRunResult(
         query=query,
         discovered=total_discovered,
@@ -1027,6 +1212,12 @@ async def async_run_live_public_pipeline(
         public_next_action=public_next_action,
         public_confidence_note=public_confidence_note,
         public_branch_verdict=public_branch_verdict,
+        usable_findings_ratio=usable_findings_ratio,
+        discovery_to_findings_efficiency=discovery_to_findings_efficiency,
+        quality_mix=quality_mix,
+        public_proof_grade=public_proof_grade,
+        public_value_density=public_value_density,
+        top_waste_pattern=top_waste_pattern,
     )
 
 
