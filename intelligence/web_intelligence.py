@@ -156,7 +156,7 @@ class UnifiedWebIntelligence:
 
         # Queue bounds (LANDMINE FIX 1: was unbounded — grew without limit)
         self._MAX_QUEUE = 500
-        self._queued_ops: Dict[str, Tuple[IntelligenceTarget, List[IntelligenceOperationType]]] = {}
+        self._queued_ops: Dict[str, Tuple[IntelligenceTarget, List[IntelligenceOperationType], IntelligenceResult]] = {}
 
         # Priority aging for queued operations (LANDMINE FIX 2: aging task was orphaned on cleanup)
         self._aging_threshold_seconds = 30  # age after 30 seconds
@@ -345,7 +345,6 @@ class UnifiedWebIntelligence:
             status=OperationStatus.PENDING
         )
 
-        self.active_operations[operation_id] = result
         self.metrics['total_operations'] += 1
 
         # Lazy initialization — spustit při první operaci, ne při __init__
@@ -377,9 +376,9 @@ class UnifiedWebIntelligence:
             self._queue_counter += 1
             # Push to heap: (priority, counter, operation_id)
             heapq.heappush(self.operation_queue, (priority, self._queue_counter, operation_id))
-            # Store target and operation types for later execution (Fix 0)
-            self._queued_ops[operation_id] = (target, operation_types)
-            # Store enqueue time for aging (Fix 0)
+            # Store target, operation_types, and result for later execution
+            self._queued_ops[operation_id] = (target, operation_types, result)
+            # Store enqueue time for aging
             self._queued_op_times[operation_id] = time.time()
             if memory_exceeded:
                 logger.warning(f"⏳ Operation {operation_id} queued due to memory pressure ({current_rss / 1024 / 1024:.1f} MB)")
@@ -388,6 +387,7 @@ class UnifiedWebIntelligence:
             return operation_id
 
         # Execute operation asynchronously
+        self.active_operations[operation_id] = result
         asyncio.create_task(self._execute_operation_async(target, operation_types, operation_id))
 
         return operation_id
@@ -448,9 +448,11 @@ class UnifiedWebIntelligence:
         _, _, operation_id = heapq.heappop(self.operation_queue)
         if operation_id not in self._queued_ops:
             return
-        target, op_types = self._queued_ops.pop(operation_id)
-        # Remove enqueue time (Fix 0)
+        target, op_types, result = self._queued_ops.pop(operation_id)
+        # Remove enqueue time
         self._queued_op_times.pop(operation_id, None)
+        # Place result where _execute_operation_async expects it
+        self.active_operations[operation_id] = result
         asyncio.create_task(self._execute_operation_async(target, op_types, operation_id))
         logger.info(f"⏭️ Processing queued operation: {operation_id}")
 

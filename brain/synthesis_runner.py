@@ -172,6 +172,33 @@ async def _distill_findings(
 # ---------------------------------------------------------------------------
 
 
+class SynthesisOutcome(msgspec.Struct):
+    """
+    Sprint F151A: Fail-soft synthesis outcome seam.
+
+    Carries structured truth about every exit path in synthesize_findings()
+    so callers never have to guess why synthesis returned None.
+    """
+    # execution status
+    status: str            # "executed" | "skipped" | "failed" | "success"
+    primary_reason: str    # "lifecycle_blocked" | "uma_blocked" | "no_model"
+                          # | "no_findings" | "generation_failed" | "parse_failed"
+                          # | "success" | "unknown"
+    # lifecycle gate truth (Sprint 8VL)
+    lifecycle_gate_source: str  # "runtime" | "compat" | "unavailable" | "forced" | "unknown"
+    lifecycle_gate_mode: str   # "windup" | "forced" | "blocked" | "unknown"
+    # STIX degradation state (Sprint 8TH)
+    stix_status: str       # "available" | "unavailable" | "error" | "unknown"
+    stix_reason: str       # concrete reason string
+    stix_backend: str      # backend class name or ""
+    # engine + findings
+    engine_used: str        # "xgrammar" | "streaming" | "constrained" | "none"
+    findings_considered: int # count of findings passed to synthesis
+    report_produced: bool   # True if OSINTReport was returned
+    confidence: float      # 0.0-1.0, valid only if report_produced=True
+    operator_note: str     # short human-readable note
+
+
 class IOCEntity(msgspec.Struct):
     """Jedna IOC entita extrahovaná z findingu."""
     value: str
@@ -236,7 +263,7 @@ class SynthesisRunner:
                  "_last_synthesis_engine", "_last_arm", "_bandit_rewards",
                  "_stix_status", "_stix_reason", "_stix_backend",
                  "_lifecycle_gate_source", "_lifecycle_gate_mode", "_lifecycle_adapter",
-                 "_stix_graph")
+                 "_stix_graph", "_last_synthesis_outcome")
 
     def __init__(self, lifecycle: "ModelLifecycle") -> None:
         self._lifecycle = lifecycle
@@ -266,6 +293,8 @@ class SynthesisRunner:
         self._lifecycle_adapter: Any = None
         # Sprint 8VQ: Dedicated STIX truth-store graph (IOCGraph/Kuzu only)
         self._stix_graph: Any = None
+        # Sprint F151A: Last synthesis outcome — structured seam for all exit paths
+        self._last_synthesis_outcome: SynthesisOutcome | None = None
 
     def inject_graph(self, graph: Any) -> None:
         """Inject IOCGraph instance from 8QA for STIX context injection."""
@@ -313,6 +342,18 @@ class SynthesisRunner:
         self._prompt_modifier = modifier
         logger.info(f"SynthesisRunner: prompt modifier set ({len(modifier)} chars)")
 
+    # ------------------------------------------------------------------
+    # Sprint F151A: Synthesis outcome seam
+    # ------------------------------------------------------------------
+
+    def get_last_synthesis_outcome(self) -> SynthesisOutcome | None:
+        """Sprint F151A: Vrátí structured outcome posledního synthesis volání."""
+        return self._last_synthesis_outcome
+
+    # ------------------------------------------------------------------
+    # Sprint 8TD: Custom prompt injection
+    # ------------------------------------------------------------------
+
     @property
     def last_synthesis_meta(self) -> dict:
         """Vrátí metadata posledního synthesis volání pro scorecard."""
@@ -350,26 +391,68 @@ class SynthesisRunner:
         B.7: skip pokud RSS > 5.5GiB (M1 8GB UMA safety).
         STIX context (B.6): injektuje se z ioc_graph.export_stix_bundle().
         """
+        findings_count = len(findings)
+
         # B.7: WINDUP guard
         if not self._is_windup_allowed(force_synthesis):
             logger.debug("Synthesis skipped: not in WINDUP phase (force=%s)", force_synthesis)
-            # Structured degradation state already set by _is_windup_allowed
+            self._last_synthesis_outcome = SynthesisOutcome(
+                status="skipped",
+                primary_reason="lifecycle_blocked",
+                lifecycle_gate_source=self._lifecycle_gate_source,
+                lifecycle_gate_mode=self._lifecycle_gate_mode,
+                stix_status=self._stix_status,
+                stix_reason=self._stix_reason,
+                stix_backend=self._stix_backend,
+                engine_used="none",
+                findings_considered=findings_count,
+                report_produced=False,
+                confidence=0.0,
+                operator_note="windup guard blocked — not in WINDUP phase",
+            )
             return None
 
         # B.7: UMA RSS > 5.5GiB guard
         if not self._check_uma_guard():
-            # SPRINT E1-T2: UMA guard skip must also carry structured state
             self._stix_status = "unavailable"
             self._stix_reason = "UMA guard blocked synthesis — RSS > 5.5GiB or EMERGENCY"
             self._stix_backend = ""
             self._lifecycle_gate_source = getattr(self, "_lifecycle_gate_source", "unknown")
             self._lifecycle_gate_mode = "blocked"
+            self._last_synthesis_outcome = SynthesisOutcome(
+                status="skipped",
+                primary_reason="uma_blocked",
+                lifecycle_gate_source=self._lifecycle_gate_source,
+                lifecycle_gate_mode=self._lifecycle_gate_mode,
+                stix_status=self._stix_status,
+                stix_reason=self._stix_reason,
+                stix_backend=self._stix_backend,
+                engine_used="none",
+                findings_considered=findings_count,
+                report_produced=False,
+                confidence=0.0,
+                operator_note="UMA RSS > 5.5GiB or EMERGENCY state",
+            )
             return None
 
         # Sprint 8SB: ensure model is available (discovery + optional download)
         model_path = await self._ensure_model()
         if model_path is None:
             logger.warning("[SYNTHESIS] No model available — skipping")
+            self._last_synthesis_outcome = SynthesisOutcome(
+                status="skipped",
+                primary_reason="no_model",
+                lifecycle_gate_source=getattr(self, "_lifecycle_gate_source", "unknown"),
+                lifecycle_gate_mode=getattr(self, "_lifecycle_gate_mode", "unknown"),
+                stix_status=self._stix_status,
+                stix_reason="model discovery and download failed — no usable model",
+                stix_backend=self._stix_backend,
+                engine_used="none",
+                findings_considered=findings_count,
+                report_produced=False,
+                confidence=0.0,
+                operator_note="no model available after discovery and download attempt",
+            )
             return None
 
         # Update lifecycle model path for structured_generate
@@ -496,6 +579,20 @@ class SynthesisRunner:
                     used_engine = "constrained"
         except Exception as e:
             logger.error("Synthesis error: %s", e)
+            self._last_synthesis_outcome = SynthesisOutcome(
+                status="failed",
+                primary_reason="generation_failed",
+                lifecycle_gate_source=getattr(self, "_lifecycle_gate_source", "unknown"),
+                lifecycle_gate_mode=getattr(self, "_lifecycle_gate_mode", "unknown"),
+                stix_status=self._stix_status,
+                stix_reason=f"synthesis engine raised {type(e).__name__}: {e}",
+                stix_backend=self._stix_backend,
+                engine_used=used_engine,
+                findings_considered=findings_count,
+                report_produced=False,
+                confidence=0.0,
+                operator_note=f"exception during generation: {e}",
+            )
             return None
         finally:
             # B.4: unload + cleanup v přesném pořadí
@@ -512,7 +609,37 @@ class SynthesisRunner:
             report = self._parse_raw_to_osintreport(raw_dict)
             if report is not None:
                 report.confidence = self._compute_confidence(report, used_outlines)
+                self._last_synthesis_outcome = SynthesisOutcome(
+                    status="success",
+                    primary_reason="success",
+                    lifecycle_gate_source=getattr(self, "_lifecycle_gate_source", "unknown"),
+                    lifecycle_gate_mode=getattr(self, "_lifecycle_gate_mode", "unknown"),
+                    stix_status=self._stix_status,
+                    stix_reason=self._stix_reason,
+                    stix_backend=self._stix_backend,
+                    engine_used=used_engine,
+                    findings_considered=findings_count,
+                    report_produced=True,
+                    confidence=report.confidence,
+                    operator_note=f"report produced with confidence {report.confidence:.3f}",
+                )
                 return report
+
+        # All engines failed or parse failed
+        self._last_synthesis_outcome = SynthesisOutcome(
+            status="failed",
+            primary_reason="generation_failed" if raw_dict is None else "parse_failed",
+            lifecycle_gate_source=getattr(self, "_lifecycle_gate_source", "unknown"),
+            lifecycle_gate_mode=getattr(self, "_lifecycle_gate_mode", "unknown"),
+            stix_status=self._stix_status,
+            stix_reason="all engines exhausted" if raw_dict is None else "raw dict parse returned None",
+            stix_backend=self._stix_backend,
+            engine_used=used_engine,
+            findings_considered=findings_count,
+            report_produced=False,
+            confidence=0.0,
+            operator_note=f"engines={used_engine}, raw_dict={'set' if raw_dict is not None else 'None'}",
+        )
         return None
 
     async def close(self) -> None:

@@ -24,7 +24,7 @@ from hledac.universal.core.resource_governor import sample_uma_status
 from hledac.universal.intelligence.ct_log_client import CTLogClient
 from hledac.universal.knowledge.duckdb_store import DuckDBShadowStore
 from hledac.universal.knowledge.semantic_store import SemanticStore
-from hledac.universal.paths import TOR_ROOT
+from hledac.universal.paths import TOR_ROOT, get_sprint_json_report_path
 from hledac.universal.runtime.sprint_scheduler import (
     SprintScheduler,
     SprintSchedulerConfig,
@@ -449,9 +449,8 @@ async def run_sprint(
                 f"next={sv.get('first_action','?')[:60]}"
             )
 
-        # Sprint 8SA + 8UA: orjson JSON report export
-        # Use /tmp directly to avoid FileExistsError when export_dir is a file
-        report_path = Path(f"/tmp/{sprint_id}.json")
+        # Sprint F500I: Use canonical path helper (no more ad-hoc /tmp)
+        report_path = get_sprint_json_report_path(sprint_id)
         report_dict = {
             "sprint_id": sprint_id,
             "query": query,
@@ -496,6 +495,21 @@ async def run_sprint(
             "public_verdict": intel.get("public_verdict"),
             "branch_value": intel.get("branch_value"),
             "sprint_verdict": intel.get("sprint_verdict"),
+            # Sprint F500I: Empirical run boundary — reproducible tuple
+            "execution_context": {
+                "query": query,
+                "requested_duration_s": duration_s,
+                "actual_duration_s": round(actual_duration, 2),
+                "source_count": len(_SPRINT_FEED_SOURCES),
+                "sources": _SPRINT_FEED_SOURCES,
+                "platform": {
+                    "python_version": __import__("sys").version.split()[0],
+                    "macos_version": __import__("platform").mac_ver()[0] or "unknown",
+                },
+                "report_path": str(report_path),
+                "git_snapshot": "unknown",
+                "export_dir": export_dir,
+            },
             # Sprint F150H: Canonical operator summary — condensed truth on core boundary
             "canonical_run_summary": {
                 "meaningful": runtime_truth["is_meaningful"],

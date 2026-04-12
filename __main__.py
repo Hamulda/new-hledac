@@ -2869,10 +2869,13 @@ def main() -> None:
 
     try:
         if sprint_target is not None:
-            # Sprint 8TA fix: signal handlers installed INSIDE asyncio.run
-            # so we get the real loop from asyncio.run(), not a dummy from get_event_loop()
-            asyncio.run(_run_sprint_mode(sprint_target, duration_s=sprint_duration,
-                                         install_signal_handlers=True))
+            # Sprint F150R: Delegate to canonical sprint owner in core/__main__.py
+            # No new scheduler, no compat layer — thin delegation only
+            from .core.__main__ import run_sprint as _core_run_sprint
+            asyncio.run(_core_run_sprint(
+                query=sprint_target,
+                duration_s=sprint_duration,
+            ))
         else:
             # Sprint 8AM C.1: Async runtime with owned resources via _run_public_passive_once
             asyncio.run(_run_public_passive_once(_get_and_clear_signal_flag))
