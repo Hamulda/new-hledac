@@ -103,6 +103,15 @@ _BOOTSTRAP_PATTERNS_V3: tuple[tuple[str, str], ...] = (
     (" spear phishing", "attack_technique"),
     ("data breach", "security_incident"),
     ("data dump", "security_incident"),
+    # === Layer 2b: Named APT / threat actor groups (Sprint F153) ===
+    # High-precision, low-FP: these identifiers are rarely used outside CTI context
+    ("apt28", "threat_actor"),
+    ("apt29", "threat_actor"),
+    ("apt41", "threat_actor"),
+    ("lazarus group", "threat_actor"),
+    ("sandworm", "threat_actor"),
+    ("fancy bear", "threat_actor"),
+    ("cozy bear", "threat_actor"),
     # === Layer 3: Malware / offensive tooling ===
     ("infostealer", "malware_type"),
     ("wiper", "malware_type"),

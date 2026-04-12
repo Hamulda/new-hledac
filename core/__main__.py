@@ -452,6 +452,45 @@ async def run_sprint(
 
         # Sprint F500I: Use canonical path helper (no more ad-hoc /tmp)
         report_path = get_sprint_json_report_path(sprint_id)
+
+        # CHECKPOINT-0 additive derived fields (computed before report_dict)
+        active_iterations = result.cycles_completed
+
+        observed_run_tuple = (
+            query[:40] if len(query) > 40 else query,
+            round(actual_duration, 1),
+            active_iterations,
+            src_mix_str,
+            verdict,
+        )
+
+        runtime_truth_level = (
+            "active"
+            if is_meaningful and result.accepted_findings > 0
+            else "meaningful_empty"
+            if is_meaningful
+            else "smoke"
+        )
+
+        _ckpt_category = (
+            "depleted" if result.accepted_findings == 0 and result.total_pattern_hits == 0
+            else "active" if result.accepted_findings > 0
+            else "signal_search" if result.total_pattern_hits > 0
+            else "unknown"
+        )
+        _checkpoint_zero_reason = (
+            evidence_note if not is_meaningful
+            else "depleted_no_pattern_hits" if result.accepted_findings == 0 and result.total_pattern_hits == 0
+            else "public_only" if result.accepted_findings == 0 and result.public_discovered > 0
+            else "unknown"
+        )
+        _export_finish_status = (
+            "finished" if "EXPORT" in [ph]
+            else "empty_run" if result.accepted_findings == 0
+            else "aborted" if result.aborted
+            else "unknown"
+        )
+
         report_dict = {
             "sprint_id": sprint_id,
             "query": query,
@@ -512,6 +551,7 @@ async def run_sprint(
                 "export_dir": export_dir,
             },
             # Sprint F150H: Canonical operator summary — condensed truth on core boundary
+            # CHECKPOINT-0 additive derived fields
             "canonical_run_summary": {
                 "meaningful": runtime_truth["is_meaningful"],
                 "primary_signal": runtime_truth["primary_signal_source"],
@@ -525,6 +565,18 @@ async def run_sprint(
                 "hypothesis_count": (intel.get("hypothesis_pack") or {}).get("hypothesis_count", 0),
                 "first_action": (intel.get("sprint_verdict") or {}).get("first_action", ""),
                 "confidence": (intel.get("sprint_verdict") or {}).get("confidence", ""),
+                # CHECKPOINT-0 derived additive fields
+                "runtime_truth_level": runtime_truth_level,
+                "checkpoint_zero_category": _ckpt_category,
+                "checkpoint_zero_reason": _checkpoint_zero_reason,
+                "observed_run_tuple": observed_run_tuple,
+                "canonical_sprint_owner": "core.__main__.run_sprint",
+                "canonical_path_used": "run_sprint",
+                "effective_source_mix": src_mix_str,
+                "effective_parallelism": len(_SPRINT_FEED_SOURCES),
+                "effective_timeouts": {},
+                "active_iteration_count": active_iterations,
+                "export_finish_layer_status": _export_finish_status,
             },
         }
         report_path.write_bytes(orjson.dumps(report_dict, option=orjson.OPT_INDENT_2))

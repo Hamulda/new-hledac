@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 
+from hledac.universal.network.session_runtime import async_get_aiohttp_session
 from hledac.universal.paths import open_lmdb
 
 logger = logging.getLogger(__name__)
@@ -172,18 +173,20 @@ class ShodanClient:
     Bez SHODAN_API_KEY: LMDB-only mode, žádné HTTP volání.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        session: Optional[aiohttp.ClientSession] = None,
+    ) -> None:
         self._api_key = os.environ.get("SHODAN_API_KEY", "")
         self._cache = ExposureCache(prefix="shodan")
-        self._session: Optional[aiohttp.ClientSession] = None
+        # Optional injected session; None triggers lazy own-session fallback
+        self._injected_session: Optional[aiohttp.ClientSession] = session
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=30),
-                headers={"User-Agent": "curl/7.0"},
-            )
-        return self._session
+        # Use injected session if provided; otherwise fall back to shared plain-TCP surface
+        if self._injected_session is not None and not self._injected_session.closed:
+            return self._injected_session
+        return await async_get_aiohttp_session()
 
     async def query_host(self, ip: str) -> Optional[Dict[str, Any]]:
         """
@@ -247,8 +250,7 @@ class ShodanClient:
             return None
 
     async def close(self) -> None:
-        if self._session and not self._session.closed:
-            await self._session.close()
+        # Session lifecycle is caller-owned; only close our cache
         self._cache.close()
 
 
@@ -266,19 +268,21 @@ class CensysClient:
     Bez CENSYS_API_ID/CENSYS_API_SECRET: LMDB-only mode.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        session: Optional[aiohttp.ClientSession] = None,
+    ) -> None:
         self._api_id = os.environ.get("CENSYS_API_ID", "")
         self._api_secret = os.environ.get("CENSYS_API_SECRET", "")
         self._cache = ExposureCache(prefix="censys")
-        self._session: Optional[aiohttp.ClientSession] = None
+        # Optional injected session; None triggers lazy own-session fallback
+        self._injected_session: Optional[aiohttp.ClientSession] = session
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=30),
-                headers={"User-Agent": "curl/7.0"},
-            )
-        return self._session
+        # Use injected session if provided; otherwise fall back to shared plain-TCP surface
+        if self._injected_session is not None and not self._injected_session.closed:
+            return self._injected_session
+        return await async_get_aiohttp_session()
 
     async def search_hosts(self, query: str) -> Optional[List[Dict[str, Any]]]:
         """
@@ -386,8 +390,7 @@ class CensysClient:
             return None
 
     async def close(self) -> None:
-        if self._session and not self._session.closed:
-            await self._session.close()
+        # Session lifecycle is caller-owned; only close our cache
         self._cache.close()
 
 

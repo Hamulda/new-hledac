@@ -163,6 +163,10 @@ class UnifiedWebIntelligence:
         self._aging_interval_seconds = 5    # check every 5 seconds
         self._aging_task: Optional[asyncio.Task] = None
         self._aging_shutdown = asyncio.Event()  # graceful exit for aging loop
+
+        # Task ownership — operation tasks tracked for symmetric cleanup
+        self._MAX_ACTIVE_TASKS = 200  # hard cap on concurrent operation tasks
+        self._active_tasks: Set[asyncio.Task] = set()  # owned tasks
         self._queued_op_times: Dict[str, float] = {}  # operation_id -> enqueue timestamp
 
         # Memory budget enforcement (LANDMINE FIX 3: psutil.Process() created at init even if never used)
@@ -388,7 +392,7 @@ class UnifiedWebIntelligence:
 
         # Execute operation asynchronously
         self.active_operations[operation_id] = result
-        asyncio.create_task(self._execute_operation_async(target, operation_types, operation_id))
+        self._track_task(asyncio.create_task(self._execute_operation_async(target, operation_types, operation_id)))
 
         return operation_id
 
@@ -453,7 +457,7 @@ class UnifiedWebIntelligence:
         self._queued_op_times.pop(operation_id, None)
         # Place result where _execute_operation_async expects it
         self.active_operations[operation_id] = result
-        asyncio.create_task(self._execute_operation_async(target, op_types, operation_id))
+        self._track_task(asyncio.create_task(self._execute_operation_async(target, op_types, operation_id)))
         logger.info(f"⏭️ Processing queued operation: {operation_id}")
 
     async def _ensure_components_initialized(self) -> None:
@@ -477,6 +481,31 @@ class UnifiedWebIntelligence:
                 self._components_init_error = e
                 self._components_initialized = True  # mark done even on failure — don't retry
                 raise
+
+    # -------------------------------------------------------------------------
+    # Task ownership seam
+    # -------------------------------------------------------------------------
+
+    def _track_task(self, task: asyncio.Task) -> None:
+        """Register an owned operation task. Silently drops if at capacity."""
+        if len(self._active_tasks) >= self._MAX_ACTIVE_TASKS:
+            logger.warning(
+                "web_intelligence: _active_tasks at capacity (%d), dropping task tracking",
+                self._MAX_ACTIVE_TASKS
+            )
+            return
+        self._active_tasks.add(task)
+        task.add_done_callback(self._active_tasks.discard)
+
+    @property
+    def task_posture(self) -> Dict[str, int]:
+        """Read-only snapshot of task ownership state."""
+        return {
+            'active_operations': len(self.active_operations),
+            'owned_tasks': len(self._active_tasks),
+            'aging_task_alive': self._aging_task is not None and not self._aging_task.done(),
+            'max_ownership': self._MAX_ACTIVE_TASKS,
+        }
 
     async def _age_queued_priorities(self) -> None:
         """Age queued operations to improve priority over time.
@@ -906,6 +935,13 @@ class UnifiedWebIntelligence:
                 self._add_completed_operation(operation_id, operation)
 
             self.active_operations.clear()
+
+            # Drain owned operation tasks — fail-soft, symmetric with _track_task
+            for task in list(self._active_tasks):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*self._active_tasks, return_exceptions=True)
+            self._active_tasks.clear()
 
             # Cleanup components
             if self.intelligent_scraper:

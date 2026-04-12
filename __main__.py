@@ -44,6 +44,37 @@ except ImportError:
     # Fail-open: fall back to default asyncio loop
     logging.warning("[RUNTIME] uvloop not available, using default asyncio loop")
 
+# =============================================================================
+# Sprint F153: Authority Freeze — entrypoint authority story
+# =============================================================================
+# Authority freezes the sprint ownership story without runtime change.
+# READ-ONLY labels — no branching logic, no delegation, no new APIs.
+#
+# canonical_sprint_owner : core.__main__.run_sprint() — canonical sprint production owner
+# root_role              : shell/delegation surface — main() dispatches to canonical owner
+# alternate_paths        : _run_sprint_mode() — residual/alternate path, not canonical owner
+# production_status      : "canonical" | "alternate" | "residual"
+# allowed_purpose        : why this path exists
+
+ENTRYPOINT_AUTHORITY = {
+    "canonical_sprint_owner": "hledac.universal.core.__main__.run_sprint",
+    "root_role": "shell/delegation surface",
+    "alternate_paths": {
+        "_run_sprint_mode": {
+            "location": "hledac.universal.__main__._run_sprint_mode",
+            "production_status": "alternate",
+            "allowed_purpose": "legacy sprint hot-path; prefer canonical owner",
+        }
+    },
+    "_comment": "Freeze F153: root __main__.py is NOT an equal sprint owner — core.__main__.run_sprint is.",
+}
+
+
+def get_entrypoint_authority_status() -> dict:
+    """Read-only authority status — no side effects."""
+    return ENTRYPOINT_AUTHORITY.copy()
+# =============================================================================
+
 import msgspec
 
 logger = logging.getLogger(__name__)
