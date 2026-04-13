@@ -533,15 +533,20 @@ class SprintScheduler:
                 econ.silent_streak += 1
             else:
                 econ.silent_streak = 1
-            # Cooldown only if cold for 2+ consecutive cycles
-            if econ.silent_streak >= 2:
+            # Cooldown only if cold for 2+ consecutive cycles — guard against re-entry
+            if econ.cooldown_until_cycle is None and econ.silent_streak >= 2:
                 econ.cooldown_until_cycle = current_cycle + 3
         elif is_cold:
-            econ.silent_streak += 1
             econ.recent_health_posture = "cold"
-            # Bounded cooldown: 3 cycles, then allow retry
-            if econ.silent_streak >= 2:
-                econ.cooldown_until_cycle = current_cycle + 3
+            if econ.cooldown_until_cycle is not None:
+                # Already in cooldown — freeze streak, do not extend
+                pass
+            else:
+                # First cold hit or already warming — increment streak
+                econ.silent_streak += 1
+                # Enter cooldown after 2 consecutive cold cycles
+                if econ.silent_streak >= 2:
+                    econ.cooldown_until_cycle = current_cycle + 3
         else:
             # Marginal signal — reset but watch
             econ.recent_health_posture = "marginal"

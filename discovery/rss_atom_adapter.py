@@ -1655,9 +1655,11 @@ def get_topology_candidates() -> tuple[FeedSeed, ...]:
     return tuple(s for s in seeds if s.source == "topology_candidate")
 
 
-# Viability tier thresholds — derived from existing FeedEntryHit scoring fields
-_VIABILITY_HIGH_PRIORITY_THRESHOLD: int = 7  # min priority for "high" tier
-_VIABILITY_MEDIUM_PRIORITY_THRESHOLD: int = 4  # min priority for "medium" tier
+# Viability tier thresholds — derived from FeedSeed.priority field.
+# These drive get_feed_viability_posture() and are part of its public contract.
+# DO NOT use these values in any new scoring system — they are for tier derivation only.
+VIABILITY_HIGH_PRIORITY_THRESHOLD: int = 7   # min priority for "high" tier
+VIABILITY_MEDIUM_PRIORITY_THRESHOLD: int = 4  # min priority for "medium" tier
 
 
 def get_feed_viability_posture() -> dict[str, Any]:
@@ -1671,7 +1673,8 @@ def get_feed_viability_posture() -> dict[str, Any]:
     - ``viability_tier`` — "high" | "medium" | "low" | "degraded" | "unknown"
     - ``runtime_feed_count`` — number of runtime RSS/Atom feeds
     - ``topology_candidate_count`` — number of topology candidates
-    - ``sources`` — list of per-source entries with identity, label, priority, source
+    - ``runtime_feeds`` — list of runtime (curated_seed) entries with identity, label, priority, source
+      — NOTE: topology_candidates are excluded from this list; use get_topology_candidates() separately
     - ``top_priority`` — highest priority value in the runtime surface
     - ``canonical_osint_sources`` — list of labels that are primary OSINT sources
     """
@@ -1683,17 +1686,19 @@ def get_feed_viability_posture() -> dict[str, Any]:
         tier = "unknown"
     else:
         max_priority = max(s.priority for s in runtime)
-        if max_priority >= _VIABILITY_HIGH_PRIORITY_THRESHOLD:
+        if max_priority >= VIABILITY_HIGH_PRIORITY_THRESHOLD:
             tier = "high"
-        elif max_priority >= _VIABILITY_MEDIUM_PRIORITY_THRESHOLD:
+        elif max_priority >= VIABILITY_MEDIUM_PRIORITY_THRESHOLD:
             tier = "medium"
         elif max_priority > 0:
             tier = "low"
         else:
             tier = "degraded"
 
-    # Build sources list — only from existing FeedSeed fields (no new data)
-    sources: list[dict[str, Any]] = [
+    # Build runtime_feeds list — only from existing FeedSeed fields (no new data).
+    # NOTE: this list contains ONLY curated_seed entries; topology_candidates
+    # are NOT included — use get_topology_candidates() separately.
+    runtime_feeds: list[dict[str, Any]] = [
         {
             "feed_url": s.feed_url,
             "label": s.label,
@@ -1704,14 +1709,14 @@ def get_feed_viability_posture() -> dict[str, Any]:
         for s in runtime
     ]
 
-    # Canonical OSINT sources: priority >= _VIABILITY_HIGH_PRIORITY_THRESHOLD
-    canonical_labels = [s.label for s in runtime if s.priority >= _VIABILITY_HIGH_PRIORITY_THRESHOLD]
+    # Canonical OSINT sources: priority >= VIABILITY_HIGH_PRIORITY_THRESHOLD
+    canonical_labels = [s.label for s in runtime if s.priority >= VIABILITY_HIGH_PRIORITY_THRESHOLD]
 
     return {
         "viability_tier": tier,
         "runtime_feed_count": len(runtime),
         "topology_candidate_count": len(topology),
-        "sources": sources,
+        "runtime_feeds": runtime_feeds,
         "top_priority": max((s.priority for s in runtime), default=0),
         "canonical_osint_sources": canonical_labels,
     }

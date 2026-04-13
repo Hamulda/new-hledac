@@ -389,7 +389,7 @@ def _classify_fallback_decision(
                 reason="forced_no_yield",
                 should_fetch=True,
                 forced=True,
-                wasted=False,
+                wasted=True,
                 helpful=False,
             )
 
@@ -411,7 +411,7 @@ def _classify_fallback_decision(
                 reason="aged_structured_no_yield",
                 should_fetch=True,
                 forced=True,
-                wasted=False,
+                wasted=True,
                 helpful=False,
             )
 
@@ -430,7 +430,7 @@ def _classify_fallback_decision(
                 reason="forced_adapter_no_yield",
                 should_fetch=True,
                 forced=True,
-                wasted=False,
+                wasted=True,
                 helpful=False,
             )
 
@@ -2072,16 +2072,20 @@ async def async_run_live_feed_pipeline(
         feed_native_yield_ratio=(
             _findings_from_rich_feed / max(1, _findings_from_rich_feed + _findings_from_fallback)
         ),
-        feed_next_action=_compute_feed_next_action_and_confidence(
-            _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
-            _findings_from_rich_feed, _findings_from_fallback,
-            _squandered_high_usefulness_entries, _metadata_strong_but_content_weak, _low_trust_feed_hits,
-        )[0],
-        feed_confidence_note=_compute_feed_next_action_and_confidence(
-            _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
-            _findings_from_rich_feed, _findings_from_fallback,
-            _squandered_high_usefulness_entries, _metadata_strong_but_content_weak, _low_trust_feed_hits,
-        )[1],
+        feed_next_action=(
+            _compute_feed_next_action_and_confidence(
+                _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
+                _findings_from_rich_feed, _findings_from_fallback,
+                _squandered_high_usefulness_entries, _metadata_strong_but_content_weak, _low_trust_feed_hits,
+            )[0]
+        ),
+        feed_confidence_note=(
+            _compute_feed_next_action_and_confidence(
+                _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
+                _findings_from_rich_feed, _findings_from_fallback,
+                _squandered_high_usefulness_entries, _metadata_strong_but_content_weak, _low_trust_feed_hits,
+            )[1]
+        ),
         feed_branch_verdict=_compute_feed_branch_verdict(
             _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
             _findings_from_rich_feed, _findings_from_fallback,

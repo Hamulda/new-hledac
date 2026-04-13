@@ -1272,34 +1272,25 @@ def _derive_run_truth_note(
     runtime_truth: dict[str, Any] | None,
     canonical_run_summary: dict[str, Any] | None,
     sprint_verdict: dict[str, Any] | None,
-    pvs: dict[str, Any],
+    pvs: dict[str, Any] | None,
 ) -> str:
     """
     Sprint F150P §1: run_truth_note — operator-facing sprint characterization.
 
     One-liner: meaningful_run vs smoke_vs_import vs entrypoint_smoke vs unknown.
 
-    Reads (priority order):
-    - sprint_verdict["verdict"] (most synthesized) — F150P §2
-    - canonical_run_summary["signal_verdict"] — high-level sprint verdict
-    - runtime_truth["is_meaningful"] (bool) — primary signal
-    - runtime_truth["evidence_note"] (str) — contextual note
-    - pvs.signal_quality as fallback when runtime_truth unavailable
+    Priority order (F161F §A fix):
+      1. runtime_truth["is_meaningful"] — primary empirical signal (checked first)
+      2. sprint_verdict["verdict"] — most synthesized verdict (fallback)
+      3. canonical_run_summary["signal_verdict"] — high-level sprint verdict
+      4. pvs.signal_quality as last resort
 
+    Priority order fix (F161F §A): runtime_truth checked before sprint_verdict.
+    F160F invariant: smoke runs (is_meaningful=False) must NOT be labeled meaningful.
     Fail-soft: falls back to signal_quality-based characterization.
     """
-    # F150P §2: sprint_verdict is most synthesized — check first
-    if sprint_verdict:
-        verdict = sprint_verdict.get("verdict") or sprint_verdict.get("sprint_status") or ""
-        if verdict and len(verdict) > 2:
-            return f"sprint_verdict={verdict}"
-
-    # canonical_run_summary signal_verdict as secondary
-    if canonical_run_summary:
-        sig_verdict = canonical_run_summary.get("signal_verdict") or ""
-        if sig_verdict and len(sig_verdict) > 2:
-            return f"signal={sig_verdict}"
-
+    # Priority 1: runtime_truth is PRIMARY — must be checked before sprint_verdict
+    # F161F §A: runtime_truth.is_meaningful controls smoke/meaningful regardless of sprint_verdict
     if runtime_truth:
         is_meaningful = runtime_truth.get("is_meaningful")
         evidence_note = runtime_truth.get("evidence_note") or ""
@@ -1310,8 +1301,21 @@ def _derive_run_truth_note(
         elif isinstance(is_meaningful, str):
             return f"{is_meaningful}: {evidence_note}" if evidence_note else is_meaningful
 
-    # Fallback: signal-based characterization
-    # Refinement F160F: honest characterization — no inflated wording
+    # Priority 2: sprint_verdict — most synthesized verdict (checked after runtime_truth)
+    if sprint_verdict:
+        verdict = sprint_verdict.get("verdict") or sprint_verdict.get("sprint_status") or ""
+        if verdict and len(verdict) > 2:
+            return f"sprint_verdict={verdict}"
+
+    # Priority 3: canonical_run_summary signal_verdict
+    if canonical_run_summary:
+        sig_verdict = canonical_run_summary.get("signal_verdict") or ""
+        if sig_verdict and len(sig_verdict) > 2:
+            return f"signal={sig_verdict}"
+
+    # Priority 4: pvs-based fallback — F161F §A: guard against None pvs
+    if pvs is None:
+        return "unknown_run: insufficient data"
     signal = pvs.get("signal_quality", "unknown")
     accepted = pvs.get("accepted", 0)
 
@@ -1381,7 +1385,7 @@ def _derive_best_first_move(
     signal_path: dict[str, Any] | None,
     canonical_run_summary: dict[str, Any] | None,
     sprint_verdict: dict[str, Any] | None,
-    pvs: dict[str, Any],
+    pvs: dict[str, Any] | None,
     correlation: dict[str, Any] | None,
 ) -> str:
     """
@@ -1392,10 +1396,12 @@ def _derive_best_first_move(
     2. High-risk findings → investigate high-risk branch
     3. runtime_truth is_meaningful=False → pivot immediately
     4. signal_path next_pivot_recommendation=pivot_immediately
-    5. pvs signal quality guidance
-    6. correlation operator_shortlist first item
+    5. canonical_run_summary["next_action"] — sprint-level next action
+    6. pvs signal quality guidance
+    7. correlation operator_shortlist first item
 
     Single sentence, max 80 chars.
+    F161F §A: pvs may be None — guarded at body 6.
     """
     # 1. sprint_verdict recommended action (F150P §2)
     if sprint_verdict:
@@ -1427,8 +1433,8 @@ def _derive_best_first_move(
         if na and len(na) > 2:
             return f"action: {na[:80]}"
 
-    # 6. pvs signal guidance
-    signal = pvs.get("signal_quality", "unknown")
+    # 6. pvs signal guidance — F161F §A: guard against None pvs
+    signal = pvs.get("signal_quality", "unknown") if pvs else "unknown"
     if signal == "depleted":
         return "new approach: current query space exhausted"
     elif signal == "high_density":
@@ -1458,7 +1464,7 @@ def _derive_why_this_run_matters(
     hypothesis_pack: dict[str, Any] | None,
     canonical_run_summary: dict[str, Any] | None,
     sprint_verdict: dict[str, Any] | None,
-    pvs: dict[str, Any],
+    pvs: dict[str, Any] | None,
     correlation: dict[str, Any] | None,
 ) -> str:
     """
@@ -1466,9 +1472,8 @@ def _derive_why_this_run_matters(
 
     Tells operator why this sprint's output matters for future decisions.
 
-    Reads (priority order):
-    - sprint_verdict["why_matters"] — F150P §2, most synthesized
-    - sprint_verdict["significance"] — F150P §2
+    Priority order:
+    - sprint_verdict["why_matters"] / sprint_verdict["significance"] — most synthesized
     - canonical_run_summary["key_highlight"] — primary theme highlight
     - correlation["so_what"] — correlation verdict
     - hypothesis_pack["what_matters_first"]
@@ -1476,7 +1481,7 @@ def _derive_why_this_run_matters(
     - signal_path["dominant_signal_path"]
     - pvs.signal_quality + accepted count
 
-    Max 100 chars.
+    F161F §A: pvs may be None — guarded at pvs-based fallback.
     """
     # F150P §2: sprint_verdict most synthesized — check first
     if sprint_verdict:
@@ -1514,7 +1519,9 @@ def _derive_why_this_run_matters(
         if dsp:
             return f"dominant path: {dsp}"
 
-    # pvs-based fallback
+    # pvs-based fallback — F161F §A: guard against None pvs
+    if pvs is None:
+        return "no actionable signal — sprint produced no useful leads"
     signal = pvs.get("signal_quality", "unknown")
     accepted = pvs.get("accepted", 0)
     if signal == "high_density" and accepted > 0:

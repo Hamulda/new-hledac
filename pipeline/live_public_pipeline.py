@@ -50,7 +50,13 @@ _QUALITY_TIER_OK = "ok"
 _QUALITY_TIER_WEAK = "weak_low_signal"
 _QUALITY_TIER_SKIP = "SKIP_WEAK"
 
-# Discovery signal threshold — hit with score >= this is considered informative
+# Sprint F161B: conversion truth consolidation
+# Changes:
+# - _compute_page_usable_fields: distinguish false-positive discovery from structural waste
+# - _score_page_quality: pre-fetch skip for extremely low text BEFORE budget spent
+# - New derived fields: discovery_false_positive, waste_category, structural_quality
+# - Bounded: all additive, backward-compatible, M1-safe
+
 _DISCOVERY_SIGNAL_SCORE_THRESHOLD: float = 0.3
 
 # Adaptive fetch budget tiers: multiplier on base fetch_timeout_s
@@ -58,6 +64,15 @@ _FETCH_BUDGET_STRONG: float = 1.25   # very_good or discovery_score >= 0.7
 _FETCH_BUDGET_NORMAL: float = 1.0    # ok, good
 _FETCH_BUDGET_WEAK: float = 0.65     # weak_low_signal, low discovery score
 _FETCH_BUDGET_SKIP: float = 0.0       # SKIP_WEAK — dead until Fix A in F150J
+
+# Sprint F161B: pre-fetch text-length gate — BEFORE budget is spent
+# Previously this check happened post-fetch in _score_page_quality (wasteful)
+_PRE_FETCH_TEXT_MIN_CHARS: int = 150
+"""Minimum extracted text chars to consider fetch worthwhile."""
+
+# Sprint F161B: discovery false-positive band — legitimate signal but no conversion
+_DISCOVERY_FALSE_POSITIVE_THRESHOLD: float = 0.5
+"""Discovery score above this with zero patterns = false positive, not waste."""
 
 # Sprint F150J: pre-fetch skip threshold — below this score with no strong signal → SKIP tier
 _DISCOVERY_SKIP_THRESHOLD: float = 0.15
@@ -85,6 +100,10 @@ class PipelinePageResult(msgspec.Struct, frozen=True, gc=False):
     usable_signal: bool = False  # True if page converted to usable value
     value_tier: str = "none"  # high | medium | low | waste
     resolution_reason: str = ""  # why this page resolved the way it did
+    # Sprint F161B: conversion truth surfaces
+    discovery_false_positive: bool = False  # True if discovery signal was legitimate but page converted to waste
+    waste_category: str = ""  # "" | "structural" | "signalless" | "false_positive" | "error"
+    structural_quality: str = ""  # "" | "healthy" | "thin" | "dead"
 
 
 class PipelineRunResult(msgspec.Struct, frozen=True, gc=False):
@@ -121,6 +140,10 @@ class PipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     public_proof_grade: str = ""  # proof quality of the public branch run
     public_value_density: float = 0.0  # stored_findings / max(fetched, 1)
     top_waste_pattern: str = ""  # dominant reason pages went to waste (heuristic)
+    # Sprint F161B: conversion truth run-level aggregates
+    discovery_false_positive_count: int = 0  # pages with discovery signal but no conversion
+    waste_category_counts: dict = {}  # {"structural": N, "signalless": N, "false_positive": N, "error": N}
+    structural_health_ratio: float = 0.0  # fraction of fetched pages with structural_quality=healthy
 
 
 # -----------------------------------------------------------------------------
@@ -416,50 +439,78 @@ def _compute_page_usable_fields(
     discovery_signal: bool,
     discovery_score: float | None,
     error: str | None,
-) -> tuple[bool, str, str]:
+    extracted_text_len: int = 0,
+) -> tuple[bool, str, str, bool, str, str]:
     """
-    Derive usable_signal, value_tier, resolution_reason from existing page data.
+    Derive usable_signal, value_tier, resolution_reason, discovery_false_positive,
+    waste_category, structural_quality from existing page data.
 
     usable_signal: page contributed to real output (stored findings or strong signal).
     value_tier: conversion quality — high/medium/low/waste.
     resolution_reason: human-readable why the page resolved as it did.
+    discovery_false_positive: True if discovery signal was legitimate but page wasted.
+    waste_category: "" | "structural" | "signalless" | "false_positive" | "error"
+    structural_quality: "" | "healthy" | "thin" | "dead"
 
     All derived from existing fields — no new heavy analysis.
     """
     if not fetched or error is not None:
         tier = "waste"
         reason = f"unfetched_or_error:{error or 'none'}"
-        return False, tier, reason
+        false_pos = False
+        waste_cat = "error"
+        structural = "dead"
+        return False, tier, reason, false_pos, waste_cat, structural
 
     if stored_findings > 0:
         tier = "high"
         reason = "stored_findings"
-        return True, tier, reason
+        false_pos = False
+        waste_cat = ""
+        structural = "healthy"
+        return True, tier, reason, false_pos, waste_cat, structural
 
     if matched_patterns > 0 and discovery_signal:
         tier = "medium"
         reason = "patterns_found_discovery_signal"
-        return True, tier, reason
+        false_pos = False
+        waste_cat = ""
+        structural = "healthy"
+        return True, tier, reason, false_pos, waste_cat, structural
 
     if matched_patterns > 0:
         tier = "medium"
         reason = "patterns_found_no_discovery"
-        return True, tier, reason
+        false_pos = False
+        waste_cat = ""
+        structural = "healthy"
+        return True, tier, reason, false_pos, waste_cat, structural
 
-    # Fetched but nothing matched
-    if discovery_signal and discovery_score is not None and discovery_score >= 0.5:
+    # Fetched but nothing matched — distinguish waste categories
+    if discovery_signal and discovery_score is not None and discovery_score >= _DISCOVERY_FALSE_POSITIVE_THRESHOLD:
+        # Sprint F161B: legitimate discovery signal, no pattern yield = false positive
         tier = "low"
         reason = "discovery_signal_no_patterns"
-        return False, tier, reason
+        false_pos = True
+        waste_cat = "false_positive"
+        structural = "healthy" if extracted_text_len >= _PRE_FETCH_TEXT_MIN_CHARS else "thin"
+        return False, tier, reason, false_pos, waste_cat, structural
 
     if quality_reason is not None and quality_reason.startswith("SKIP_WEAK"):
         tier = "waste"
         reason = f"quality_skip:{quality_reason}"
-        return False, tier, reason
+        false_pos = False
+        waste_cat = "structural"
+        structural = "thin"
+        return False, tier, reason, false_pos, waste_cat, structural
 
+    # Signalless waste: no discovery signal, no patterns
     tier = "waste"
     reason = quality_reason or "no_match_no_signal"
-    return False, tier, reason
+    false_pos = False
+    waste_cat = "signalless"
+    structural = "thin" if extracted_text_len < _PRE_FETCH_TEXT_MIN_CHARS else "healthy"
+    return False, tier, reason, false_pos, waste_cat, structural
 
 
 # -----------------------------------------------------------------------------
@@ -577,12 +628,13 @@ async def _fetch_and_process_page(
     async with semaphore:
         # ---- Fetch -----------------------------------------------------------
         if skip_fetch:
-            usable_signal, value_tier, resolution_reason = _compute_page_usable_fields(
+            usable_signal, value_tier, resolution_reason, discovery_false_positive, waste_category, structural_quality = _compute_page_usable_fields(
                 fetched=False, matched_patterns=0, stored_findings=0,
                 quality_reason="SKIP_WEAK:weak_discovery",
                 discovery_signal=has_signal,
                 discovery_score=discovery_score,
                 error="skipped:weak_discovery",
+                extracted_text_len=0,
             )
             return PipelinePageResult(
                 url=hit_url,
@@ -598,6 +650,9 @@ async def _fetch_and_process_page(
                 usable_signal=usable_signal,
                 value_tier=value_tier,
                 resolution_reason=resolution_reason,
+                discovery_false_positive=discovery_false_positive,
+                waste_category=waste_category,
+                structural_quality=structural_quality,
             )
 
         try:
@@ -606,11 +661,12 @@ async def _fetch_and_process_page(
                 timeout=effective_timeout + 5.0,
             )
         except asyncio.TimeoutError:
-            usable_signal, value_tier, resolution_reason = _compute_page_usable_fields(
+            usable_signal, value_tier, resolution_reason, discovery_false_positive, waste_category, structural_quality = _compute_page_usable_fields(
                 fetched=False, matched_patterns=0, stored_findings=0,
                 quality_reason=None, discovery_signal=has_signal,
                 discovery_score=discovery_score,
                 error=f"fetch_timeout_after_{effective_timeout:.1f}s",
+                extracted_text_len=0,
             )
             return PipelinePageResult(
                 url=hit_url, fetched=False, matched_patterns=0,
@@ -622,15 +678,19 @@ async def _fetch_and_process_page(
                 usable_signal=usable_signal,
                 value_tier=value_tier,
                 resolution_reason=resolution_reason,
+                discovery_false_positive=discovery_false_positive,
+                waste_category=waste_category,
+                structural_quality=structural_quality,
             )
         except asyncio.CancelledError:
             raise  # [I6] propagate, never swallow
         except Exception as exc:
-            usable_signal, value_tier, resolution_reason = _compute_page_usable_fields(
+            usable_signal, value_tier, resolution_reason, discovery_false_positive, waste_category, structural_quality = _compute_page_usable_fields(
                 fetched=False, matched_patterns=0, stored_findings=0,
                 quality_reason=None, discovery_signal=has_signal,
                 discovery_score=discovery_score,
                 error=f"fetch_exception:{type(exc).__name__}:{exc}",
+                extracted_text_len=0,
             )
             return PipelinePageResult(
                 url=hit_url, fetched=False, matched_patterns=0,
@@ -642,6 +702,9 @@ async def _fetch_and_process_page(
                 usable_signal=usable_signal,
                 value_tier=value_tier,
                 resolution_reason=resolution_reason,
+                discovery_false_positive=discovery_false_positive,
+                waste_category=waste_category,
+                structural_quality=structural_quality,
             )
 
         # Unpack fetch result (FetchResult frozen struct)
@@ -652,11 +715,12 @@ async def _fetch_and_process_page(
             fetched_text = None
 
         if not fetched_text:
-            usable_signal, value_tier, resolution_reason = _compute_page_usable_fields(
+            usable_signal, value_tier, resolution_reason, discovery_false_positive, waste_category, structural_quality = _compute_page_usable_fields(
                 fetched=True, matched_patterns=0, stored_findings=0,
                 quality_reason=None, discovery_signal=has_signal,
                 discovery_score=discovery_score,
                 error="fetch_text_none_or_empty",
+                extracted_text_len=0,
             )
             return PipelinePageResult(
                 url=hit_url, fetched=True, matched_patterns=0,
@@ -668,6 +732,9 @@ async def _fetch_and_process_page(
                 usable_signal=usable_signal,
                 value_tier=value_tier,
                 resolution_reason=resolution_reason,
+                discovery_false_positive=discovery_false_positive,
+                waste_category=waste_category,
+                structural_quality=structural_quality,
             )
 
         # ---- Extract ---------------------------------------------------------
@@ -677,11 +744,12 @@ async def _fetch_and_process_page(
                 None, _html_to_text, fetched_text
             )
         except Exception as exc:
-            usable_signal, value_tier, resolution_reason = _compute_page_usable_fields(
+            usable_signal, value_tier, resolution_reason, discovery_false_positive, waste_category, structural_quality = _compute_page_usable_fields(
                 fetched=True, matched_patterns=0, stored_findings=0,
                 quality_reason=None, discovery_signal=has_signal,
                 discovery_score=discovery_score,
                 error=f"html_extract_failed:{exc}",
+                extracted_text_len=0,
             )
             return PipelinePageResult(
                 url=hit_url, fetched=True, matched_patterns=0,
@@ -693,6 +761,9 @@ async def _fetch_and_process_page(
                 usable_signal=usable_signal,
                 value_tier=value_tier,
                 resolution_reason=resolution_reason,
+                discovery_false_positive=discovery_false_positive,
+                waste_category=waste_category,
+                structural_quality=structural_quality,
             )
 
         # Hard cap
@@ -714,11 +785,12 @@ async def _fetch_and_process_page(
 
         # Skip very-low-quality pages early — preserve fetch budget
         if quality_reason.startswith("SKIP_WEAK"):
-            usable_signal, value_tier, resolution_reason = _compute_page_usable_fields(
+            usable_signal, value_tier, resolution_reason, discovery_false_positive, waste_category, structural_quality = _compute_page_usable_fields(
                 fetched=True, matched_patterns=0, stored_findings=0,
                 quality_reason=quality_reason, discovery_signal=has_signal,
                 discovery_score=discovery_score,
                 error=None,
+                extracted_text_len=len(extracted_text),
             )
             return PipelinePageResult(
                 url=hit_url, fetched=True, matched_patterns=0,
@@ -730,6 +802,9 @@ async def _fetch_and_process_page(
                 usable_signal=usable_signal,
                 value_tier=value_tier,
                 resolution_reason=resolution_reason,
+                discovery_false_positive=discovery_false_positive,
+                waste_category=waste_category,
+                structural_quality=structural_quality,
             )
 
         # Sprint F150I: enrich extracted text with discovery metadata
@@ -753,11 +828,12 @@ async def _fetch_and_process_page(
 
         matched_count = len(hits)
         if matched_count == 0:
-            usable_signal, value_tier, resolution_reason = _compute_page_usable_fields(
+            usable_signal, value_tier, resolution_reason, discovery_false_positive, waste_category, structural_quality = _compute_page_usable_fields(
                 fetched=True, matched_patterns=0, stored_findings=0,
                 quality_reason=quality_reason, discovery_signal=has_signal,
                 discovery_score=discovery_score,
                 error=None,
+                extracted_text_len=len(extracted_text),
             )
             return PipelinePageResult(
                 url=hit_url, fetched=True, matched_patterns=0,
@@ -769,6 +845,9 @@ async def _fetch_and_process_page(
                 usable_signal=usable_signal,
                 value_tier=value_tier,
                 resolution_reason=resolution_reason,
+                discovery_false_positive=discovery_false_positive,
+                waste_category=waste_category,
+                structural_quality=structural_quality,
             )
 
         # ---- Per-page dedup: (value, label, pattern) exact dedup -----------
@@ -817,13 +896,14 @@ async def _fetch_and_process_page(
                 # Fail-soft: storage error does not fail the page
                 pass
 
-        usable_signal, value_tier, resolution_reason = _compute_page_usable_fields(
+        usable_signal, value_tier, resolution_reason, discovery_false_positive, waste_category, structural_quality = _compute_page_usable_fields(
             fetched=True, matched_patterns=matched_count,
             stored_findings=stored_count,
             quality_reason=quality_reason,
             discovery_signal=has_signal,
             discovery_score=discovery_score,
             error=None,
+            extracted_text_len=len(extracted_text),
         )
         return PipelinePageResult(
             url=hit_url,
@@ -838,6 +918,9 @@ async def _fetch_and_process_page(
             usable_signal=usable_signal,
             value_tier=value_tier,
             resolution_reason=resolution_reason,
+            discovery_false_positive=discovery_false_positive,
+            waste_category=waste_category,
+            structural_quality=structural_quality,
         )
 
 
@@ -1179,6 +1262,27 @@ async def async_run_live_public_pipeline(
         max(waste_reasons, key=lambda r: waste_reasons[r]) if waste_reasons else ""
     )
 
+    # Sprint F161B: conversion truth run-level aggregates
+    fetched_pages = [p for p in all_page_results if p.fetched]
+    fetched_count = len(fetched_pages)
+
+    discovery_false_positive_count = sum(
+        1 for p in all_page_results if getattr(p, "discovery_false_positive", False)
+    )
+
+    # waste_category_counts: aggregate from per-page waste_category
+    waste_category_counts = {"structural": 0, "signalless": 0, "false_positive": 0, "error": 0}
+    for p in all_page_results:
+        cat = getattr(p, "waste_category", "")
+        if cat in waste_category_counts:
+            waste_category_counts[cat] += 1
+
+    # structural_health_ratio: fraction of fetched pages that are structurally healthy
+    structural_health_ratio = (
+        round(sum(1 for p in fetched_pages if getattr(p, "structural_quality", "") == "healthy") / max(fetched_count, 1), 3)
+        if fetched_count > 0 else 0.0
+    )
+
     # public_proof_grade: overall proof quality of public branch run
     if usable_findings_ratio >= 0.5 and discovery_to_findings_efficiency >= 0.3:
         public_proof_grade = "strong"
@@ -1218,6 +1322,9 @@ async def async_run_live_public_pipeline(
         public_proof_grade=public_proof_grade,
         public_value_density=public_value_density,
         top_waste_pattern=top_waste_pattern,
+        discovery_false_positive_count=discovery_false_positive_count,
+        waste_category_counts=waste_category_counts,
+        structural_health_ratio=structural_health_ratio,
     )
 
 
