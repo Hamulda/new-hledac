@@ -676,10 +676,28 @@ def classify_runtime_truth(elapsed_s: float, active_iterations: int) -> str:
     """
     Classify runtime truth level based on duration and ACTIVE work.
 
+    OBSERVED-RUN / DIAGNOSTIC ONLY — non-canonical.
+
+    This taxonomy lives in root __main__.py as an *observed-run signal* for
+    CLI/banner reporting.  It is NOT the canonical runtime-truth owner.
+
+    Canonical meaningful/smoke truth is defined in:
+        hledac.universal.core.__main__._is_meaningful_run()
+        hledac.universal.core.__main__._runtime_truth()
+    Those functions return is_meaningful (bool) and runtime_truth_level
+    (smoke | meaningful | meaningful_empty | mixed) derived from cycle-level
+    scheduler data — richer and more authoritative than this module-level
+    duration heuristic.
+
+    Mapping (read-only, observational):
+      root import_probe             → correlates with canonical smoke (short, no cycles)
+      root entrypoint_smoke         → correlates with canonical smoke (no/minimal cycles)
+      root meaningful_active_probe  → correlates with canonical meaningful (real runtime)
+
     Taxonomy (E0-T4):
-      - import_probe:          elapsed < 180s (any iteration count)
-      - entrypoint_smoke:      elapsed >= 180s but active_iterations <= 1
-      - meaningful_active_probe: elapsed >= 180s AND active_iterations >= 2
+      - import_probe:              elapsed < 180s (any iteration count)
+      - entrypoint_smoke:          elapsed >= 180s but active_iterations <= 1
+      - meaningful_active_probe:   elapsed >= 180s AND active_iterations >= 2
 
     Rules:
       1. Duration < 180s → never meaningful_active_probe

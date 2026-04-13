@@ -217,14 +217,16 @@ async def export_sprint(
     public_verdict = _get_public_verdict(eh)
     signal_path = _get_signal_path(eh)
     hypothesis_pack = _get_hypothesis_pack(eh)
+    canonical_run_summary = _get_canonical_run_summary(eh)
+    sprint_verdict = _get_sprint_verdict(eh)
 
-    # Sprint F150P: derived finish-layer operator notes
-    run_truth_note = _derive_run_truth_note(runtime_truth, pvs) if pvs else ""
+    # Sprint F150P §2: enrich operator_brief with canonical_run_summary + sprint_verdict
+    run_truth_note = _derive_run_truth_note(runtime_truth, canonical_run_summary, sprint_verdict, pvs) if pvs else ""
     branch_truth = _derive_branch_truth(feed_verdict, public_verdict, branch_value)
-    best_first_move = _derive_best_first_move(runtime_truth, signal_path, pvs, correlation) if pvs else ""
-    why_this_run_matters = _derive_why_this_run_matters(runtime_truth, signal_path, hypothesis_pack, pvs, correlation) if pvs else ""
+    best_first_move = _derive_best_first_move(runtime_truth, signal_path, canonical_run_summary, sprint_verdict, pvs, correlation) if pvs else ""
+    why_this_run_matters = _derive_why_this_run_matters(runtime_truth, signal_path, hypothesis_pack, canonical_run_summary, sprint_verdict, pvs, correlation) if pvs else ""
 
-    operator_brief = _build_operator_brief(pvs, branch_value, sprint_trend, source_leaderboard, seeds_count, correlation, runtime_truth, feed_verdict, public_verdict, signal_path, hypothesis_pack) if pvs else None
+    operator_brief = _build_operator_brief(pvs, branch_value, sprint_trend, source_leaderboard, seeds_count, correlation, runtime_truth, feed_verdict, public_verdict, signal_path, hypothesis_pack, canonical_run_summary, sprint_verdict) if pvs else None
 
     return {
         "report_json": str(report_path) if report_path else "",
@@ -1166,8 +1168,45 @@ def _get_hypothesis_pack(eh: "ExportHandoff") -> dict[str, Any] | None:  # type:
     return None
 
 
+def _get_canonical_run_summary(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
+    """
+    Sprint F150P §2: canonical_run_summary z ExportHandoff.scorecard.
+
+    High-level sprint characterization produced by compute_sprint_intelligence().
+    Contains: sprint_id, total_cycles, accepted_findings, signal_verdict,
+    feed_public_balance, key_highlight, primary_theme.
+
+    Seam: scorecard["canonical_run_summary"]
+    Fail-soft: returns None when not present (older sprints).
+    """
+    scorecard = eh.scorecard if eh.scorecard else {}
+    crs = scorecard.get("canonical_run_summary")
+    if crs and isinstance(crs, dict):
+        return crs
+    return None
+
+
+def _get_sprint_verdict(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
+    """
+    Sprint F150P §2: sprint_verdict z ExportHandoff.scorecard.
+
+    Aggregated sprint quality verdict: success / partial / failed / degraded.
+    Produced by compute_sprint_intelligence() → scorecard["sprint_verdict"].
+
+    Seam: scorecard["sprint_verdict"]
+    Fail-soft: returns None when not present.
+    """
+    scorecard = eh.scorecard if eh.scorecard else {}
+    sv = scorecard.get("sprint_verdict")
+    if sv and isinstance(sv, dict):
+        return sv
+    return None
+
+
 def _derive_run_truth_note(
     runtime_truth: dict[str, Any] | None,
+    canonical_run_summary: dict[str, Any] | None,
+    sprint_verdict: dict[str, Any] | None,
     pvs: dict[str, Any],
 ) -> str:
     """
@@ -1175,13 +1214,27 @@ def _derive_run_truth_note(
 
     One-liner: meaningful_run vs smoke_vs_import vs entrypoint_smoke vs unknown.
 
-    Reads:
+    Reads (priority order):
+    - sprint_verdict["verdict"] (most synthesized) — F150P §2
+    - canonical_run_summary["signal_verdict"] — high-level sprint verdict
     - runtime_truth["is_meaningful"] (bool) — primary signal
     - runtime_truth["evidence_note"] (str) — contextual note
     - pvs.signal_quality as fallback when runtime_truth unavailable
 
     Fail-soft: falls back to signal_quality-based characterization.
     """
+    # F150P §2: sprint_verdict is most synthesized — check first
+    if sprint_verdict:
+        verdict = sprint_verdict.get("verdict") or sprint_verdict.get("sprint_status") or ""
+        if verdict and len(verdict) > 2:
+            return f"sprint_verdict={verdict}"
+
+    # canonical_run_summary signal_verdict as secondary
+    if canonical_run_summary:
+        sig_verdict = canonical_run_summary.get("signal_verdict") or ""
+        if sig_verdict and len(sig_verdict) > 2:
+            return f"signal={sig_verdict}"
+
     if runtime_truth:
         is_meaningful = runtime_truth.get("is_meaningful")
         evidence_note = runtime_truth.get("evidence_note") or ""
@@ -1253,6 +1306,8 @@ def _derive_branch_truth(
 def _derive_best_first_move(
     runtime_truth: dict[str, Any] | None,
     signal_path: dict[str, Any] | None,
+    canonical_run_summary: dict[str, Any] | None,
+    sprint_verdict: dict[str, Any] | None,
     pvs: dict[str, Any],
     correlation: dict[str, Any] | None,
 ) -> str:
@@ -1260,33 +1315,46 @@ def _derive_best_first_move(
     Sprint F150P §1: best_first_move — immediate next action (single sentence).
 
     Priority order:
-    1. High-risk findings → investigate high-risk branch
-    2. runtime_truth is_meaningful=False → pivot immediately
-    3. signal_path next_pivot_recommendation=pivot_immediately
-    4. pvs signal quality guidance
-    5. correlation operator_shortlist first item
+    1. sprint_verdict["recommended_action"] — F150P §2, most synthesized
+    2. High-risk findings → investigate high-risk branch
+    3. runtime_truth is_meaningful=False → pivot immediately
+    4. signal_path next_pivot_recommendation=pivot_immediately
+    5. pvs signal quality guidance
+    6. correlation operator_shortlist first item
 
     Single sentence, max 80 chars.
     """
-    # 1. High-risk first
+    # 1. sprint_verdict recommended action (F150P §2)
+    if sprint_verdict:
+        rec_action = sprint_verdict.get("recommended_action") or sprint_verdict.get("next_action") or ""
+        if rec_action and len(rec_action) > 2:
+            return f"action: {rec_action[:80]}"
+
+    # 2. High-risk first
     if correlation:
         high_risk = correlation.get("high_risk_branch") or correlation.get("high_risk") or []
         if high_risk and len(high_risk) > 0:
             return "investigate high-risk branch — critical findings present"
 
-    # 2. Non-meaningful run → pivot
+    # 3. Non-meaningful run → pivot
     if runtime_truth:
         is_meaningful = runtime_truth.get("is_meaningful")
         if is_meaningful is False:
             return "pivot: sprint was smoke, change approach immediately"
 
-    # 3. Signal path next pivot
+    # 4. Signal path next pivot
     if signal_path:
         next_pivot = signal_path.get("next_pivot_recommendation", "")
         if next_pivot == "pivot_immediately":
             return "pivot: signal path recommends immediate pivot"
 
-    # 4. pvs signal guidance
+    # 5. canonical_run_summary next_action
+    if canonical_run_summary:
+        na = canonical_run_summary.get("next_action") or canonical_run_summary.get("recommended_action") or ""
+        if na and len(na) > 2:
+            return f"action: {na[:80]}"
+
+    # 6. pvs signal guidance
     signal = pvs.get("signal_quality", "unknown")
     if signal == "depleted":
         return "new approach: current query space exhausted"
@@ -1297,7 +1365,7 @@ def _derive_best_first_move(
     elif signal == "slow_novelty":
         return "accelerate: real signal exists, speed up sources"
 
-    # 5. Correlation operator shortlist
+    # 7. Correlation operator shortlist
     if correlation:
         shortlist = correlation.get("operator_shortlist") or []
         if shortlist and isinstance(shortlist, list) and len(shortlist) > 0:
@@ -1315,6 +1383,8 @@ def _derive_why_this_run_matters(
     runtime_truth: dict[str, Any] | None,
     signal_path: dict[str, Any] | None,
     hypothesis_pack: dict[str, Any] | None,
+    canonical_run_summary: dict[str, Any] | None,
+    sprint_verdict: dict[str, Any] | None,
     pvs: dict[str, Any],
     correlation: dict[str, Any] | None,
 ) -> str:
@@ -1323,15 +1393,30 @@ def _derive_why_this_run_matters(
 
     Tells operator why this sprint's output matters for future decisions.
 
-    Reads:
+    Reads (priority order):
+    - sprint_verdict["why_matters"] — F150P §2, most synthesized
+    - sprint_verdict["significance"] — F150P §2
+    - canonical_run_summary["key_highlight"] — primary theme highlight
+    - correlation["so_what"] — correlation verdict
+    - hypothesis_pack["what_matters_first"]
     - runtime_truth["primary_signal_source"]
     - signal_path["dominant_signal_path"]
-    - hypothesis_pack["what_matters_first"]
-    - correlation["so_what"]
     - pvs.signal_quality + accepted count
 
     Max 100 chars.
     """
+    # F150P §2: sprint_verdict most synthesized — check first
+    if sprint_verdict:
+        why = sprint_verdict.get("why_matters") or sprint_verdict.get("significance") or ""
+        if why and len(why) > 3:
+            return why[:100]
+
+    # canonical_run_summary key_highlight
+    if canonical_run_summary:
+        kh = canonical_run_summary.get("key_highlight") or ""
+        if kh and len(kh) > 3:
+            return kh[:100]
+
     # Priority: correlation so_what (most synthesized)
     if correlation:
         so_what = correlation.get("so_what") or ""
@@ -1389,6 +1474,8 @@ def _build_operator_brief(
     public_verdict: dict[str, Any] | None = None,
     signal_path: dict[str, Any] | None = None,
     hypothesis_pack: dict[str, Any] | None = None,
+    canonical_run_summary: dict[str, Any] | None = None,
+    sprint_verdict: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Sprint F150L: Praktický operator brief — co sprint našel, která branch nesla signál,
@@ -1537,6 +1624,8 @@ def _build_operator_brief(
         "public_verdict": public_verdict,
         "signal_path": signal_path,
         "hypothesis_pack": hypothesis_pack,
+        "canonical_run_summary": canonical_run_summary,
+        "sprint_verdict": sprint_verdict,
     }
 
 

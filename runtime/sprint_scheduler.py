@@ -423,6 +423,8 @@ class SprintScheduler:
         self._arrow_batch: list[dict] = []
         self._arrow_last_flush: float = 0.0
         self._duckdb_read_con: Optional[Any] = None
+        # Sprint 8BK: Wall-clock start for duration budget guard
+        self._wall_clock_start: float = 0.0
         self._ARROW_FLUSH_N: int = 1000
         self._ARROW_FLUSH_S: float = 60.0
         self._fetch_semaphore: asyncio.Semaphore = asyncio.Semaphore(20)
@@ -530,6 +532,9 @@ class SprintScheduler:
         # Sprint 8SA: Store adapter for all lifecycle access in this run
         self._lc_adapter = adapter
 
+        # Sprint 8BK: Record wall-clock start for duration budget guard
+        self._wall_clock_start = _time.monotonic()
+
         # Initial tick to enter ACTIVE
         phase = adapter.tick(now_monotonic)
 
@@ -599,6 +604,18 @@ class SprintScheduler:
                     break
 
                 self._result.cycles_started += 1
+                # Sprint 8BK: Wall-clock duration guard — catches cases where lifecycle
+                # remaining_time() does not decrease between cycles (e.g. async tick gap).
+                # Force-enter-windup if wall-clock exceeds sprint_duration_s + grace.
+                # Grace = one cycle budget; prevents false trigger on exact boundary.
+                elapsed_wall = _time.monotonic() - self._wall_clock_start
+                if elapsed_wall > self._config.sprint_duration_s + self._config.cycle_sleep_s:
+                    log.warning(
+                        f"[8BK] Duration budget exceeded: {elapsed_wall:.1f}s "
+                        f"> {self._config.sprint_duration_s + self._config.cycle_sleep_s:.1f}s "
+                        f"(grace={self._config.cycle_sleep_s:.1f}s). Forcing windup."
+                    )
+                    break
                 # Sprint 8XE: Store sources for public discovery query hint
                 self._last_sources = list(ordered_sources)
                 cycle_ok = await self._run_one_cycle(
@@ -2400,6 +2417,20 @@ class SprintScheduler:
             # decision_pressure: high when posture != "corroborated" but findings > 0
             decision_pressure = "high" if posture in ("noisy", "mixed") and total_findings > 0 else "low"
 
+            # Sprint F155: Second-order branch conversion health
+            # Derived: is_corroborated × corroboration_score × (1 - avg_noise)
+            avg_noise = pub_v.get("avg_noise_fetch_ratio", 0.0)
+            branch_conversion_health = round(
+                (1.0 if is_corroborated else 0.0) * corroboration_score * (1.0 - avg_noise), 3
+            )
+
+            # Sprint F155: Second-order discovery efficiency
+            # Derived: total_findings / (1 + squandered) — ratio of usable signal vs. waste
+            total_squandered = pub_v.get("total_discovery_squandered", 0) or 0
+            discovery_efficiency = round(
+                total_findings / (1 + total_squandered), 3
+            ) if total_findings > 0 else 0.0
+
             result["sprint_verdict"] = {
                 "posture": posture,
                 "dominant_signal": dominant_signal,
@@ -2423,6 +2454,9 @@ class SprintScheduler:
                 "proof_grade": proof_grade,
                 "operator_ready": operator_ready,
                 "decision_pressure": decision_pressure,
+                # Sprint F155: second-order derived (from pub_v + sig_path)
+                "branch_conversion_health": branch_conversion_health,
+                "discovery_efficiency": discovery_efficiency,
             }
         except Exception:
             # Second-order condensation is purely additive — never crashes

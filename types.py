@@ -1595,14 +1595,18 @@ class ExportHandoff:
     Canonical handoff from windup phase to export phase.
 
     Fields:
-        sprint_id:         Sprint identifier
-        scorecard:         Scorecard dict (existing windup output)
-        ranked_parquet:    Path to ranked parquet file (or None)
-        synthesis_engine:  Synthesis engine used
-        gnn_predictions:   GNN prediction count
-        top_nodes:         Top IOC graph nodes
-        phase_durations:  Phase timing dict
-        correlation:       Run correlation context
+        sprint_id:                Sprint identifier
+        scorecard:                Scorecard dict (existing windup output)
+        ranked_parquet:           Path to ranked parquet file (or None)
+        synthesis_engine:         Synthesis engine used
+        gnn_predictions:          GNN prediction count
+        top_nodes:                Top IOC graph nodes
+        phase_durations:           Phase timing dict
+        correlation:              Run correlation context
+        runtime_truth:            Canonical runtime-truth record (additive)
+        execution_context:        Empirical run boundary record (additive)
+        canonical_run_summary:    CHECKPOINT-0 enriched operator summary (additive)
+        synthesis_outcome_payload: Serialized SynthesisOutcome seam (additive)
 
     NOTE: This is a COMPAT handoff — wraps existing dict-based scorecard.
     The scorecard dict is the current canonical form; this scaffold provides
@@ -1619,6 +1623,11 @@ class ExportHandoff:
     top_nodes: List[Any] = field(default_factory=list)
     phase_durations: Dict[str, float] = field(default_factory=dict)
     correlation: Optional[RunCorrelation] = None
+    # Sprint F155: Canonical truth enrichment — additive payload from same run
+    runtime_truth: Dict[str, Any] = field(default_factory=dict)
+    execution_context: Dict[str, Any] = field(default_factory=dict)
+    canonical_run_summary: Dict[str, Any] = field(default_factory=dict)
+    synthesis_outcome_payload: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_windup(

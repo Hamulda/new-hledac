@@ -199,6 +199,38 @@ class SynthesisOutcome(msgspec.Struct):
     operator_note: str     # short human-readable note
 
 
+def synthesis_outcome_to_dict(outcome: SynthesisOutcome) -> dict:
+    """
+    Sprint F151A: Lightweight export seam over SynthesisOutcome.
+
+    Maps to preferred export-friendly keys:
+      status, primary_reason, engine, backend,
+      lifecycle_gate_source, lifecycle_gate_mode,
+      report_present, degraded, operator_note
+
+    Fail-soft: returns a minimal dict even on AttributeError or None.
+    """
+    if outcome is None:
+        return {"status": "unknown", "primary_reason": "no_outcome", "operator_note": ""}
+    try:
+        return {
+            "status": outcome.status,
+            "primary_reason": outcome.primary_reason,
+            "engine": outcome.engine_used,
+            "backend": outcome.stix_backend,
+            "lifecycle_gate_source": outcome.lifecycle_gate_source,
+            "lifecycle_gate_mode": outcome.lifecycle_gate_mode,
+            "report_present": outcome.report_produced,
+            "degraded": (
+                outcome.stix_status != "available"
+                or outcome.primary_reason not in ("success", "unknown")
+            ),
+            "operator_note": outcome.operator_note,
+        }
+    except AttributeError:
+        return {"status": "unknown", "primary_reason": "attr_error", "operator_note": ""}
+
+
 class IOCEntity(msgspec.Struct):
     """Jedna IOC entita extrahovaná z findingu."""
     value: str

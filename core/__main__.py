@@ -472,16 +472,27 @@ async def run_sprint(
             else "smoke"
         )
 
+        # CHECKPOINT-0 taxonomy (Sprint F155)
         _ckpt_category = (
-            "depleted" if result.accepted_findings == 0 and result.total_pattern_hits == 0
-            else "active" if result.accepted_findings > 0
-            else "signal_search" if result.total_pattern_hits > 0
+            "signal_reaches_findings"
+            if result.accepted_findings > 0
+            else "depleted"
+            if result.accepted_findings == 0 and result.total_pattern_hits == 0
+            else "windup_export_fail_soft"
+            if result.accepted_findings == 0 and _phase_times.get("WINDUP", 0) > 0
+            else "authority_census"
+            if not is_meaningful
             else "unknown"
         )
         _checkpoint_zero_reason = (
-            evidence_note if not is_meaningful
-            else "depleted_no_pattern_hits" if result.accepted_findings == 0 and result.total_pattern_hits == 0
-            else "public_only" if result.accepted_findings == 0 and result.public_discovered > 0
+            evidence_note
+            if not is_meaningful
+            else "signal_reaches_findings"
+            if result.accepted_findings > 0
+            else "depleted_no_pattern_hits"
+            if result.total_pattern_hits == 0
+            else "public_only"
+            if result.public_discovered > 0
             else "unknown"
         )
         _export_finish_status = (
@@ -596,6 +607,9 @@ async def run_sprint(
             except Exception:
                 pass
 
+            # Sprint F155: Determine handoff enrichment level (canonical_run_summary built inline)
+            _handoff_enriched = bool(runtime_truth and intel)
+
             handoff = ExportHandoff(
                 sprint_id=sprint_id,
                 scorecard={
@@ -612,7 +626,56 @@ async def run_sprint(
                     ph: round(_phase_times.get(ph, 0) - _phase_times.get("BOOT", 0), 2)
                     for ph in phases if ph in _phase_times
                 },
+                # Sprint F155: Canonical truth enrichment — additive, derived-only
+                runtime_truth=runtime_truth,
+                execution_context={
+                    "query": query,
+                    "requested_duration_s": duration_s,
+                    "actual_duration_s": round(actual_duration, 2),
+                    "source_count": len(_SPRINT_FEED_SOURCES),
+                    "sources": _SPRINT_FEED_SOURCES,
+                    "platform": {
+                        "python_version": __import__("sys").version.split()[0],
+                        "macos_version": __import__("platform").mac_ver()[0] or "unknown",
+                    },
+                    "report_path": str(report_path),
+                    "git_snapshot": "unknown",
+                    "export_dir": export_dir,
+                },
+                # Sprint F155: canonical_run_summary inline (already computed in report_dict)
+                canonical_run_summary={
+                    "meaningful": runtime_truth["is_meaningful"],
+                    "primary_signal": runtime_truth["primary_signal_source"],
+                    "posture": (intel.get("sprint_verdict") or {}).get("posture", "unknown"),
+                    "dominant_signal_path": (intel.get("signal_path") or {}).get("dominant_signal_path", "unknown"),
+                    "corroborated": (intel.get("signal_path") or {}).get("is_corroborated", False),
+                    "is_noisy": (intel.get("signal_path") or {}).get("is_noisy", False),
+                    "next_pivot": (intel.get("signal_path") or {}).get("next_pivot_recommendation", "unknown"),
+                    "branch_verdict": (intel.get("branch_value") or {}).get("branch_verdict", "unknown"),
+                    "risk_score": (intel.get("correlation") or {}).get("risk_score", 0.0),
+                    "hypothesis_count": (intel.get("hypothesis_pack") or {}).get("hypothesis_count", 0),
+                    "first_action": (intel.get("sprint_verdict") or {}).get("first_action", ""),
+                    "confidence": (intel.get("sprint_verdict") or {}).get("confidence", ""),
+                    "runtime_truth_level": runtime_truth_level,
+                    "checkpoint_zero_category": _ckpt_category,
+                    "checkpoint_zero_reason": _checkpoint_zero_reason,
+                    "observed_run_tuple": observed_run_tuple,
+                    "canonical_sprint_owner": "core.__main__.run_sprint",
+                    "canonical_path_used": "run_sprint",
+                    "effective_source_mix": src_mix_str,
+                    "effective_parallelism": len(_SPRINT_FEED_SOURCES),
+                    "effective_timeouts": {},
+                    "active_iteration_count": active_iterations,
+                    "export_finish_layer_status": _export_finish_status,
+                },
+                synthesis_outcome_payload=None,  # synthesis_runner not exposed on lifecycle/scheduler
             )
+
+            # Sprint F155: Log enrichment level
+            logger.info(
+                f"[EXPORT] {'fully_enriched' if _handoff_enriched else 'degraded'} → sprint_id={sprint_id}"
+            )
+
             export_result = await export_sprint(store=store, handoff=handoff, sprint_id=sprint_id)
             logger.info(f"[EXPORT] finish layer → seeds={export_result.get('seeds_json','')}")
         except Exception as ex:

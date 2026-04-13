@@ -960,11 +960,15 @@ async def async_fetch_feed_entries(
     parsed = _parse_feed_xml(result.text, feed_url, retrieved_ts)
 
     if not parsed and result.text.strip():
-        # Non-empty text but nothing parsed → malformed
+        # Distinguish HTML (likely dead/moved feed) from genuinely malformed XML.
+        # HTML pages typically start with <!DOCTYPE or <html; XML with <?xml or <rss/<feed.
+        stripped = result.text.strip()
+        starts_html = stripped.startswith(("<!DOCTYPE", "<html"))
+        error_tag = "xml_parse_error" if not starts_html else "fetch_returned_html_not_xml"
         return FeedBatchResult(
             feed_url=feed_url,
             entries=(),
-            error="xml_parse_error",
+            error=error_tag,
         )
 
     # Deduplicate (preserve-first within this feed)
