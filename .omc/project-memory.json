@@ -634,21 +634,87 @@
   },
   "hotPaths": [
     {
+      "path": "",
+      "accessCount": 43,
+      "lastAccessed": 1775829725452,
+      "type": "directory"
+    },
+    {
+      "path": "tests/probe_8vk_shadow_parity.py",
+      "accessCount": 36,
+      "lastAccessed": 1775152834279,
+      "type": "file"
+    },
+    {
+      "path": "__main__.py",
+      "accessCount": 27,
+      "lastAccessed": 1775916240856,
+      "type": "file"
+    },
+    {
+      "path": "runtime/shadow_pre_decision.py",
+      "accessCount": 23,
+      "lastAccessed": 1775575181450,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_f2b/test_correlation_grammar_hardening_across_tool_audit_and_metrics.py",
+      "accessCount": 19,
+      "lastAccessed": 1775267283201,
+      "type": "file"
+    },
+    {
+      "path": "runtime/sprint_scheduler.py",
+      "accessCount": 15,
+      "lastAccessed": 1775852048505,
+      "type": "file"
+    },
+    {
+      "path": "GRAPH_BACKEND_RECONCILIATION.md",
+      "accessCount": 13,
+      "lastAccessed": 1775165731136,
+      "type": "file"
+    },
+    {
       "path": "LIFECYCLE_CONVERGENCE.md",
       "accessCount": 12,
       "lastAccessed": 1775129311811,
       "type": "file"
     },
     {
-      "path": "runtime/shadow_pre_decision.py",
-      "accessCount": 8,
-      "lastAccessed": 1775143158954,
+      "path": "tests/probe_f10b/test_pii_token_normalization.py",
+      "accessCount": 12,
+      "lastAccessed": 1775258121018,
       "type": "file"
     },
     {
-      "path": "runtime/sprint_scheduler.py",
+      "path": "tests/probe_8f7/test_graph_capability_closure.py",
+      "accessCount": 11,
+      "lastAccessed": 1775165770881,
+      "type": "file"
+    },
+    {
+      "path": "security/pii_gate.py",
+      "accessCount": 11,
+      "lastAccessed": 1775517744235,
+      "type": "file"
+    },
+    {
+      "path": "export/sprint_exporter.py",
+      "accessCount": 11,
+      "lastAccessed": 1775821010016,
+      "type": "file"
+    },
+    {
+      "path": "capabilities.py",
+      "accessCount": 8,
+      "lastAccessed": 1775560927457,
+      "type": "directory"
+    },
+    {
+      "path": "tests/test_retrieval_role_separation.py",
       "accessCount": 7,
-      "lastAccessed": 1775143268038,
+      "lastAccessed": 1775152860176,
       "type": "file"
     },
     {
@@ -670,21 +736,39 @@
       "type": "file"
     },
     {
-      "path": "export/sprint_exporter.py",
-      "accessCount": 4,
-      "lastAccessed": 1775133992856,
+      "path": "tests/probe_8vy/test_retrieval_consumer_separation.py",
+      "accessCount": 5,
+      "lastAccessed": 1775162238199,
       "type": "file"
+    },
+    {
+      "path": "tests/probe_8se/test_execution_context_prewire.py",
+      "accessCount": 5,
+      "lastAccessed": 1775165665761,
+      "type": "file"
+    },
+    {
+      "path": "brain/model_lifecycle.py",
+      "accessCount": 5,
+      "lastAccessed": 1775852031782,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8tf/test_ghost_global_seam.py",
+      "accessCount": 4,
+      "lastAccessed": 1775155288240,
+      "type": "file"
+    },
+    {
+      "path": "tests",
+      "accessCount": 4,
+      "lastAccessed": 1775662385252,
+      "type": "directory"
     },
     {
       "path": "tests/probe_8se/test_capability_enforcement.py",
       "accessCount": 3,
       "lastAccessed": 1775096419670,
-      "type": "file"
-    },
-    {
-      "path": "__main__.py",
-      "accessCount": 3,
-      "lastAccessed": 1775131971966,
       "type": "file"
     },
     {
@@ -701,9 +785,21 @@
     },
     {
       "path": "export/COMPAT_HANDOFF.py",
-      "accessCount": 2,
-      "lastAccessed": 1775134034828,
+      "accessCount": 3,
+      "lastAccessed": 1775298625547,
       "type": "file"
+    },
+    {
+      "path": "tests/conftest.py",
+      "accessCount": 3,
+      "lastAccessed": 1775309364744,
+      "type": "file"
+    },
+    {
+      "path": "enhanced_research.py",
+      "accessCount": 3,
+      "lastAccessed": 1775852031983,
+      "type": "directory"
     },
     {
       "path": "brain/synthesis_runner.py",
@@ -712,10 +808,40 @@
       "type": "directory"
     },
     {
-      "path": "",
-      "accessCount": 1,
-      "lastAccessed": 1775128822166,
-      "type": "directory"
+      "path": "tests/probe_8wa/test_truth_write_graph_slot.py",
+      "accessCount": 2,
+      "lastAccessed": 1775155273626,
+      "type": "file"
+    },
+    {
+      "path": "TOOL_CAPABILITY_EXECUTION_ENFORCEMENT.md",
+      "accessCount": 2,
+      "lastAccessed": 1775165725645,
+      "type": "file"
+    },
+    {
+      "path": "AUDIT_SOURCE_TRANSPORT_SESSION.md",
+      "accessCount": 2,
+      "lastAccessed": 1775167860998,
+      "type": "file"
+    },
+    {
+      "path": "execution/ghost_executor.py",
+      "accessCount": 2,
+      "lastAccessed": 1775235586731,
+      "type": "file"
+    },
+    {
+      "path": "security/__init__.py",
+      "accessCount": 2,
+      "lastAccessed": 1775517341713,
+      "type": "file"
+    },
+    {
+      "path": "tools/__init__.py",
+      "accessCount": 2,
+      "lastAccessed": 1775685524913,
+      "type": "file"
     },
     {
       "path": "tests/probe_8vx/test_lifecycle_convergence.py",
@@ -739,6 +865,72 @@
       "path": "tests/probe_8th/test_stix_degradation_not_silent.py",
       "accessCount": 1,
       "lastAccessed": 1775136563444,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_8vy/test_shell_boundary_cleanup.py",
+      "accessCount": 1,
+      "lastAccessed": 1775162164544,
+      "type": "file"
+    },
+    {
+      "path": "tools/url_dedup.py",
+      "accessCount": 1,
+      "lastAccessed": 1775235581799,
+      "type": "file"
+    },
+    {
+      "path": "tests/probe_f5/test_export_boundary_cleanup.py",
+      "accessCount": 1,
+      "lastAccessed": 1775248265605,
+      "type": "file"
+    },
+    {
+      "path": "security/vault_manager.py",
+      "accessCount": 1,
+      "lastAccessed": 1775251169038,
+      "type": "directory"
+    },
+    {
+      "path": "tests/probe_f10/test_security_privacy_forensics_boundary_sealing.py",
+      "accessCount": 1,
+      "lastAccessed": 1775251269084,
+      "type": "file"
+    },
+    {
+      "path": "security/stego_detector.py",
+      "accessCount": 1,
+      "lastAccessed": 1775251381409,
+      "type": "directory"
+    },
+    {
+      "path": "tests/probe_8ab",
+      "accessCount": 1,
+      "lastAccessed": 1775257949727,
+      "type": "directory"
+    },
+    {
+      "path": "tests/probe_8ab/test_sprint_8ab.py",
+      "accessCount": 1,
+      "lastAccessed": 1775257955534,
+      "type": "file"
+    },
+    {
+      "path": "autonomous_orchestrator.py",
+      "accessCount": 1,
+      "lastAccessed": 1775258067980,
+      "type": "directory"
+    },
+    {
+      "path": "knowledge/__init__.py",
+      "accessCount": 1,
+      "lastAccessed": 1775258082117,
+      "type": "file"
+    },
+    {
+      "path": "tests/test_autonomous_orchestrator.py",
+      "accessCount": 1,
+      "lastAccessed": 1775258199647,
       "type": "file"
     }
   ],

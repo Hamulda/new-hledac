@@ -63,6 +63,7 @@ ENTRYPOINT_AUTHORITY = {
         "_run_sprint_mode": {
             "location": "hledac.universal.__main__._run_sprint_mode",
             "production_status": "alternate",
+            "non_canonical": True,  # Freeze F153: not a truth owner, residual path only
             "allowed_purpose": "legacy sprint hot-path; prefer canonical owner",
         }
     },

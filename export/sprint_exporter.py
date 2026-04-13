@@ -219,14 +219,16 @@ async def export_sprint(
     hypothesis_pack = _get_hypothesis_pack(eh)
     canonical_run_summary = _get_canonical_run_summary(eh)
     sprint_verdict = _get_sprint_verdict(eh)
+    # Sprint F157: synthesis_outcome_payload reader
+    synthesis_outcome_payload = _get_synthesis_outcome_payload(eh)
 
-    # Sprint F150P §2: enrich operator_brief with canonical_run_summary + sprint_verdict
+    # Sprint F150P §2 + F157: enrich operator_brief with canonical_run_summary + sprint_verdict
     run_truth_note = _derive_run_truth_note(runtime_truth, canonical_run_summary, sprint_verdict, pvs) if pvs else ""
     branch_truth = _derive_branch_truth(feed_verdict, public_verdict, branch_value)
     best_first_move = _derive_best_first_move(runtime_truth, signal_path, canonical_run_summary, sprint_verdict, pvs, correlation) if pvs else ""
     why_this_run_matters = _derive_why_this_run_matters(runtime_truth, signal_path, hypothesis_pack, canonical_run_summary, sprint_verdict, pvs, correlation) if pvs else ""
 
-    operator_brief = _build_operator_brief(pvs, branch_value, sprint_trend, source_leaderboard, seeds_count, correlation, runtime_truth, feed_verdict, public_verdict, signal_path, hypothesis_pack, canonical_run_summary, sprint_verdict) if pvs else None
+    operator_brief = _build_operator_brief(pvs, branch_value, sprint_trend, source_leaderboard, seeds_count, correlation, runtime_truth, feed_verdict, public_verdict, signal_path, hypothesis_pack, canonical_run_summary, sprint_verdict, synthesis_outcome_payload) if pvs else None
 
     return {
         "report_json": str(report_path) if report_path else "",
@@ -1033,28 +1035,43 @@ def _get_source_leaderboard(store: Any, days: int = 7) -> list[dict]:
 
 def _get_correlation_from_handoff(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
     """
-    Sprint F150M: Extract correlation dict from ExportHandoff.
+    Sprint F150M + F157: correlation — handoff-first truth order.
 
-    Correlation flows: workflow_orchestrator.correlate_findings() → scorecard dict
-    (via compute_sprint_intelligence in sprint_scheduler or __main__ windup path).
+    Truth order (priority):
+      1. eh.correlation (typed RunCorrelation) → converted to dict — handoff-first
+      2. eh.scorecard["correlation"] — scorecard-only builds
+      3. eh.scorecard["so_what"], scorecard["dominant_cluster"] etc. — legacy scorecard keys
 
-    Seam: scorecard["correlation"] — primary source.
-    Fallback: scorecard["so_what"], scorecard["dominant_cluster"] etc. directly.
+    RunCorrelation is typed but downstream (_build_operator_brief) expects dict.
+    Convert via asdict() — msgspec Struct semantics guarantee zero-copy.
+
     Fail-soft: returns None when correlation unavailable (older sprints).
-
     NO new store reads. NO new persistence. NO new planner.
     """
+    # Priority 1: typed eh.correlation (handoff-first canonical surface)
+    if eh.correlation is not None:
+        rc = eh.correlation
+        # RunCorrelation is a plain attrs class — extract fields manually
+        result: dict[str, Any] = {}
+        if rc.run_id is not None:
+            result["run_id"] = rc.run_id
+        if rc.branch_id is not None:
+            result["branch_id"] = rc.branch_id
+        if rc.provider_id is not None:
+            result["provider_id"] = rc.provider_id
+        if rc.action_id is not None:
+            result["action_id"] = rc.action_id
+        return result if result else None
+
+    # Priority 2: scorecard["correlation"] dict
     scorecard = eh.scorecard if eh.scorecard else {}
     if not scorecard:
         return None
-
-    # Primary: correlation dict from scorecard["correlation"]
     corr = scorecard.get("correlation") or scorecard.get("run_correlation")
     if corr and isinstance(corr, dict):
         return corr
 
-    # Fallback: individual correlation fields at scorecard root
-    # (older sprint builds that put so_what/dominant_cluster directly in scorecard)
+    # Priority 3: legacy scorecard root fields
     so_what = scorecard.get("so_what") or ""
     dominant_cluster = scorecard.get("dominant_cluster") or scorecard.get("cluster") or ""
     campaign_hints = scorecard.get("campaign_hints") or []
@@ -1063,7 +1080,7 @@ def _get_correlation_from_handoff(eh: "ExportHandoff") -> dict[str, Any] | None:
     verdict = scorecard.get("verdict") or scorecard.get("risk_verdict") or ""
 
     if so_what or dominant_cluster or campaign_hints or high_risk:
-        result: dict[str, Any] = {}
+        result = {}
         if so_what:
             result["so_what"] = so_what
         if dominant_cluster:
@@ -1083,16 +1100,25 @@ def _get_correlation_from_handoff(eh: "ExportHandoff") -> dict[str, Any] | None:
 
 def _get_runtime_truth(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
     """
-    Sprint F150P: runtime_truth z ExportHandoff.scorecard.
+    Sprint F150P + F157: runtime_truth — handoff-first truth order.
 
-    compute_sprint_intelligence() v scheduleru produkuje kompletní runtime_truth dict.
-    Ten se pak ukládá do scorecard["runtime_truth"] v __main__ windup path.
+    Truth order (priority):
+      1. eh.top_level["runtime_truth"] — primary canonical surface
+      2. eh.scorecard["runtime_truth"] — fallback pro scorecard-only builds
+      3. eh.scorecard["run_truth"] — legacy scorecard key
 
-    Seam: scorecard["runtime_truth"]
+    compute_sprint_intelligence() v scheduleru produkuje runtime_truth dict
+    a ukládá ho do scorecard["runtime_truth"]. Windup path ho také kopíruje
+    do eh.top_level["runtime_truth"] (typed ExportHandoff konstruktor).
+
     Fail-soft: returns None when not present (older sprints, smoke runs).
-
     NO new store reads. NO new planner. NO write-back.
     """
+    # Priority 1: top-level canonical surface
+    rt = eh.runtime_truth if eh.runtime_truth else None
+    if rt and isinstance(rt, dict):
+        return rt
+    # Priority 2 & 3: scorecard fallback (legacy / scorecard-only builds)
     scorecard = eh.scorecard if eh.scorecard else {}
     rt = scorecard.get("runtime_truth") or scorecard.get("run_truth")
     if rt and isinstance(rt, dict):
@@ -1170,15 +1196,23 @@ def _get_hypothesis_pack(eh: "ExportHandoff") -> dict[str, Any] | None:  # type:
 
 def _get_canonical_run_summary(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
     """
-    Sprint F150P §2: canonical_run_summary z ExportHandoff.scorecard.
+    Sprint F150P §2 + F157: canonical_run_summary — handoff-first truth order.
+
+    Truth order (priority):
+      1. eh.top_level["canonical_run_summary"] — primary canonical surface
+      2. eh.scorecard["canonical_run_summary"] — fallback pro scorecard-only builds
 
     High-level sprint characterization produced by compute_sprint_intelligence().
     Contains: sprint_id, total_cycles, accepted_findings, signal_verdict,
     feed_public_balance, key_highlight, primary_theme.
 
-    Seam: scorecard["canonical_run_summary"]
     Fail-soft: returns None when not present (older sprints).
     """
+    # Priority 1: top-level canonical surface
+    crs = eh.canonical_run_summary if eh.canonical_run_summary else None
+    if crs and isinstance(crs, dict):
+        return crs
+    # Priority 2: scorecard fallback (legacy / scorecard-only builds)
     scorecard = eh.scorecard if eh.scorecard else {}
     crs = scorecard.get("canonical_run_summary")
     if crs and isinstance(crs, dict):
@@ -1188,18 +1222,49 @@ def _get_canonical_run_summary(eh: "ExportHandoff") -> dict[str, Any] | None:  #
 
 def _get_sprint_verdict(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
     """
-    Sprint F150P §2: sprint_verdict z ExportHandoff.scorecard.
+    Sprint F150P §2 + F157: sprint_verdict — handoff-first truth order.
+
+    Truth order (priority):
+      1. eh.top_level["sprint_verdict"] — primary canonical surface
+      2. eh.scorecard["sprint_verdict"] — fallback pro scorecard-only builds
 
     Aggregated sprint quality verdict: success / partial / failed / degraded.
     Produced by compute_sprint_intelligence() → scorecard["sprint_verdict"].
 
-    Seam: scorecard["sprint_verdict"]
     Fail-soft: returns None when not present.
     """
+    # Priority 1: top-level canonical surface
+    sv = eh.sprint_verdict if eh.sprint_verdict else None
+    if sv and isinstance(sv, dict):
+        return sv
+    # Priority 2: scorecard fallback (legacy / scorecard-only builds)
     scorecard = eh.scorecard if eh.scorecard else {}
     sv = scorecard.get("sprint_verdict")
     if sv and isinstance(sv, dict):
         return sv
+    return None
+
+
+def _get_synthesis_outcome_payload(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
+    """
+    Sprint F157: synthesis_outcome_payload — handoff-first truth order.
+
+    Truth order (priority):
+      1. eh.top_level["synthesis_outcome_payload"] — primary canonical surface
+      2. eh.scorecard["synthesis_outcome_payload"] — fallback pro scorecard-only builds
+
+    Serialized SynthesisOutcome seam from synthesis_runner.
+    Fail-soft: returns None when not present (synthesis not run, or older builds).
+    """
+    # Priority 1: top-level canonical surface
+    sop = eh.synthesis_outcome_payload if eh.synthesis_outcome_payload else None
+    if sop and isinstance(sop, dict):
+        return sop
+    # Priority 2: scorecard fallback (legacy / scorecard-only builds)
+    scorecard = eh.scorecard if eh.scorecard else {}
+    sop = scorecard.get("synthesis_outcome_payload")
+    if sop and isinstance(sop, dict):
+        return sop
     return None
 
 
@@ -1476,6 +1541,7 @@ def _build_operator_brief(
     hypothesis_pack: dict[str, Any] | None = None,
     canonical_run_summary: dict[str, Any] | None = None,
     sprint_verdict: dict[str, Any] | None = None,
+    synthesis_outcome_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Sprint F150L: Praktický operator brief — co sprint našel, která branch nesla signál,
@@ -1626,6 +1692,8 @@ def _build_operator_brief(
         "hypothesis_pack": hypothesis_pack,
         "canonical_run_summary": canonical_run_summary,
         "sprint_verdict": sprint_verdict,
+        # Sprint F157: synthesis_outcome_payload
+        "synthesis_outcome_payload": synthesis_outcome_payload,
     }
 
 

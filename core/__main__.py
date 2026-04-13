@@ -130,14 +130,21 @@ def _runtime_truth(
         "accepted_findings": accepted_findings,
     }
 
-# Sprint 8RA: Hardcoded feed sources for live sprint
-_SPRINT_FEED_SOURCES = [
-    "cisa_kev",
-    "threatfox_ioc",
-    "urlhaus_recent",
-    "feodo_ip",
-    "openphish_feed",
-]
+def _get_live_feed_urls() -> list[str]:
+    """
+    Return canonical runtime feed URLs for live sprint path.
+
+    Uses get_default_feed_seeds() from rss_atom_adapter — the single source
+    of truth for OSINT-relevant RSS/Atom feeds. Only ``curated_seed`` sources
+    are included; ``topology_candidate`` sources are non-feed endpoints and
+    are excluded from feed-surface processing.
+    """
+    from hledac.universal.discovery.rss_atom_adapter import get_default_feed_seeds
+    return [
+        seed.feed_url
+        for seed in get_default_feed_seeds()
+        if seed.source == "curated_seed"
+    ]
 
 
 # =============================================================================
@@ -278,16 +285,23 @@ async def run_sprint(
         export_dir=export_dir,
     )
 
-    # Lifecycle — owned here, passed to scheduler
-    lifecycle = SprintLifecycleManager()
+    # Sprint F153: Lifecycle receives explicit runtime params — duration authority propagated
+    lifecycle = SprintLifecycleManager(
+        sprint_duration_s=duration_s,
+        windup_lead_s=config.windup_lead_s,
+    )
     scheduler = SprintScheduler(config)
+
+    # Sprint F153: Canonical source inventory — real URLs from typed seed surface
+    live_feed_urls = _get_live_feed_urls()
 
     try:
         # Run sprint via scheduler directly (enables compute_sprint_intelligence access)
+        # now_monotonic=None: scheduler uses live time internally via adapter.tick()
         result = await scheduler.run(
             lifecycle=lifecycle,
-            sources=list(_SPRINT_FEED_SOURCES),
-            now_monotonic=time.monotonic(),
+            sources=live_feed_urls,
+            now_monotonic=None,
             query=query,
             duckdb_store=store,
         )
@@ -496,7 +510,7 @@ async def run_sprint(
             else "unknown"
         )
         _export_finish_status = (
-            "finished" if "EXPORT" in [ph]
+            "finished" if result.final_phase in ("EXPORT", "TEARDOWN") and result.accepted_findings > 0
             else "empty_run" if result.accepted_findings == 0
             else "aborted" if result.aborted
             else "unknown"
@@ -551,8 +565,8 @@ async def run_sprint(
                 "query": query,
                 "requested_duration_s": duration_s,
                 "actual_duration_s": round(actual_duration, 2),
-                "source_count": len(_SPRINT_FEED_SOURCES),
-                "sources": _SPRINT_FEED_SOURCES,
+                "source_count": len(live_feed_urls),
+                "sources": live_feed_urls,
                 "platform": {
                     "python_version": __import__("sys").version.split()[0],
                     "macos_version": __import__("platform").mac_ver()[0] or "unknown",
@@ -584,7 +598,7 @@ async def run_sprint(
                 "canonical_sprint_owner": "core.__main__.run_sprint",
                 "canonical_path_used": "run_sprint",
                 "effective_source_mix": src_mix_str,
-                "effective_parallelism": len(_SPRINT_FEED_SOURCES),
+                "effective_parallelism": len(live_feed_urls),
                 "effective_timeouts": {},
                 "active_iteration_count": active_iterations,
                 "export_finish_layer_status": _export_finish_status,
@@ -632,8 +646,8 @@ async def run_sprint(
                     "query": query,
                     "requested_duration_s": duration_s,
                     "actual_duration_s": round(actual_duration, 2),
-                    "source_count": len(_SPRINT_FEED_SOURCES),
-                    "sources": _SPRINT_FEED_SOURCES,
+                    "source_count": len(live_feed_urls),
+                    "sources": live_feed_urls,
                     "platform": {
                         "python_version": __import__("sys").version.split()[0],
                         "macos_version": __import__("platform").mac_ver()[0] or "unknown",
@@ -663,12 +677,14 @@ async def run_sprint(
                     "canonical_sprint_owner": "core.__main__.run_sprint",
                     "canonical_path_used": "run_sprint",
                     "effective_source_mix": src_mix_str,
-                    "effective_parallelism": len(_SPRINT_FEED_SOURCES),
+                    "effective_parallelism": len(live_feed_urls),
                     "effective_timeouts": {},
                     "active_iteration_count": active_iterations,
                     "export_finish_layer_status": _export_finish_status,
                 },
                 synthesis_outcome_payload=None,  # synthesis_runner not exposed on lifecycle/scheduler
+                # Sprint F153: Top-level sprint verdict propagated to export
+                sprint_verdict=intel.get("sprint_verdict"),
             )
 
             # Sprint F155: Log enrichment level

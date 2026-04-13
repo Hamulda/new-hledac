@@ -199,7 +199,7 @@ class SynthesisOutcome(msgspec.Struct):
     operator_note: str     # short human-readable note
 
 
-def synthesis_outcome_to_dict(outcome: SynthesisOutcome) -> dict:
+def synthesis_outcome_to_dict(outcome: SynthesisOutcome | None) -> dict:
     """
     Sprint F151A: Lightweight export seam over SynthesisOutcome.
 

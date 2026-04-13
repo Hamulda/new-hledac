@@ -1628,6 +1628,8 @@ class ExportHandoff:
     execution_context: Dict[str, Any] = field(default_factory=dict)
     canonical_run_summary: Dict[str, Any] = field(default_factory=dict)
     synthesis_outcome_payload: Optional[Dict[str, Any]] = None
+    # Sprint F153: Top-level sprint verdict — posture, confidence, next action
+    sprint_verdict: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_windup(

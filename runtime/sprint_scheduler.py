@@ -643,6 +643,14 @@ class SprintScheduler:
                 # Sleep between cycles (short interval, not one long sleep)
                 await self._sleep_or_abort(self._config.cycle_sleep_s, adapter)
 
+                # ── Post-sleep windup gate ──────────────────────────────────
+                # Windup can be triggered during sleep via adapter.tick().
+                # Check immediately after sleep to avoid running another
+                # cycle if lifecycle already entered windup.
+                if adapter.should_enter_windup(now_monotonic):
+                    log.debug("[8BK] Windup requested after sleep — exiting.")
+                    break
+
                 # Sprint 8UC B.4: Speculative prefetch every 15s
                 now_mono = _time.monotonic()
                 if (now_mono - self._last_speculative) >= 15.0:
