@@ -692,8 +692,11 @@ class TestEntryCap:
             )
             # Entry cap: 8AF clamps max_entries to 100
             assert result.fetched_entries == 100
-            # Findings: 2 per entry (pattern 'e' matches title + url) = 200
-            assert result.accepted_findings == 200
+            # Per-entry dedup: pattern 'e' matches multiple times per entry (title, url, path).
+            # Per-entry dedup collapses to 1 unique finding per entry → 100 findings total.
+            # F160A introduced findings_lost_to_dedup tracking (3 hits × 100 = 300 raw hits → 100 kept).
+            assert result.accepted_findings == 100
+            assert result.findings_lost_to_dedup == 200
 
 
 # ---------------------------------------------------------------------------

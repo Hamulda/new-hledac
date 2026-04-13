@@ -266,6 +266,30 @@ class SprintSchedulerResult:
 
 
 # ---------------------------------------------------------------------------
+# Sprint F160C: Source Economics — per-sprint bounded local economics layer
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SourceEconomics:
+    """
+    Per-source economics state for one sprint.
+
+    All fields are in-memory only. Reset happens in _reset_result().
+    No cross-sprint persistence. No background tasks.
+
+    Bounded:
+    - silent_streak: int (unbounded within sprint, capped by sprint length)
+    - cooldown_until_cycle: int | None (None = not in cooldown)
+    - recent_health_posture: str (one of hot/warm/lukewarm/marginal/cold)
+    """
+    source: str
+    silent_streak: int = 0                          # consecutive cold/lukewarm cycles
+    last_signal_cycle: int = -1                      # last cycle with hot/warm signal
+    cooldown_until_cycle: int | None = None          # None = no cooldown active
+    recent_health_posture: str = "unknown"           # hot | warm | lukewarm | marginal | cold | unknown
+
+
+# ---------------------------------------------------------------------------
 # Source work item
 # ---------------------------------------------------------------------------
 
@@ -455,6 +479,152 @@ class SprintScheduler:
         # Capped at 10 entries to stay M1 8GB safe
         self._feed_verdicts: list[tuple[str, int, int, int, int]] = []  # (verdict_tag, s, f, w, q)
         self._public_verdicts: list[dict] = []  # public_branch_verdict dicts
+        # Sprint F160C: Per-sprint source economics — bounded local economics layer
+        # In-memory only, reset per sprint, no cross-sprint state
+        self._source_economics: dict[str, SourceEconomics] = {}
+
+    # ── Sprint F160C: Source Economics ─────────────────────────────────
+
+    def _update_source_economics(
+        self,
+        feed_url: str,
+        result: Any,
+        current_cycle: int,
+    ) -> None:
+        """
+        Update per-source economics from pipeline result signals.
+
+        Uses only existing surfaces from FeedPipelineRunResult:
+        - signal_stage: cold/hot diagnosis
+        - feed_confidence_score: 0-100 adapter-informed confidence
+        - winning_source_breakdown: signal origin analysis
+
+        Economics state is in-memory only for the current sprint.
+        Reset happens in _reset_result().
+        """
+        econ = self._source_economics.setdefault(
+            feed_url,
+            SourceEconomics(source=feed_url),
+        )
+
+        # ── Derive health posture from signal_stage ─────────────────────
+        signal_stage = getattr(result, "signal_stage", "unknown") or "unknown"
+        feed_conf = getattr(result, "feed_confidence_score", 0) or 0
+        winning = getattr(result, "winning_source_breakdown", {}) or {}
+
+        # Cold verdict: signal_stage indicating no usable signal
+        cold_stages = {"empty_registry", "no_pattern_hits", "content_empty"}
+        is_cold = signal_stage in cold_stages or feed_conf == 0
+
+        # Sprint posture derived from pipeline signals
+        if signal_stage == "prestore_findings_present":
+            econ.recent_health_posture = "hot"
+            econ.last_signal_cycle = current_cycle
+            econ.silent_streak = 0
+            econ.cooldown_until_cycle = None
+        elif feed_conf >= 60:
+            econ.recent_health_posture = "warm"
+            econ.last_signal_cycle = current_cycle
+            econ.silent_streak = 0
+            econ.cooldown_until_cycle = None
+        elif feed_conf >= 20:
+            econ.recent_health_posture = "lukewarm"
+            if econ.silent_streak > 0:
+                econ.silent_streak += 1
+            else:
+                econ.silent_streak = 1
+            # Cooldown only if cold for 2+ consecutive cycles
+            if econ.silent_streak >= 2:
+                econ.cooldown_until_cycle = current_cycle + 3
+        elif is_cold:
+            econ.silent_streak += 1
+            econ.recent_health_posture = "cold"
+            # Bounded cooldown: 3 cycles, then allow retry
+            if econ.silent_streak >= 2:
+                econ.cooldown_until_cycle = current_cycle + 3
+        else:
+            # Marginal signal — reset but watch
+            econ.recent_health_posture = "marginal"
+            if econ.silent_streak > 0:
+                econ.silent_streak += 1
+            else:
+                econ.silent_streak = 1
+
+        # Winning source analysis — if feed_native dominates, source is self-sufficient
+        feed_native_hits = winning.get("feed_native", 0)
+        fallback_hits = winning.get("fallback", 0)
+        if feed_native_hits > fallback_hits * 2 and feed_native_hits > 0:
+            econ.recent_health_posture = "hot"  # feed-native signal is strong
+
+    def _get_source_economics(self, feed_url: str) -> SourceEconomics | None:
+        """Return economics state for a source, or None if never seen."""
+        return self._source_economics.get(feed_url)
+
+    def _is_source_in_cooldown(self, feed_url: str, current_cycle: int) -> bool:
+        """True if source is in bounded cooldown and cycle hasn't exceeded it."""
+        econ = self._source_economics.get(feed_url)
+        if econ is None:
+            return False
+        if econ.cooldown_until_cycle is None:
+            return False
+        return current_cycle < econ.cooldown_until_cycle
+
+    def _should_deprioritize_source(self, feed_url: str, current_cycle: int) -> bool:
+        """
+        Return True if source should be deprioritized this cycle.
+
+        Deprioritization conditions (all bounded, all in-memory):
+        1. Source is in cooldown — pushed to end of work list
+        2. Silent streak >= 4 cycles — deprioritized but NOT excluded
+        """
+        econ = self._source_economics.get(feed_url)
+        if econ is None:
+            return False
+        if self._is_source_in_cooldown(feed_url, current_cycle):
+            return True
+        if econ.silent_streak >= 4:
+            return True
+        return False
+
+    def _sort_work_items_by_economics(
+        self,
+        items: list[SourceWork],
+        current_cycle: int,
+    ) -> list[SourceWork]:
+        """
+        Re-sort work items by source economics.
+
+        Order:
+        1. Sources NOT in cooldown first (natural priority)
+        2. Sources with hot/warm posture boosted
+        3. Cold/in-cooldown sources at the end
+        4. Tier ordering still applies as secondary sort key
+        """
+        def economics_sort_key(item: SourceWork) -> tuple:
+            econ = self._source_economics.get(item.feed_url)
+            # Tier primary sort (from config)
+            tier_order = _TIER_ORDER.index(item.tier)
+
+            if econ is None:
+                # Never-seen sources: neutral (0)
+                return (0, tier_order, 0, item.feed_url)
+
+            in_cooldown = self._is_source_in_cooldown(item.feed_url, current_cycle)
+            streak = econ.silent_streak
+            posture_score = {
+                "hot": 0,
+                "warm": 1,
+                "lukewarm": 2,
+                "marginal": 3,
+                "cold": 4,
+            }.get(econ.recent_health_posture, 5)
+
+            if in_cooldown:
+                # In cooldown: pushed to end of its tier band (tier primary, cooldown posture=5)
+                return (tier_order, 5, streak, item.feed_url)
+            return (tier_order, posture_score, streak, item.feed_url)
+
+        return sorted(items, key=economics_sort_key)
 
     # ── Sprint 8VI §B: RL Adaptive Pivot ────────────────────────────────
 
@@ -710,6 +880,12 @@ class SprintScheduler:
         # Build tiered work list
         work_items = self._build_work_items(sources)
 
+        # Sprint F160C: Apply source economics re-sorting within the current cycle
+        # Uses signal_stage, feed_confidence_score, winning_source_breakdown from prior cycles
+        # In-cooldown and silent_streak>=4 sources are pushed to end of their tier band
+        current_cycle = self._result.cycles_started
+        work_items = self._sort_work_items_by_economics(work_items, current_cycle)
+
         # Filter: skip lower tiers if lifecycle is pruning
         mode = lifecycle.recommended_tool_mode(now_monotonic)
         if mode == "prune":
@@ -895,6 +1071,9 @@ class SprintScheduler:
             # Sprint 8VN: bounded accumulation — cap at 500 to prevent OOM
             if len(self._all_findings) < 500:
                 self._all_findings.append(finding_entry)
+        # Sprint F160C: Update source economics from pipeline result signals
+        # Uses signal_stage, feed_confidence_score, winning_source_breakdown
+        self._update_source_economics(feed_url, result, self._result.cycles_started)
 
     # ── Dedup ─────────────────────────────────────────────────────────────
 
@@ -2502,6 +2681,8 @@ class SprintScheduler:
         # Sprint 8VN §C: Clear branch verdict accumulators
         self._feed_verdicts.clear()
         self._public_verdicts.clear()
+        # Sprint F160C: Clear per-sprint source economics
+        self._source_economics.clear()
 
 
 # ---------------------------------------------------------------------------

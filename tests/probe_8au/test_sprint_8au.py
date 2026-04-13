@@ -108,7 +108,7 @@ def test_nonempty_registry_no_hits_diagnoses_no_pattern_hits():
         findings_built_pre_store=0,
         patterns_configured=12,
     )
-    assert stage == "no_pattern_hits"
+    assert stage == "no_pattern_hits_with_content"
 
 
 # ---------------------------------------------------------------------------

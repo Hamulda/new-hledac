@@ -1311,15 +1311,23 @@ def _derive_run_truth_note(
             return f"{is_meaningful}: {evidence_note}" if evidence_note else is_meaningful
 
     # Fallback: signal-based characterization
+    # Refinement F160F: honest characterization — no inflated wording
     signal = pvs.get("signal_quality", "unknown")
+    accepted = pvs.get("accepted", 0)
+
     if signal == "high_density":
-        return "meaningful_run: high signal density"
+        return "meaningful_run: high density signal"
     elif signal == "medium_density":
-        return "meaningful_run: mixed signal detected"
+        return "mixed_run: signal present but noisy"
     elif signal == "depleted":
-        return "smoke_run: depleted signal, near-zero output"
+        return "smoke_run: depleted, no actionable signal"
     elif signal == "slow_novelty":
-        return "meaningful_run: slow but real signal"
+        return "slow_signal_run: signal exists, low rate"
+    elif signal == "unknown" and accepted > 0:
+        # Structurally healthy but signal unclear — don't inflate
+        return "findings_run: signal unclear, findings exist"
+    elif signal == "unknown":
+        return "unknown_run: no signal characterization"
     return "unknown_run"
 
 
@@ -1441,7 +1449,7 @@ def _derive_best_first_move(
                 if action:
                     return f"{action}: {target[:40]}" if target else action[:80]
 
-    return "continue: maintain current approach"
+    return "assess: gather more data before committing to approach"
 
 
 def _derive_why_this_run_matters(
@@ -1510,12 +1518,16 @@ def _derive_why_this_run_matters(
     signal = pvs.get("signal_quality", "unknown")
     accepted = pvs.get("accepted", 0)
     if signal == "high_density" and accepted > 0:
-        return f"{accepted} quality findings at high density signal"
+        return f"{accepted} quality findings confirmed at high density"
     elif signal == "depleted":
         return "exhausted space — strategic pivot needed"
     elif signal == "slow_novelty":
         return "real but slow signal — rate vs quality tradeoff"
-    return "insufficient signal for significance statement"
+    elif signal == "medium_density" and accepted > 0:
+        return f"{accepted} findings present, signal mixed quality"
+    elif accepted > 0:
+        return f"{accepted} findings found, signal quality unclear"
+    return "no actionable signal — sprint produced no useful leads"
 
 
 def _get_branch_value(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]

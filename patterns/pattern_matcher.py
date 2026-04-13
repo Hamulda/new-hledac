@@ -346,6 +346,9 @@ _RE_SHA1 = re.compile(
 _RE_BTC_LEGACY = re.compile(r"\b[13][a-km-zA-HJ-NP-Z1-9]{26,34}\b", re.IGNORECASE)
 # BTC bech32: bc1 address (P2WPKH/P2WSH), case-insensitive
 _RE_BTC_BECH32 = re.compile(r"\bbc1[ac-hj-np-z02-9]{11,71}\b", re.IGNORECASE)
+# ETH address: 0x prefix + 40 hex chars (42 total), mixed-case checksum OK
+# Strict 0x prefix prevents accidental FP on raw 40-char hex strings
+_RE_ETH_ADDR = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
 # Telegram t.me/ links — 3+ char slug
 _RE_TELEGRAM = re.compile(r"\bt\.me/[\w\-]{3,}\b")
 # MISP UUID: 8-4-4-4-12 hex format
@@ -396,7 +399,7 @@ class ExtractedEntity(NamedTuple):
 def extract_high_precision_entities(text: str) -> list[ExtractedEntity]:
     """Extract high-precision structured entities via regex.
 
-    Covers: CVE, GHSA, onion v3, SHA256, MD5, SHA1.
+    Covers: CVE, GHSA, onion v3, SHA256, MD5, SHA1, ETH.
     Returns ExtractedEntity list sorted by start offset.
     """
     entities: list[ExtractedEntity] = []
@@ -406,6 +409,9 @@ def extract_high_precision_entities(text: str) -> list[ExtractedEntity]:
         (_RE_GHSA, "ghsa_identifier"),
         (_RE_ONION_V3, "onion_v3_address"),
         (_RE_SHA256, "sha256_hash"),
+        (_RE_MD5, "md5_hash"),
+        (_RE_SHA1, "sha1_hash"),
+        (_RE_ETH_ADDR, "eth_address"),
     ]:
         for m in pattern.finditer(text):
             entities.append(ExtractedEntity(
@@ -571,6 +577,11 @@ def match_text(
         (_RE_I2P_ADDR, "i2p_address"),
         (_RE_PGP_FP, "pgp_fingerprint"),
         (_RE_IPFS_CID, "ipfs_cid"),
+        # Sprint F160B — structured IOC hot-path wiring
+        (_RE_SHA256, "sha256_hash"),
+        (_RE_MD5, "md5_hash"),
+        (_RE_SHA1, "sha1_hash"),
+        (_RE_ETH_ADDR, "eth_address"),
     ]:
         for m in _pattern.finditer(text_lower):
             hits.append(PatternHit(

@@ -271,11 +271,186 @@ class FeedPipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     feed_confidence_score: int = 0                       # 0-100, adapter-informed confidence
     # Sprint F151A: winning source breakdown for scheduler/exporter
     winning_source_breakdown: dict[str, int] = dict()     # {"feed_native": N, "fallback": N, "mixed": N}
+    # Sprint F160A: hits that arrived but were filtered by per-entry dedup
+    findings_lost_to_dedup: int = 0
 
 
 # ---------------------------------------------------------------------------
 # Pre-store signal diagnosis helper (Sprint 8AU)
 # ---------------------------------------------------------------------------
+
+
+# ==============================================================================
+# Fallback decision classifier — Sprint F160A consolidation
+# Replaces 5+ scattered booleans with a single structured decision tree
+# ==============================================================================
+
+class FallbackDecision(msgspec.Struct, frozen=True, gc=False):
+    """
+    Structured fallback decision output.
+
+    reason: canonical reason tag for the decision
+    should_fetch: True if article fetch should be attempted
+    forced: True if decision was forced by metadata/content mismatch
+    wasted: True if fallback was attempted but feed-native already had hits
+    helpful: True if fallback produced findings that feed-native did not
+    skip_because: reason string if fallback was skipped
+    """
+    reason: str = "undecided"
+    should_fetch: bool = False
+    forced: bool = False
+    wasted: bool = False
+    helpful: bool = False
+    skip_because: str = ""
+
+
+def _classify_fallback_decision(
+    assembled_text_len: int,
+    pre_fallback_hits_count: int,
+    quality_signal: EntryQualitySignal,
+    article_fallback_used: bool,
+    article_fallback_attempted: bool,
+    post_fallback_findings_count: int,
+    adapter_source_priority_bias: float,
+    adapter_metadata_richness_band: str,
+    adapter_entry_usefulness_band: str,
+) -> FallbackDecision:
+    """
+    Classify the fallback decision outcome with a single structured output.
+
+    Decision tree (in priority order):
+    1. If pre-fallback hits exist → fallback was wasteful (wasted=True)
+    2. If article fallback was skipped due to quality → skip_because set
+    3. If fallback was forced by metadata/content mismatch → forced=True
+    4. If fallback was skipped because high-quality assembled text → skip_because
+    5. If fallback produced new findings → helpful=True
+    6. If fallback was attempted but produced no new findings → wasted
+    7. Otherwise → undecided
+    """
+    # Case 1: pre-fallback hits exist → wasteful fallback
+    if pre_fallback_hits_count > 0:
+        return FallbackDecision(
+            reason="feed_native_had_signal",
+            should_fetch=False,
+            wasted=True,
+            helpful=False,
+            skip_because="feed-native already carried hits",
+        )
+
+    # Case 2: article fallback was not attempted — classify why
+    if not article_fallback_attempted:
+        # High-quality assembled text above threshold — skip was correct
+        if assembled_text_len >= _MIN_ARTICLE_FALLBACK_CHARS and quality_signal.quality_band in ("high", "medium"):
+            return FallbackDecision(
+                reason="skipped_high_quality",
+                should_fetch=False,
+                forced=False,
+                wasted=False,
+                helpful=False,
+                skip_because=f"high quality ({quality_signal.quality_band}), assembled {assembled_text_len} chars",
+            )
+        # Adapter override: high source priority bias skips even medium quality
+        if adapter_source_priority_bias >= 0.1 and assembled_text_len >= _MIN_ARTICLE_FALLBACK_CHARS:
+            return FallbackDecision(
+                reason="skipped_adapter_bias",
+                should_fetch=False,
+                forced=False,
+                wasted=False,
+                helpful=False,
+                skip_because=f"adapter source_priority_bias={adapter_source_priority_bias:.2f}",
+            )
+        # Unknown / no signal possible
+        return FallbackDecision(
+            reason="no_fetch_warranted",
+            should_fetch=False,
+            forced=False,
+            wasted=False,
+            helpful=False,
+            skip_because=f"assembled={assembled_text_len}, quality={quality_signal.quality_band}",
+        )
+
+    # Case 3: fallback was forced by metadata/content mismatch
+    if (
+        quality_signal.metadata_boost
+        and not quality_signal.language_mismatch
+        and assembled_text_len < _MIN_ARTICLE_FALLBACK_CHARS
+    ):
+        # Forced fallback — assess outcome
+        if post_fallback_findings_count > 0:
+            return FallbackDecision(
+                reason="forced_metadata_mismatch",
+                should_fetch=True,
+                forced=True,
+                wasted=False,
+                helpful=True,
+            )
+        else:
+            return FallbackDecision(
+                reason="forced_no_yield",
+                should_fetch=True,
+                forced=True,
+                wasted=False,
+                helpful=False,
+            )
+
+    # Case 4: aged but structured entry (low quality but above threshold)
+    if (
+        assembled_text_len >= _MIN_ARTICLE_FALLBACK_CHARS
+        and quality_signal.quality_band == "low"
+    ):
+        if post_fallback_findings_count > 0:
+            return FallbackDecision(
+                reason="aged_structured_yield",
+                should_fetch=True,
+                forced=True,
+                wasted=False,
+                helpful=True,
+            )
+        else:
+            return FallbackDecision(
+                reason="aged_structured_no_yield",
+                should_fetch=True,
+                forced=True,
+                wasted=False,
+                helpful=False,
+            )
+
+    # Case 5: adapter-mandated fallback (high metadata richness band, weak content)
+    if adapter_metadata_richness_band == "high" and assembled_text_len < _MIN_ARTICLE_FALLBACK_CHARS:
+        if post_fallback_findings_count > 0:
+            return FallbackDecision(
+                reason="forced_adapter_metadata",
+                should_fetch=True,
+                forced=True,
+                wasted=False,
+                helpful=True,
+            )
+        else:
+            return FallbackDecision(
+                reason="forced_adapter_no_yield",
+                should_fetch=True,
+                forced=True,
+                wasted=False,
+                helpful=False,
+            )
+
+    # Case 6: normal below-threshold fallback
+    if post_fallback_findings_count > 0:
+        return FallbackDecision(
+            reason="normal_fallback_yield",
+            should_fetch=True,
+            forced=False,
+            wasted=False,
+            helpful=True,
+        )
+    else:
+        return FallbackDecision(
+            reason="normal_fallback_no_yield",
+            should_fetch=True,
+            forced=False,
+            wasted=False,
+            helpful=False,
+        )
 
 
 def diagnose_feed_signal_stage(
@@ -285,32 +460,39 @@ def diagnose_feed_signal_stage(
     entries_with_hits: int,
     findings_built_pre_store: int,
     patterns_configured: int,
+    findings_lost_to_dedup_total: int = 0,
 ) -> str:
     """
     Diagnose which stage the signal is lost at.
 
     Returns one of:
-      empty_registry       — no patterns configured at all
-      empty_fetch          — no entries arrived at all
-      content_empty        — entries arrived but assembled text was empty
-      no_pattern_hits     — entries with text arrived but no pattern matched
-      no_pattern_hits_with_content  — entries with text, no hits (alias for no_pattern_hits)
-      pattern_hits_but_no_findings_built  — hits seen but all were deduped/filtered
-      prestore_findings_present          — findings exist pre-store
-      unknown                        — counters not yet populated
+      empty_registry           — no patterns configured at all
+      empty_fetch              — no entries arrived at all
+      content_empty            — entries arrived but assembled text was empty (all tiers title_only or no_content)
+      no_pattern_hits          — entries with text arrived but no pattern matched
+      no_pattern_hits_with_content — entries with content, no hits (substance tier above title_only)
+      findings_build_loss      — hits existed but all were deduped away
+      prestore_findings_present — findings exist pre-store
+      unknown                  — counters not yet populated
+
+    Findings-build loss is now distinguishable from pure no-hits:
+      - no_pattern_hits_with_content: text was scanned, substance was present, no hits arrived
+      - findings_build_loss: hits arrived but were filtered by per-entry dedup
     """
     if patterns_configured == 0:
         return "empty_registry"
-    if entries_with_empty_assembled_text > 0 and entries_scanned == 0:
-        return "content_empty"
     if entries_seen == 0:
         return "empty_fetch"
+    if entries_with_empty_assembled_text > 0 and entries_scanned == 0:
+        return "content_empty"
     if entries_scanned == 0:
         return "no_pattern_hits"
+    if findings_built_pre_store == 0 and findings_lost_to_dedup_total > 0:
+        # Had hits but they were all lost to dedup — distinct from no-hits-with-content
+        return "findings_build_loss"
     if entries_with_hits == 0:
-        return "no_pattern_hits"
-    if findings_built_pre_store == 0 and entries_with_hits > 0:
-        return "pattern_hits_but_no_findings_built"
+        # Entries had content (scanned) but no hits arrived
+        return "no_pattern_hits_with_content"
     if findings_built_pre_store > 0:
         return "prestore_findings_present"
     return "unknown"
@@ -509,6 +691,22 @@ def _compute_feed_next_action_and_confidence(
 # Sprint F151A: winning source breakdown helper
 
 
+def _float_attr(obj: object, name: str, default: float) -> float:
+    """Get a float attribute from an object with MagicMock safety."""
+    val = getattr(obj, name, default)
+    if isinstance(val, (int, float)):
+        return float(val)
+    return default
+
+
+def _str_attr(obj: object, name: str, default: str) -> str:
+    """Get a string attribute from an object with MagicMock safety."""
+    val = getattr(obj, name, default)
+    if isinstance(val, str):
+        return val
+    return default
+
+
 def _compute_winning_source_breakdown(
     feed_native_signal_carried: bool,
     article_fallback_used: bool,
@@ -657,6 +855,8 @@ def _strip_html_tags_from_text(text: str) -> str:
     """
     if not text:
         return ""
+    if not isinstance(text, str):
+        return ""
     # Step 1: Remove script/style blocks completely
     cleaned = _SCRIPT_STYLE_RE.sub("", text)
     # Step 2: Replace tags with space
@@ -704,6 +904,54 @@ def _convert_rich_html_to_text(rich_html: str) -> str:
 # Used to decide whether rich_content qualifies as primary signal vs noise
 _RICH_CONTENT_MIN_CHARS: int = 40
 
+# Assembly substance tiers — used to diagnose WHERE signal is lost
+# in the feed-native assembly phase
+_ASSEMBLY_TIER_NO_CONTENT: int = 0
+_ASSEMBLY_TIER_TITLE_ONLY: int = 1
+_ASSEMBLY_TIER_SUMMARY_ONLY: int = 2
+_ASSEMBLY_TIER_RICH_CONTENT: int = 3
+
+
+def _classify_assembly_substance(
+    title: str,
+    summary: str,
+    rich_content: str,
+) -> tuple[str, int]:
+    """
+    Classify how much substantive content was assembled from feed-native sources.
+
+    Returns (tier_name, tier_level):
+      "no_content"       — nothing assembled (sentinel only)
+      "title_only"       — title only, no meaningful body
+      "summary_only"     — summary assembled but no rich_content
+      "rich_content"     — rich HTML content was available and used
+
+    This replaces the implicit "[no content]" sentinel check.
+    Tier level is used for ordering (higher = more substantive).
+    """
+    has_title = bool(title and title.strip())
+    has_summary = bool(summary and summary.strip())
+    has_rich = bool(rich_content)
+
+    if has_rich:
+        converted = _convert_rich_html_to_text(rich_content)
+        if converted and len(converted) >= _RICH_CONTENT_MIN_CHARS:
+            return ("rich_content", _ASSEMBLY_TIER_RICH_CONTENT)
+
+    if has_summary:
+        stripped = _strip_html_tags_from_text(summary)
+        if stripped and len(stripped.strip()) >= _MIN_SUBSTANTIVE_CHARS:
+            return ("summary_only", _ASSEMBLY_TIER_SUMMARY_ONLY)
+
+    if has_title:
+        title_len = len(title.strip())
+        if title_len >= _QUALITY_TITLE_ONLY_CHARS:
+            return ("title_only", _ASSEMBLY_TIER_TITLE_ONLY)
+        elif title_len > 0:
+            return ("title_only", _ASSEMBLY_TIER_TITLE_ONLY)
+
+    return ("no_content", _ASSEMBLY_TIER_NO_CONTENT)
+
 
 def _assemble_enriched_feed_text(
     title: str,
@@ -731,18 +979,28 @@ def _assemble_enriched_feed_text(
     parts: list[str] = []
     enrichment_phase = "none"
 
+    # Type guards: ensure we have real strings, not MagicMock or other objects
+    if not isinstance(feed_title, str):
+        feed_title = ""
+    if not isinstance(entry_author, str):
+        entry_author = ""
+
     # Priority 0: metadata context header — feed_title and author as lightweight anchors
     # These are prepended at the top so PatternMatcher sees them first
     # Bounded: only add if they provide genuine context beyond the title
     meta_parts: list[str] = []
     if feed_title and feed_title.strip():
         ft = feed_title.strip()
-        if ft != title.strip():  # avoid duplicating title
+        if not isinstance(ft, str):
+            ft = ""
+        if ft and ft != title.strip():  # avoid duplicating title
             meta_parts.append(ft)
     if entry_author and entry_author.strip() and len(entry_author.strip()) >= 2:
         ea = entry_author.strip()
+        if not isinstance(ea, str):
+            ea = ""
         # Only add author if not already embedded in title
-        if ea.lower() not in title.lower():
+        if ea and ea.lower() not in title.lower():
             meta_parts.append(f"by {ea}")
     if meta_parts:
         parts.append(" | ".join(meta_parts))
@@ -1148,37 +1406,56 @@ async def _entry_to_pattern_findings(
     feed_url: str,
     entry: Any,
     query_context: str | None,
-) -> tuple[list[dict], int, int, int, str, str, bool, bool, EntryQualitySignal, bool]:
+) -> tuple[
+    list[dict],
+    int,
+    int,
+    int,
+    str,
+    str,
+    bool,
+    bool,
+    EntryQualitySignal,
+    FallbackDecision,
+    str,
+    int,
+    int,
+    int,
+]:
     """
     Entry -> pattern-backed CanonicalFinding dicts.
 
-    Returns (findings, patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted, quality_signal, feed_native_signal_carried).
+    Returns (in order):
+      findings, patterns_configured, matched_patterns, assembled_text_len,
+      clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted,
+      quality_signal, fallback_decision, assembly_tier,
+      pre_fallback_hits_count, post_fallback_hits_count, findings_lost_to_dedup
+
+    - assembly_tier: result of _classify_assembly_substance
+    - pre_fallback_hits_count: hits from feed-native text only
+    - post_fallback_hits_count: hits after fallback (includes pre_fallback if not skipped)
+    - findings_lost_to_dedup: hits that were deduped away (post - accepted)
+    - fallback_decision: FallbackDecision structured assessment
+
     Empty registry = valid zero-findings state (patterns_configured=0, matched=0).
-    enrichment_phase: "feed_rich_content" | "article_fallback" | "none"
-    article_fallback_used: True if article was fetched and enriched
-    quality_signal: EntryQualitySignal with metadata-aware quality assessment
-    feed_native_signal_carried: True if feed-native content (before fallback) produced hits
     """
     title = getattr(entry, "title", "") or ""
     summary = getattr(entry, "summary", "") or ""
     rich_content = getattr(entry, "rich_content", "") or ""
     entry_url = getattr(entry, "entry_url", "") or ""
-    # Sprint F150H: extract metadata for quality scoring
     entry_author = getattr(entry, "entry_author", "") or ""
     feed_title = getattr(entry, "feed_title", "") or ""
     feed_language = getattr(entry, "feed_language", "") or ""
 
-    # Sprint F150J: extract adapter-derived signals (fail-soft if absent)
-    adapter_source_priority_bias: float = getattr(entry, "source_priority_bias", 0.0) or 0.0
-    adapter_timestamp_reliability: float = getattr(entry, "timestamp_reliability", 0.0) or 0.0
-    adapter_metadata_richness_band: str = getattr(entry, "metadata_richness_band", "") or ""
-    adapter_entry_usefulness_band: str = getattr(entry, "entry_usefulness_band", "") or ""
-    adapter_selection_reason: str = getattr(entry, "selection_reason", "") or ""
+    # Adapter-derived signals (fail-soft)
+    adapter_source_priority_bias: float = _float_attr(entry, "source_priority_bias", 0.0)
+    adapter_metadata_richness_band: str = _str_attr(entry, "metadata_richness_band", "")
+    adapter_entry_usefulness_band: str = _str_attr(entry, "entry_usefulness_band", "")
 
     if not entry_url:
         entry_url = f"urn:feed:entry:{title[:64]}"
 
-    # Sprint F150H: compute quality signal BEFORE assembly so it informs fallback decision
+    # Quality signal — computed before assembly
     quality_signal = _compute_entry_quality_signal(
         title=title,
         summary=summary,
@@ -1188,16 +1465,16 @@ async def _entry_to_pattern_findings(
         feed_language=feed_language,
     )
 
-    # Sprint 8BE PHASE 1: use enriched assembly (title + summary + rich_content + metadata)
+    # Assembly substance classification — used for signal-loss diagnosis
+    assembly_tier, _ = _classify_assembly_substance(title, summary, rich_content)
+
+    # Enriched assembly
     clean_text, enrichment_phase = _assemble_enriched_feed_text(
         title, summary, rich_content, feed_title=feed_title, entry_author=entry_author
     )
     assembled_text_len = len(clean_text)
-    article_fallback_used = False
-    feed_native_signal_carried = False
 
-    # Sprint F150I: scan feed-native text BEFORE fallback decision
-    # If feed-native already has hits, fallback is wasteful unless entry is aged+structured
+    # Pre-fallback scan — determines whether fallback is needed at all
     pre_fallback_hits_count = 0
     try:
         pre_hits = await _async_scan_feed_text(clean_text)
@@ -1206,104 +1483,133 @@ async def _entry_to_pattern_findings(
         raise
     except Exception:
         pre_hits = []
-    feed_native_signal_carried = pre_fallback_hits_count > 0
 
-    # Sprint 8BE PHASE 2 + F150H: smarter article fallback decision
-    # Rule: skip fallback if feed-native content is already high-quality.
-    #       Force fallback if metadata suggests high relevance but content is weak.
-    # Always respect the hard 250-char threshold; quality_signal refines within that.
-    should_skip_fallback = (
-        assembled_text_len >= _MIN_ARTICLE_FALLBACK_CHARS
-        and quality_signal.quality_band in ("high", "medium")
+    # Fallback decision — single structured call replaces 5 scattered booleans
+    # post_fallback_hits_count unknown at this point; use 0 as placeholder
+    fallback_decision = _classify_fallback_decision(
+        assembled_text_len=assembled_text_len,
+        pre_fallback_hits_count=pre_fallback_hits_count,
+        quality_signal=quality_signal,
+        article_fallback_used=False,
+        article_fallback_attempted=False,
+        post_fallback_findings_count=0,
+        adapter_source_priority_bias=adapter_source_priority_bias,
+        adapter_metadata_richness_band=adapter_metadata_richness_band,
+        adapter_entry_usefulness_band=adapter_entry_usefulness_band,
     )
-    # High-relevance metadata + weak content → force fallback even if above threshold
-    force_fallback = (
-        assembled_text_len < _MIN_ARTICLE_FALLBACK_CHARS
-        and quality_signal.metadata_boost
-        and not quality_signal.language_mismatch
-    )
-    # Sprint F150J: adapter-derived signal refinement of fallback decisions
-    # High source priority bias + feed-native content above threshold → skip fallback even if quality_band is medium
-    if adapter_source_priority_bias >= 0.1 and assembled_text_len >= _MIN_ARTICLE_FALLBACK_CHARS:
-        should_skip_fallback = True
-    # Strong metadata richness from adapter but weak assembled text → force fallback
-    if adapter_metadata_richness_band == "high" and assembled_text_len < _MIN_ARTICLE_FALLBACK_CHARS:
-        force_fallback = True
-    # Sprint F150I: aged but highly-structured entry gets benefit of doubt
-    # Sprint F150J: adapter usefulness band strengthens the signal
-    aged_but_structured = (
-        assembled_text_len >= _MIN_ARTICLE_FALLBACK_CHARS
-        and quality_signal.quality_band == "low"
-        and pre_fallback_hits_count == 0
-    )
-    if aged_but_structured and adapter_entry_usefulness_band == "high":
-        aged_but_structured = False  # strong adapter signal → don't fall back
 
+    article_fallback_used = False
     article_fallback_attempted = False
-    if not should_skip_fallback and (force_fallback or aged_but_structured or assembled_text_len < _MIN_ARTICLE_FALLBACK_CHARS):
+    post_fallback_hits_count = pre_fallback_hits_count
+    combined_text = clean_text
+
+    # Skip post-fallback scan if pre-fallback hits exist — fallback would be wasteful
+    # UNLESS aged/structured override applies
+    skip_post_fallback_scan = (
+        pre_fallback_hits_count > 0
+        and fallback_decision.reason not in (
+            "aged_structured_yield",
+            "aged_structured_no_yield",
+        )
+    )
+
+    if not skip_post_fallback_scan and fallback_decision.should_fetch:
         article_text = ""
         article_success = False
         try:
             article_text, article_success = await _fetch_article_text(entry_url)
         except asyncio.CancelledError:
-            raise  # never swallow
+            raise
         except Exception:
             pass
 
         article_fallback_attempted = True
         if article_success and article_text:
-            # Append article text to existing clean_text
             combined = f"{clean_text}\n\n{article_text}"
-            # Hard cap on combined text
             if len(combined) > MAX_FEED_TEXT_CHARS:
                 combined = combined[:MAX_FEED_TEXT_CHARS]
-            clean_text = combined
-            assembled_text_len = len(clean_text)
+            combined_text = combined
+            assembled_text_len = len(combined_text)
             enrichment_phase = "article_fallback"
             article_fallback_used = True
 
-    # Hard cap on assembled text (redundant but defensive)
-    if assembled_text_len > MAX_FEED_TEXT_CHARS:
-        clean_text = clean_text[:MAX_FEED_TEXT_CHARS]
-        assembled_text_len = len(clean_text)
+            # Post-fallback scan — scan the enriched text
+            try:
+                post_hits = await _async_scan_feed_text(combined_text)
+                post_fallback_hits_count = len(post_hits)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                post_hits = []
+                post_fallback_hits_count = pre_fallback_hits_count
+        else:
+            # Fallback attempted but failed — post count = pre count
+            post_fallback_hits_count = pre_fallback_hits_count
 
-    # Get pattern count before scan
+    # Hard cap on assembled text
+    if assembled_text_len > MAX_FEED_TEXT_CHARS:
+        combined_text = combined_text[:MAX_FEED_TEXT_CHARS]
+        assembled_text_len = len(combined_text)
+
+    # Get pattern count (local import avoids singleton init at module load time)
     from hledac.universal.patterns.pattern_matcher import get_pattern_matcher
     matcher_state = get_pattern_matcher()
     patterns_configured = len(matcher_state._registry_snapshot)
 
-    # Pattern scan — offloaded, bounded
+    # Final classification with actual post_fallback_hits_count
+    fallback_decision = _classify_fallback_decision(
+        assembled_text_len=assembled_text_len,
+        pre_fallback_hits_count=pre_fallback_hits_count,
+        quality_signal=quality_signal,
+        article_fallback_used=article_fallback_used,
+        article_fallback_attempted=article_fallback_attempted,
+        post_fallback_findings_count=post_fallback_hits_count,
+        adapter_source_priority_bias=adapter_source_priority_bias,
+        adapter_metadata_richness_band=adapter_metadata_richness_band,
+        adapter_entry_usefulness_band=adapter_entry_usefulness_band,
+    )
+
+    # Pattern scan — use combined_text (either enriched or original)
+    scan_text = combined_text if article_fallback_used else clean_text
     try:
-        hits = await _async_scan_feed_text(clean_text)
+        hits = await _async_scan_feed_text(scan_text)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        # Fail-soft: re-raise so pipeline loop records pattern_step_failed
         raise RuntimeError(f"pattern_scan_failed: {exc}") from exc
 
     matched_patterns = len(hits)
 
     if not hits:
-        return ([], patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted, quality_signal, feed_native_signal_carried)
+        return (
+            [], patterns_configured, matched_patterns, assembled_text_len,
+            scan_text, enrichment_phase, article_fallback_used, article_fallback_attempted,
+            quality_signal, fallback_decision, assembly_tier,
+            pre_fallback_hits_count, post_fallback_hits_count, 0,
+        )
 
     # Per-entry dedup by (label, pattern, value)
     entry_deduper = _EntryDeduper()
     findings: list[dict] = []
-
     for hit in hits:
         label = hit.label or ""
         pattern = hit.pattern
         value = hit.value
-
         if not entry_deduper.is_new(label, pattern, value):
             continue
-
         finding = _pattern_hit_to_finding(
-            feed_url, entry_url, hit, query_context, clean_text
+            feed_url, entry_url, hit, query_context, scan_text
         )
         findings.append(finding)
 
-    return (findings, patterns_configured, matched_patterns, assembled_text_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted, quality_signal, feed_native_signal_carried)
+    findings_lost_to_dedup = matched_patterns - len(findings)
+
+    return (
+        findings, patterns_configured, matched_patterns, assembled_text_len,
+        scan_text, enrichment_phase, article_fallback_used, article_fallback_attempted,
+        quality_signal, fallback_decision, assembly_tier,
+        pre_fallback_hits_count, post_fallback_hits_count, findings_lost_to_dedup,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1493,6 +1799,7 @@ async def async_run_live_feed_pipeline(
     _squandered_high_usefulness_entries = 0
     _metadata_strong_but_content_weak = 0
     _low_trust_feed_hits = 0
+    _findings_lost_to_dedup_total = 0
     # Sprint F151A: winning source breakdown accumulator
     _winning_source_breakdown_acc: dict[str, int] = {"feed_native": 0, "fallback": 0, "mixed": 0}
     _adapter_source_priority_bias_acc: float = 0.0
@@ -1518,7 +1825,10 @@ async def async_run_live_feed_pipeline(
 
         # Pattern scan + mapping — fail-soft per entry
         try:
-            findings, patterns_cfg, matched, assembled_len, clean_text, enrichment_phase, article_fallback_used, article_fallback_attempted, quality_signal, feed_native_signal_carried = await _entry_to_pattern_findings(
+            (findings, patterns_cfg, matched, assembled_len, clean_text,
+             enrichment_phase, article_fallback_used, article_fallback_attempted,
+             quality_signal, fallback_decision, assembly_tier,
+             pre_fallback_hits, post_fallback_hits, findings_lost_to_dedup) = await _entry_to_pattern_findings(
                 feed_url, entry, query_context
             )
         except asyncio.CancelledError:
@@ -1583,49 +1893,47 @@ async def async_run_live_feed_pipeline(
             if matched > 0:
                 entries_with_hits += 1
                 findings_built_pre_store += len(findings)
-            # Sprint F150I: feed economics tracking
-            # Track feed-native signal presence across the run
-            if feed_native_signal_carried:
+
+            # F160A: consolidated economics tracking via FallbackDecision
+            fd = fallback_decision
+            if fd.wasted:
+                _fallback_waste_count += 1
+            elif fd.helpful:
+                _fallback_useful_count += 1
+
+            # Track feed-native signal presence
+            if pre_fallback_hits > 0:
                 _feed_branch_signal_present = True
                 _findings_from_rich_feed += len(findings)
-            # Track fallback economics: wasteful = had feed-native signal but still fell back
-            if article_fallback_attempted and feed_native_signal_carried:
-                _fallback_waste_count += 1
-            # Useful fallback = no feed-native signal but fallback produced findings
-            if article_fallback_used and not feed_native_signal_carried and findings:
-                _fallback_useful_count += 1
+            elif fd.helpful:
                 _findings_from_fallback += len(findings)
-            elif article_fallback_used and not feed_native_signal_carried:
-                # Fallback attempted but produced no findings — still counts as useful attempt signal
-                _fallback_useful_count += 1
-            # Sprint F150J: derived counters
-            # Squandered: high quality_band entry that fell back despite having high usefulness metadata
-            if (
-                article_fallback_attempted
-                and quality_signal.quality_band == "high"
-                and not feed_native_signal_carried
-                and not findings
-            ):
+
+            # Squandered: forced fallback on high-quality entry with no yield
+            if fd.forced and quality_signal.quality_band == "high" and not fd.helpful:
                 _squandered_high_usefulness_entries += 1
-            # Metadata strong but content weak: metadata boost but assembled text is short
-            if (
-                quality_signal.metadata_boost
-                and assembled_len < _MIN_ARTICLE_FALLBACK_CHARS
-                and not feed_native_signal_carried
-            ):
+
+            # Metadata strong but content weak
+            if quality_signal.metadata_boost and assembled_len < _MIN_ARTICLE_FALLBACK_CHARS and pre_fallback_hits == 0:
                 _metadata_strong_but_content_weak += 1
-            # Low trust feed hits: feed-native hits on low quality entries
-            if feed_native_signal_carried and quality_signal.quality_band == "low":
+
+            # Low-trust feed hits
+            if pre_fallback_hits > 0 and quality_signal.quality_band == "low":
                 _low_trust_feed_hits += 1
-            # Sprint F151A: accumulate adapter-derived signals fail-soft
-            _adapter_source_priority_bias_acc = getattr(entry, "source_priority_bias", 0.0) or 0.0
-            _adapter_timestamp_reliability_acc = getattr(entry, "timestamp_reliability", 0.0) or 0.0
-            _adapter_metadata_richness_band_acc = getattr(entry, "metadata_richness_band", "") or ""
-            _adapter_entry_usefulness_band_acc = getattr(entry, "entry_usefulness_band", "") or ""
-            _adapter_selection_reason_acc = getattr(entry, "selection_reason", "") or ""
-            # Sprint F151A: winning source breakdown
+
+            # F160A: findings lost to per-entry dedup (hits arrived but filtered)
+            _findings_lost_to_dedup_total += findings_lost_to_dedup
+
+            # Adapter signals accumulation — use explicit type guards for MagicMock compatibility
+            _adapter_source_priority_bias_acc = _float_attr(entry, "source_priority_bias", 0.0)
+            _adapter_timestamp_reliability_acc = _float_attr(entry, "timestamp_reliability", 0.0)
+            _adapter_metadata_richness_band_acc = _str_attr(entry, "metadata_richness_band", "")
+            _adapter_entry_usefulness_band_acc = _str_attr(entry, "entry_usefulness_band", "")
+            _adapter_selection_reason_acc = _str_attr(entry, "selection_reason", "")
+
+            # Winning source breakdown via FallbackDecision
+            feed_native_carried = pre_fallback_hits > 0
             entry_breakdown = _compute_winning_source_breakdown(
-                feed_native_signal_carried, article_fallback_used, findings, _adapter_selection_reason_acc
+                feed_native_carried, article_fallback_used, findings, _adapter_selection_reason_acc
             )
             for k, v in entry_breakdown.items():
                 _winning_source_breakdown_acc[k] = _winning_source_breakdown_acc.get(k, 0) + v
@@ -1679,7 +1987,7 @@ async def async_run_live_feed_pipeline(
             error=None,
         ))
 
-    # Sprint 8AU: compute signal stage diagnosis
+    # Sprint 8AU + F160A: compute signal stage diagnosis with findings_build_loss tracking
     signal_stage = diagnose_feed_signal_stage(
         entries_seen=entries_seen,
         entries_with_empty_assembled_text=entries_with_empty_assembled_text,
@@ -1687,6 +1995,7 @@ async def async_run_live_feed_pipeline(
         entries_with_hits=entries_with_hits,
         findings_built_pre_store=findings_built_pre_store,
         patterns_configured=total_patterns_configured,
+        findings_lost_to_dedup_total=_findings_lost_to_dedup_total,
     )
     avg_text_len = (
         assembled_text_chars_total / entries_with_text
@@ -1716,7 +2025,8 @@ async def async_run_live_feed_pipeline(
         # Sprint F159: zero_signal_reason — derived fail-soft from signal_stage
         zero_signal_reason=signal_stage if signal_stage in (
             "empty_fetch", "content_empty", "no_pattern_hits",
-            "empty_registry", "pattern_hits_but_no_findings_built",
+            "no_pattern_hits_with_content", "findings_build_loss",
+            "empty_registry",
         ) else None,
         # Sprint 8BC: bounded sample capture
         sample_scanned_texts=tuple(_sample_texts),
@@ -1782,6 +2092,7 @@ async def async_run_live_feed_pipeline(
         ),
         # Sprint F151A: winning source breakdown + adapter-adjusted confidence
         winning_source_breakdown=dict(_winning_source_breakdown_acc),
+        findings_lost_to_dedup=_findings_lost_to_dedup_total,
         feed_confidence_score=_compute_adapter_adjusted_confidence(
             max(0, min(100, int(
                 (_findings_from_rich_feed / max(1, _findings_from_rich_feed + _findings_from_fallback)) * 100

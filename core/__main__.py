@@ -324,8 +324,11 @@ async def run_sprint(
 
         _phase_times["WINDUP"] = time.monotonic()
 
-        # Actual sprint elapsed (BOOT → WINDUP)
-        actual_duration = _phase_times["WINDUP"] - _phase_times["BOOT"]
+        # BOOT → WINDUP: when scheduler's should_enter_windup() fires.
+        # This is NOT the full run time — it reflects windup_lead_s offset.
+        # e.g. requested=300s, windup_lead_s=180 → time_to_windup_s ≈ 120s (correct, not a bug)
+        time_to_windup_s = _phase_times["WINDUP"] - _phase_times["BOOT"]
+        actual_duration = time_to_windup_s  # backward-compatible alias
 
         # UMA peak
         uma_peak_gib = sample_uma_status().system_used_gib
@@ -355,6 +358,25 @@ async def run_sprint(
                 if next_ph in _phase_times:
                     elapsed = _phase_times[next_ph] - _phase_times[ph]
                     logger.info(f"[{sprint_id}] {ph}→{next_ph}: {elapsed:.1f}s")
+
+        # --- Timing truth (Sprint F160E) -------------------------------------------
+        # Canonical surfaces that distinguish:
+        #   requested_duration  — what operator asked for
+        #   windup_lead_s       — T-minus offset that triggers wind-down
+        #   time_to_windup_s    — BOOT→WINDUP, the active window actually used
+        #   time_to_teardown_s  — BOOT→TEARDOWN, full wall-clock of this run
+        #   active_window_budget_s — theoretical active window (requested - windup_lead)
+        #   windup_lead_observed_s — actual time between WINDUP entry and TEARDOWN
+        _teardown_time = _phase_times.get("TEARDOWN", _phase_times.get("WINDUP", 0))
+        windup_lead_observed_s = _teardown_time - _phase_times.get("WINDUP", 0)
+        timing_truth = {
+            "requested_duration_s": duration_s,
+            "windup_lead_s": config.windup_lead_s,
+            "time_to_windup_s": round(time_to_windup_s, 2),
+            "time_to_teardown_s": round(_teardown_time - _phase_times["BOOT"], 2),
+            "active_window_budget_s": round(duration_s - config.windup_lead_s, 2),
+            "windup_lead_observed_s": round(windup_lead_observed_s, 2),
+        }
 
         # --- Derived metrics --------------------------------------------------------
         findings_per_min = (result.accepted_findings / (actual_duration / 60.0)) if actual_duration > 0 else 0.0
@@ -430,13 +452,13 @@ async def run_sprint(
                 f"[RUNTIME TRUTH] ✅ MEANINGFUL ACTIVE RUN | {evidence_note} | "
                 f"primary: {runtime_truth['primary_signal_source']} | "
                 f"cycles: {result.cycles_completed}/{result.cycles_started} | "
-                f"actual: {actual_duration:.0f}s"
+                f"windup: {time_to_windup_s:.0f}s (budget={timing_truth['active_window_budget_s']:.0f}s)"
             )
         else:
             logger.warning(
                 f"[RUNTIME TRUTH] 🚨 SMOKE ONLY | {evidence_note} | "
                 f"cycles: {result.cycles_completed}/{result.cycles_started} | "
-                f"actual: {actual_duration:.0f}s"
+                f"windup: {time_to_windup_s:.0f}s (budget={timing_truth['active_window_budget_s']:.0f}s)"
             )
 
         logger.info(
@@ -620,6 +642,8 @@ async def run_sprint(
                 "effective_timeouts": {},
                 "active_iteration_count": active_iterations,
                 "export_finish_layer_status": _export_finish_status,
+                # Sprint F160E: Canonical timing truth — separates active window from full run
+                "timing_truth": timing_truth,
             },
         }
         report_path.write_bytes(orjson.dumps(report_dict, option=orjson.OPT_INDENT_2))
@@ -699,6 +723,8 @@ async def run_sprint(
                     "effective_timeouts": {},
                     "active_iteration_count": active_iterations,
                     "export_finish_layer_status": _export_finish_status,
+                    # Sprint F160E: Canonical timing truth — separates active window from full run
+                    "timing_truth": timing_truth,
                 },
                 synthesis_outcome_payload=None,  # synthesis_runner not exposed on lifecycle/scheduler
                 # Sprint F153: Top-level sprint verdict propagated to export

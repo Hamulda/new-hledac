@@ -1624,6 +1624,100 @@ def get_default_feed_seed_truth() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Sprint F160D — Runtime Feed Seed Surface Accessors
+# ---------------------------------------------------------------------------
+
+
+def get_runtime_feed_seeds() -> tuple[FeedSeed, ...]:
+    """
+    Return the runtime RSS/Atom feed seed surface.
+
+    Contains ONLY ``source=curated_seed`` entries, sorted by priority descending.
+    Topology candidates (JSON/WARC/CDX endpoints) are EXCLUDED.
+
+    This is the surface that belongs in hot-path feed fetching.
+    """
+    seeds = get_default_feed_seeds()
+    runtime = [s for s in seeds if s.source == "curated_seed"]
+    runtime.sort(key=lambda s: -s.priority)
+    return tuple(runtime)
+
+
+def get_topology_candidates() -> tuple[FeedSeed, ...]:
+    """
+    Return the topology/intelligence candidate surface.
+
+    Contains ONLY ``source=topology_candidate`` entries.
+    These are non-feed endpoints (JSON APIs, CDX indexes) used for
+    intelligence/topology purposes — excluded from RSS/Atom hot-path fetching.
+    """
+    seeds = get_default_feed_seeds()
+    return tuple(s for s in seeds if s.source == "topology_candidate")
+
+
+# Viability tier thresholds — derived from existing FeedEntryHit scoring fields
+_VIABILITY_HIGH_PRIORITY_THRESHOLD: int = 7  # min priority for "high" tier
+_VIABILITY_MEDIUM_PRIORITY_THRESHOLD: int = 4  # min priority for "medium" tier
+
+
+def get_feed_viability_posture() -> dict[str, Any]:
+    """
+    Return a derived viability posture for the runtime feed seed surface.
+
+    Derived ONLY from existing truth fields (priority, source, label) —
+    NO new parallel scoring world. No network calls.
+
+    Posture fields:
+    - ``viability_tier`` — "high" | "medium" | "low" | "degraded" | "unknown"
+    - ``runtime_feed_count`` — number of runtime RSS/Atom feeds
+    - ``topology_candidate_count`` — number of topology candidates
+    - ``sources`` — list of per-source entries with identity, label, priority, source
+    - ``top_priority`` — highest priority value in the runtime surface
+    - ``canonical_osint_sources`` — list of labels that are primary OSINT sources
+    """
+    runtime = get_runtime_feed_seeds()
+    topology = get_topology_candidates()
+
+    # Compute viability_tier from priority distribution
+    if not runtime:
+        tier = "unknown"
+    else:
+        max_priority = max(s.priority for s in runtime)
+        if max_priority >= _VIABILITY_HIGH_PRIORITY_THRESHOLD:
+            tier = "high"
+        elif max_priority >= _VIABILITY_MEDIUM_PRIORITY_THRESHOLD:
+            tier = "medium"
+        elif max_priority > 0:
+            tier = "low"
+        else:
+            tier = "degraded"
+
+    # Build sources list — only from existing FeedSeed fields (no new data)
+    sources: list[dict[str, Any]] = [
+        {
+            "feed_url": s.feed_url,
+            "label": s.label,
+            "priority": s.priority,
+            "source": s.source,
+            "identity": normalize_seed_identity(s),
+        }
+        for s in runtime
+    ]
+
+    # Canonical OSINT sources: priority >= _VIABILITY_HIGH_PRIORITY_THRESHOLD
+    canonical_labels = [s.label for s in runtime if s.priority >= _VIABILITY_HIGH_PRIORITY_THRESHOLD]
+
+    return {
+        "viability_tier": tier,
+        "runtime_feed_count": len(runtime),
+        "topology_candidate_count": len(topology),
+        "sources": sources,
+        "top_priority": max((s.priority for s in runtime), default=0),
+        "canonical_osint_sources": canonical_labels,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Sprint 8AJ — Merge Discovered + Seeded Sources
 # ---------------------------------------------------------------------------
 
