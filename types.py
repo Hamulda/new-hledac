@@ -1683,6 +1683,13 @@ class ExportHandoff:
             "top_nodes": self.top_nodes,
             "phase_durations": self.phase_durations,
             "correlation": self.correlation.to_dict() if self.correlation else None,
+            # Sprint F155: Canonical truth enrichment — typed seam now serializes
+            "runtime_truth": self.runtime_truth,
+            "execution_context": self.execution_context,
+            "canonical_run_summary": self.canonical_run_summary,
+            "synthesis_outcome_payload": self.synthesis_outcome_payload,
+            # Sprint F153: Top-level sprint verdict
+            "sprint_verdict": self.sprint_verdict,
         }
 
 

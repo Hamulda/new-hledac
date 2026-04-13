@@ -229,6 +229,8 @@ class FeedPipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     assembled_text_chars_total: int = 0
     avg_assembled_text_len: float = 0.0
     signal_stage: str = "unknown"
+    # Sprint F159: zero-signal surfacing — derived, not persisted
+    zero_signal_reason: str | None = None
     # Sprint 8BC: bounded sample capture (first 3 entries, truncated to 160 chars)
     sample_scanned_texts: tuple[str, ...] = ()
     sample_hit_counts: tuple[int, ...] = ()
@@ -289,13 +291,20 @@ def diagnose_feed_signal_stage(
 
     Returns one of:
       empty_registry       — no patterns configured at all
-      no_pattern_hits     — patterns exist but nothing matched
+      empty_fetch          — no entries arrived at all
+      content_empty        — entries arrived but assembled text was empty
+      no_pattern_hits     — entries with text arrived but no pattern matched
+      no_pattern_hits_with_content  — entries with text, no hits (alias for no_pattern_hits)
       pattern_hits_but_no_findings_built  — hits seen but all were deduped/filtered
       prestore_findings_present          — findings exist pre-store
       unknown                        — counters not yet populated
     """
     if patterns_configured == 0:
         return "empty_registry"
+    if entries_with_empty_assembled_text > 0 and entries_scanned == 0:
+        return "content_empty"
+    if entries_seen == 0:
+        return "empty_fetch"
     if entries_scanned == 0:
         return "no_pattern_hits"
     if entries_with_hits == 0:
@@ -1704,6 +1713,11 @@ async def async_run_live_feed_pipeline(
         assembled_text_chars_total=assembled_text_chars_total,
         avg_assembled_text_len=avg_text_len,
         signal_stage=signal_stage,
+        # Sprint F159: zero_signal_reason — derived fail-soft from signal_stage
+        zero_signal_reason=signal_stage if signal_stage in (
+            "empty_fetch", "content_empty", "no_pattern_hits",
+            "empty_registry", "pattern_hits_but_no_findings_built",
+        ) else None,
         # Sprint 8BC: bounded sample capture
         sample_scanned_texts=tuple(_sample_texts),
         sample_hit_counts=tuple(_sample_hit_counts),

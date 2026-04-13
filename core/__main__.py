@@ -73,6 +73,14 @@ def _is_meaningful_run(
     if actual_duration_s < 10:
         return False, f"runtime {actual_duration_s:.1f}s — entry/import only"
 
+    # E0-T4: <180s without findings is meaningful_empty, not meaningful.
+    # authoritative early-returns above (findings > 0, hits >= 15) are exempt.
+    if actual_duration_s < 180 and accepted_findings == 0 and total_pattern_hits == 0:
+        return False, (
+            f"runtime {actual_duration_s:.0f}s < 180s floor, "
+            f"no findings, no pattern hits — below meaningful threshold"
+        )
+
     # Normal meaningful run
     return True, (
         f"{actual_duration_s:.0f}s runtime, "
@@ -478,36 +486,46 @@ async def run_sprint(
             verdict,
         )
 
+        # E0-T4: short_signal — <180s with pattern hits but no findings.
+        # 180s floor in _is_meaningful_run is exempt for hits/findings early-returns.
         runtime_truth_level = (
             "active"
             if is_meaningful and result.accepted_findings > 0
+            else "short_signal"
+            if is_meaningful and result.total_pattern_hits > 0
             else "meaningful_empty"
             if is_meaningful
             else "smoke"
         )
 
-        # CHECKPOINT-0 taxonomy (Sprint F155)
+        # CHECKPOINT-0 taxonomy (Sprint F155 + E0-T4)
+        # Bucket set: signal_reaches_findings | short_signal | depleted | windup_export_fail_soft | authority_census
         _ckpt_category = (
             "signal_reaches_findings"
             if result.accepted_findings > 0
+            else "short_signal"
+            if is_meaningful and result.total_pattern_hits > 0
             else "depleted"
             if result.accepted_findings == 0 and result.total_pattern_hits == 0
             else "windup_export_fail_soft"
             if result.accepted_findings == 0 and _phase_times.get("WINDUP", 0) > 0
             else "authority_census"
             if not is_meaningful
-            else "unknown"
+            else "depleted"
         )
+        # E0-T4: short_signal reason + no unknown fallback
         _checkpoint_zero_reason = (
             evidence_note
             if not is_meaningful
             else "signal_reaches_findings"
             if result.accepted_findings > 0
+            else "short_signal_no_findings"
+            if is_meaningful and result.total_pattern_hits > 0
             else "depleted_no_pattern_hits"
             if result.total_pattern_hits == 0
             else "public_only"
             if result.public_discovered > 0
-            else "unknown"
+            else "depleted_no_signal"
         )
         _export_finish_status = (
             "finished" if result.final_phase in ("EXPORT", "TEARDOWN") and result.accepted_findings > 0
