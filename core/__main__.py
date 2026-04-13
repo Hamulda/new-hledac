@@ -142,17 +142,13 @@ def _get_live_feed_urls() -> list[str]:
     """
     Return canonical runtime feed URLs for live sprint path.
 
-    Uses get_default_feed_seeds() from rss_atom_adapter — the single source
-    of truth for OSINT-relevant RSS/Atom feeds. Only ``curated_seed`` sources
-    are included; ``topology_candidate`` sources are non-feed endpoints and
-    are excluded from feed-surface processing.
+    Uses get_runtime_feed_seeds() from rss_atom_adapter — the single source
+    of truth for the runtime RSS/Atom feed surface. Returns only ``curated_seed``
+    entries sorted by priority descending. This is the accessor the canonical
+    sprint owner path should use; topology_candidates are excluded by design.
     """
-    from hledac.universal.discovery.rss_atom_adapter import get_default_feed_seeds
-    return [
-        seed.feed_url
-        for seed in get_default_feed_seeds()
-        if seed.source == "curated_seed"
-    ]
+    from hledac.universal.discovery.rss_atom_adapter import get_runtime_feed_seeds
+    return [seed.feed_url for seed in get_runtime_feed_seeds()]
 
 
 # =============================================================================
@@ -500,14 +496,6 @@ async def run_sprint(
         # CHECKPOINT-0 additive derived fields (computed before report_dict)
         active_iterations = result.cycles_completed
 
-        observed_run_tuple = (
-            query[:40] if len(query) > 40 else query,
-            round(actual_duration, 1),
-            active_iterations,
-            src_mix_str,
-            verdict,
-        )
-
         # E0-T4: short_signal — <180s with pattern hits but no findings.
         # 180s floor in _is_meaningful_run is exempt for hits/findings early-returns.
         runtime_truth_level = (
@@ -518,6 +506,17 @@ async def run_sprint(
             else "meaningful_empty"
             if is_meaningful
             else "smoke"
+        )
+
+        # Sprint F162D: observed_run_tuple must be deterministic — no verdict string
+        # (verdict is heuristic and non-reproducible across identical runs).
+        # Canonical components: query-truncated, duration, iterations, source-mix, truth-level.
+        observed_run_tuple = (
+            query[:40] if len(query) > 40 else query,
+            round(actual_duration, 1),
+            active_iterations,
+            src_mix_str,
+            runtime_truth_level,
         )
 
         # CHECKPOINT-0 taxonomy (Sprint F155 + E0-T4)
@@ -535,7 +534,15 @@ async def run_sprint(
             if not is_meaningful
             else "depleted"
         )
-        # E0-T4: short_signal reason + no unknown fallback
+        # Sprint F162D: simplified reason chain — all branches reachable.
+        # Structure mirrors _ckpt_category for consistency.
+        # smoke: is_meaningful=False → evidence_note (short descriptive string)
+        # active: is_meaningful=True, findings>0 → "signal_reaches_findings"
+        # short_signal: is_meaningful=True, hits>0, no findings → "short_signal_no_findings"
+        # meaningful_empty: is_meaningful=True, hits=0, no findings → "depleted_no_pattern_hits"
+        # The "public_only" and "depleted_no_signal" branches are consolidated into
+        # "depleted_no_pattern_hits" (the only remaining meaningful_empty sub-case after
+        # short_signal_no_findings is separated out). No unknown fallback.
         _checkpoint_zero_reason = (
             evidence_note
             if not is_meaningful
@@ -544,10 +551,6 @@ async def run_sprint(
             else "short_signal_no_findings"
             if is_meaningful and result.total_pattern_hits > 0
             else "depleted_no_pattern_hits"
-            if result.total_pattern_hits == 0
-            else "public_only"
-            if result.public_discovered > 0
-            else "depleted_no_signal"
         )
         _export_finish_status = (
             "finished" if result.final_phase in ("EXPORT", "TEARDOWN") and result.accepted_findings > 0

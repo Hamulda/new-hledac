@@ -144,6 +144,10 @@ class PipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     discovery_false_positive_count: int = 0  # pages with discovery signal but no conversion
     waste_category_counts: dict = {}  # {"structural": N, "signalless": N, "false_positive": N, "error": N}
     structural_health_ratio: float = 0.0  # fraction of fetched pages with structural_quality=healthy
+    # Sprint F162B: factual value density + clean waste code
+    factual_value_density: float = 0.0  # stored / fetched (real conversion density)
+    run_waste_pattern_code: str = ""   # dominant waste category clean code
+    waste_reason_breakdown: str = ""   # waste category distribution
 
 
 # -----------------------------------------------------------------------------
@@ -1147,10 +1151,11 @@ async def async_run_live_public_pipeline(
     )
     # Sprint F150K: discovery_squandered — strong discovery score but page quality weak
     # (promarněný strong discovery hit = high score but got SKIP_WEAK or weak_low_signal)
+    # Sprint F162B: threshold aligned with _FETCH_BUDGET_STRONG = 0.85
     discovery_squandered = sum(
         1 for p in all_page_results
         if p.discovery_score is not None
-        and p.discovery_score >= 0.7
+        and p.discovery_score >= 0.85
         and p.quality_reason in ("weak_low_signal", "SKIP_WEAK:weak_discovery", "SKIP_WEAK:very_low_text")
     )
     # Sprint F150K: build derived value metrics
@@ -1243,6 +1248,8 @@ async def async_run_live_public_pipeline(
         discovery_and_content_strong / max(total_discovered, 1), 3
     )
     public_value_density = round(total_stored / max(total_fetched, 1), 3)
+    # Sprint F162B: factual_value_density uses fetched as denominator (real conversion density)
+    factual_value_density = round(total_stored / max(total_fetched, 1), 3)
 
     # quality_mix: composition summary from per-page value_tiers
     tier_counts: dict[str, int] = {"high": 0, "medium": 0, "low": 0, "waste": 0, "none": 0}
@@ -1283,12 +1290,24 @@ async def async_run_live_public_pipeline(
         if fetched_count > 0 else 0.0
     )
 
-    # public_proof_grade: overall proof quality of public branch run
-    if usable_findings_ratio >= 0.5 and discovery_to_findings_efficiency >= 0.3:
+    # Sprint F162B: run_waste_pattern_code — dominant clean waste category code
+    run_waste_pattern_code = (
+        max(waste_category_counts, key=lambda k: waste_category_counts[k])
+        if any(v > 0 for v in waste_category_counts.values())
+        else ""
+    )
+
+    # Sprint F162B: waste_reason_breakdown — distribution of waste categories
+    waste_reason_breakdown = "|".join(
+        f"{v}{k[:3]}" for k, v in sorted(waste_category_counts.items()) if v > 0
+    ) if any(v > 0 for v in waste_category_counts.values()) else "none"
+
+    # Sprint F162B: public_proof_grade calibrated on factual_value_density + structural_health_ratio + noise_fetch_ratio
+    if factual_value_density >= 0.5 and structural_health_ratio >= 0.7 and noise_fetch_ratio <= 0.3:
         public_proof_grade = "strong"
-    elif usable_findings_ratio >= 0.2 and discovery_to_findings_efficiency >= 0.1:
+    elif factual_value_density >= 0.3 and noise_fetch_ratio <= 0.5:
         public_proof_grade = "moderate"
-    elif usable_findings_ratio > 0 or discovery_to_findings_efficiency > 0:
+    elif factual_value_density > 0 or total_stored > 0:
         public_proof_grade = "weak"
     elif total_discovered > 0:
         public_proof_grade = "empty"
@@ -1325,6 +1344,9 @@ async def async_run_live_public_pipeline(
         discovery_false_positive_count=discovery_false_positive_count,
         waste_category_counts=waste_category_counts,
         structural_health_ratio=structural_health_ratio,
+        factual_value_density=factual_value_density,
+        run_waste_pattern_code=run_waste_pattern_code,
+        waste_reason_breakdown=waste_reason_breakdown,
     )
 
 

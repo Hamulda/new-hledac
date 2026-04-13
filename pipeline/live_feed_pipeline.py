@@ -1807,6 +1807,8 @@ async def async_run_live_feed_pipeline(
     _adapter_metadata_richness_band_acc: str = ""
     _adapter_entry_usefulness_band_acc: str = ""
     _adapter_selection_reason_acc: str = ""
+    _adapter_signal_count: int = 0  # W3: count entries with adapter signals for proper averaging
+    _temporal_vocabulary_mismatch: bool = False  # W4: temporal vocabulary gap signal
 
     for entry in entries:
         entry_url = getattr(entry, "entry_url", "") or f"urn:feed:entry:{getattr(entry, 'title', '')[:64]}"
@@ -1861,14 +1863,15 @@ async def async_run_live_feed_pipeline(
                 _sample_texts.append(entries_text)
                 _sample_hit_counts.append(matched)
                 if matched > 0:
+                    # W1: Only scan for labels if we have hits AND sample slot available.
+                    # Reuse clean_text (already casefolded in _async_scan_feed_text) — no new match_text needed
+                    # to get labels. The second scan here is bounded: max 1 per sample entry, 3 samples max.
                     try:
                         from hledac.universal.patterns.pattern_matcher import match_text
-                        hits_for_labels = match_text(entries_text)
-                        seen_labels = set()
+                        hits_for_labels = match_text(entries_text)  # entries_text is clean_text truncated
                         for h in hits_for_labels:
-                            if h.label:
-                                seen_labels.add(h.label)
-                        _sample_hit_labels.extend(seen_labels)
+                            if h.label and len(_sample_hit_labels) < 20:
+                                _sample_hit_labels.append(h.label)
                     except Exception:
                         pass
             entries_with_text += 1
@@ -1923,12 +1926,23 @@ async def async_run_live_feed_pipeline(
             # F160A: findings lost to per-entry dedup (hits arrived but filtered)
             _findings_lost_to_dedup_total += findings_lost_to_dedup
 
-            # Adapter signals accumulation — use explicit type guards for MagicMock compatibility
-            _adapter_source_priority_bias_acc = _float_attr(entry, "source_priority_bias", 0.0)
-            _adapter_timestamp_reliability_acc = _float_attr(entry, "timestamp_reliability", 0.0)
-            _adapter_metadata_richness_band_acc = _str_attr(entry, "metadata_richness_band", "")
-            _adapter_entry_usefulness_band_acc = _str_attr(entry, "entry_usefulness_band", "")
-            _adapter_selection_reason_acc = _str_attr(entry, "selection_reason", "")
+            # W3 FIX: Accumulate adapter signals (+=) instead of last-write overwrite (=).
+            # _float_attr is safe with MagicMock — returns 0.0 for missing attrs.
+            _adapter_source_priority_bias_acc += _float_attr(entry, "source_priority_bias", 0.0)
+            _adapter_timestamp_reliability_acc += _float_attr(entry, "timestamp_reliability", 0.0)
+            # String fields: keep first non-empty value (representative, not last)
+            _adapter_metadata_richness_band_acc = _adapter_metadata_richness_band_acc or _str_attr(entry, "metadata_richness_band", "")
+            _adapter_entry_usefulness_band_acc = _adapter_entry_usefulness_band_acc or _str_attr(entry, "entry_usefulness_band", "")
+            _adapter_selection_reason_acc = _adapter_selection_reason_acc or _str_attr(entry, "selection_reason", "")
+            _adapter_signal_count += 1
+
+            # W4 FIX: temporal_feed_vocabulary_mismatch — true when feed has substantive
+            # content but got zero hits, while other entries in the same run DID get hits.
+            # This means the feed's vocabulary doesn't match pattern vocabulary.
+            if not is_empty_content and matched == 0 and assembled_len >= _MIN_ARTICLE_FALLBACK_CHARS:
+                # Content was substantive but no hits — possible vocabulary gap
+                if entries_with_hits > 0:
+                    _temporal_vocabulary_mismatch = True
 
             # Winning source breakdown via FallbackDecision
             feed_native_carried = pre_fallback_hits > 0
@@ -2002,6 +2016,9 @@ async def async_run_live_feed_pipeline(
         if entries_with_text > 0
         else 0.0
     )
+    # W3 FIX: Average adapter signals over entries that contributed them.
+    _avg_bias = _adapter_source_priority_bias_acc / max(1, _adapter_signal_count)
+    _avg_timestamp = _adapter_timestamp_reliability_acc / max(1, _adapter_signal_count)
 
     return FeedPipelineRunResult(
         feed_url=feed_url,
@@ -2047,7 +2064,7 @@ async def async_run_live_feed_pipeline(
         ),
         sample_enriched_texts=tuple(_sample_enriched_texts),
         enrichment_phase_used="article_fallback" if entries_with_article_fallback > 0 else ("feed_rich_content" if entries_with_rich_feed_content > 0 else "none"),
-        temporal_feed_vocabulary_mismatch=False,
+        temporal_feed_vocabulary_mismatch=_temporal_vocabulary_mismatch,
         # Sprint F150I: feed economics verdicts
         feed_branch_signal_present=_feed_branch_signal_present,
         fallback_useful_count=_fallback_useful_count,
@@ -2072,20 +2089,16 @@ async def async_run_live_feed_pipeline(
         feed_native_yield_ratio=(
             _findings_from_rich_feed / max(1, _findings_from_rich_feed + _findings_from_fallback)
         ),
-        feed_next_action=(
-            _compute_feed_next_action_and_confidence(
-                _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
-                _findings_from_rich_feed, _findings_from_fallback,
-                _squandered_high_usefulness_entries, _metadata_strong_but_content_weak, _low_trust_feed_hits,
-            )[0]
-        ),
-        feed_confidence_note=(
-            _compute_feed_next_action_and_confidence(
-                _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
-                _findings_from_rich_feed, _findings_from_fallback,
-                _squandered_high_usefulness_entries, _metadata_strong_but_content_weak, _low_trust_feed_hits,
-            )[1]
-        ),
+        feed_next_action=_compute_feed_next_action_and_confidence(
+            _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
+            _findings_from_rich_feed, _findings_from_fallback,
+            _squandered_high_usefulness_entries, _metadata_strong_but_content_weak, _low_trust_feed_hits,
+        )[0],
+        feed_confidence_note=_compute_feed_next_action_and_confidence(
+            _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
+            _findings_from_rich_feed, _findings_from_fallback,
+            _squandered_high_usefulness_entries, _metadata_strong_but_content_weak, _low_trust_feed_hits,
+        )[1],
         feed_branch_verdict=_compute_feed_branch_verdict(
             _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
             _findings_from_rich_feed, _findings_from_fallback,
@@ -2101,8 +2114,8 @@ async def async_run_live_feed_pipeline(
             max(0, min(100, int(
                 (_findings_from_rich_feed / max(1, _findings_from_rich_feed + _findings_from_fallback)) * 100
             ))),
-            _adapter_source_priority_bias_acc,
-            _adapter_timestamp_reliability_acc,
+            _avg_bias,
+            _avg_timestamp,
             _adapter_metadata_richness_band_acc,
             _adapter_entry_usefulness_band_acc,
             _adapter_selection_reason_acc,

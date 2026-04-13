@@ -92,6 +92,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _emergency_unload_requested: bool = False
 _emergency_callback: Optional[Callable[[], None]] = None
+# F162F: Emergency wait counter — prevents infinite wait on M1 when
+# is_safe_to_clear_emergency keeps returning False due to inaccessible engine attrs.
+_EMERGENCY_WAIT_ATTEMPTS: int = 0
+_MAX_EMERGENCY_WAIT_ATTEMPTS: int = 5
 
 
 def request_emergency_unload() -> None:
@@ -121,14 +125,16 @@ def is_safe_to_clear_emergency(engine) -> bool:
     """
     Sprint 8C: 7K safe-clear preconditions — EXACT 7K conditions.
 
-    Returns True when ALL of these hold:
+    F162F: Tracks _EMERGENCY_WAIT_ATTEMPTS. Returns True when ALL of:
     1. _batch_worker_task is None or done()
     2. _batch_queue is None
     3. len(_pending_futures) == 0
+    OR when _EMERGENCY_WAIT_ATTEMPTS >= _MAX_EMERGENCY_WAIT_ATTEMPTS (M1 bounded wait).
 
     This is the canonical check BEFORE clearing emergency flag.
     If not safe, leave clear_emergency_unload_request() to caller/manual.
     """
+    global _EMERGENCY_WAIT_ATTEMPTS
     if engine is None:
         return True
     try:
@@ -138,9 +144,25 @@ def is_safe_to_clear_emergency(engine) -> bool:
         )
         queue_none = getattr(engine, '_batch_queue', None) is None
         no_pending = len(getattr(engine, '_pending_futures', set())) == 0
-        return batch_done and queue_none and no_pending
+        if batch_done and queue_none and no_pending:
+            _EMERGENCY_WAIT_ATTEMPTS = 0
+            return True
+        # Increment wait counter
+        _EMERGENCY_WAIT_ATTEMPTS += 1
+        if _EMERGENCY_WAIT_ATTEMPTS >= _MAX_EMERGENCY_WAIT_ATTEMPTS:
+            logger.warning(
+                f"[LIFECYCLE] Emergency wait exhausted ({_EMERGENCY_WAIT_ATTEMPTS} attempts) — "
+                "forcing clear on M1"
+            )
+            _EMERGENCY_WAIT_ATTEMPTS = 0
+            return True
+        return False
     except Exception:
         # Fail-safe: if we can't determine, assume NOT safe
+        _EMERGENCY_WAIT_ATTEMPTS += 1
+        if _EMERGENCY_WAIT_ATTEMPTS >= _MAX_EMERGENCY_WAIT_ATTEMPTS:
+            _EMERGENCY_WAIT_ATTEMPTS = 0
+            return True
         return False
 
 
@@ -188,8 +210,27 @@ _lifecycle_state: dict = {
 }
 
 # Sprint 8Y: Store the actual model object reference so we can call unload()
-# on it when switching models. Weakref to avoid preventing GC.
-_current_model_ref: Optional[Any] = None
+# on it when switching models.
+# F162F FIX: Now uses weakref to avoid preventing GC — model is released
+# immediately after lifecycle considers it unloaded.
+import weakref
+_weak_model_ref: Optional[weakref.ref] = None
+
+
+def _get_current_model_unsafe() -> Optional[Any]:
+    """Dereference weak ref, returning model or None. Must not be called after GC."""
+    if _weak_model_ref is None:
+        return None
+    return _weak_model_ref()
+
+
+def _set_current_model_ref(model: Any) -> None:
+    """Set weak ref to model. None clears it."""
+    global _weak_model_ref
+    if model is None:
+        _weak_model_ref = None
+    else:
+        _weak_model_ref = weakref.ref(model)
 
 
 def get_model_lifecycle_status() -> dict:
@@ -261,7 +302,7 @@ def load_model(
     Returns:
         None
     """
-    global _lifecycle_state, _current_model_ref
+    global _lifecycle_state
 
     # Resolve model name
     resolved_name = model_name
@@ -281,8 +322,8 @@ def load_model(
     # If a different model is currently loaded, unload it first
     if _lifecycle_state["loaded"] and _lifecycle_state["current_model"] != resolved_name:
         logger.info(f"[LIFECYCLE] Switching model: {_lifecycle_state['current_model']} → {resolved_name}")
-        # Use _current_model_ref to unload the OLD model, not the new one
-        old_model = _current_model_ref
+        # Use weak ref to unload the OLD model, not the new one
+        old_model = _get_current_model_unsafe()
         if old_model is not None:
             unload_model(model=old_model)
 
@@ -312,7 +353,7 @@ def load_model(
                 _lifecycle_state["loaded"] = True
                 _lifecycle_state["current_model"] = resolved_name
                 _lifecycle_state["last_error"] = None
-                _current_model_ref = model
+                _set_current_model_ref(model)
                 logger.info(f"[LIFECYCLE] Engine async load() completed: {resolved_name}")
                 return
             except Exception as e:
@@ -326,7 +367,7 @@ def load_model(
                 _lifecycle_state["loaded"] = True
                 _lifecycle_state["current_model"] = resolved_name
                 _lifecycle_state["last_error"] = None
-                _current_model_ref = model
+                _set_current_model_ref(model)
                 logger.info(f"[LIFECYCLE] Engine sync load() completed: {resolved_name}")
                 return
             except Exception as e:
@@ -338,7 +379,7 @@ def load_model(
     _lifecycle_state["loaded"] = True
     _lifecycle_state["current_model"] = resolved_name
     _lifecycle_state["last_error"] = None
-    _current_model_ref = model
+    _set_current_model_ref(model)
     logger.info(f"[LIFECYCLE] Model registered: {resolved_name}")
 
 
@@ -367,13 +408,23 @@ def unload_model(
     Returns:
         None (operace je idempotentní, fail-open)
     """
-    global _current_model_ref
-
     # Sprint 8Y §B.7: Early return when nothing is loaded — avoids
     # unnecessary gc.collect() and asyncio.get_event_loop() calls.
     if not _lifecycle_state["loaded"]:
         logger.debug("[LIFECYCLE] unload_model — nothing loaded, no-op")
         return
+
+    # F162F: If model=None but we have a tracked model, use it.
+    # This fixes the silent-no-op bug where unload_model(None) was called
+    # after a load that didn't pass the model reference.
+    if model is None:
+        model = _get_current_model_unsafe()
+        if model is None:
+            # Nothing to unload and no tracked model — clear state and return
+            _lifecycle_state["loaded"] = False
+            _lifecycle_state["current_model"] = None
+            _set_current_model_ref(None)
+            return
 
     # Sprint 8C: Prefer engine.unload() if available — respects 7K SSOT
     if model is not None and hasattr(model, 'unload'):
@@ -399,7 +450,7 @@ def unload_model(
                 logger.info("[LIFECYCLE] Engine unload() completed via loop")
                 _lifecycle_state["loaded"] = False
                 _lifecycle_state["current_model"] = None
-                _current_model_ref = None
+                _set_current_model_ref(None)
                 return
             except Exception as e:
                 logger.warning(f"[LIFECYCLE] Async unload failed: {e}")
@@ -411,7 +462,7 @@ def unload_model(
                 logger.info("[LIFECYCLE] Engine sync unload() completed")
                 _lifecycle_state["loaded"] = False
                 _lifecycle_state["current_model"] = None
-                _current_model_ref = None
+                _set_current_model_ref(None)
                 return
             except Exception as e:
                 logger.warning(f"[LIFECYCLE] Sync unload failed: {e}")
@@ -421,7 +472,7 @@ def unload_model(
     _unload_model_legacy(model, tokenizer, prompt_cache, aggressive)
     _lifecycle_state["loaded"] = False
     _lifecycle_state["current_model"] = None
-    _current_model_ref = None
+    _set_current_model_ref(None)
 
 
 def _unload_model_legacy(

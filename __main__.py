@@ -65,9 +65,33 @@ ENTRYPOINT_AUTHORITY = {
             "production_status": "alternate",
             "non_canonical": True,  # Freeze F153: not a truth owner, residual path only
             "allowed_purpose": "legacy sprint hot-path; prefer canonical owner",
-        }
+        },
+        "_run_public_passive_once": {
+            "location": "hledac.universal.__main__._run_public_passive_once",
+            "production_status": "alternate",
+            "non_canonical": True,  # F162C: full pipeline runner without canonical lifecycle
+            "allowed_purpose": "diagnostic/public-passive mode; not canonical sprint owner",
+        },
+        "run_warmup": {
+            "location": "hledac.universal.__main__.run_warmup",
+            "production_status": "residual",
+            "non_canonical": True,  # lives in root but claims canonical WARMUP truth
+            "allowed_purpose": "WARMUP orchestration shared with _run_sprint_mode; prefer canonical core.lifecycle",
+        },
+        "_run_observed_default_feed_batch_once": {
+            "location": "hledac.universal.__main__._run_observed_default_feed_batch_once",
+            "production_status": "diagnostic",
+            "non_canonical": True,  # F162C: observed-run diagnostic, not production sprint
+            "allowed_purpose": "benchmark/observed-run probe only",
+        },
     },
-    "_comment": "Freeze F153: root __main__.py is NOT an equal sprint owner — core.__main__.run_sprint is.",
+    "_comment": "F162C: root __main__.py is NOT an equal sprint owner — core.__main__.run_sprint is.",
+    "_authority_census": {
+        "canonical_sprint_owner_calls": ["main() --sprint path → core.__main__.run_sprint()"],
+        "alternate_production_paths": ["_run_sprint_mode (alternate)", "_run_public_passive_once (alternate)"],
+        "residual_diagnostic_paths": ["run_warmup (residual)", "_run_observed_default_feed_batch_once (diagnostic)"],
+        "shell_only": ["main()", "get_entrypoint_authority_status()", "_run_boot_guard()", "_preflight_check()"],
+    },
 }
 
 
@@ -414,8 +438,7 @@ async def _run_public_passive_once(
     owned_store: bool = True,
 ) -> None:
     """
-    Sprint 8AM C.1: One-shot public-passive OSINT run with owned resources.
-
+    F162C NON-CANONICAL: This path is NOT the canonical sprint owner.
     Owned resources are acquired and registered in AsyncExitStack for LIFO cleanup.
     Delegation: async_run_live_public_pipeline() + async_run_default_feed_batch().
 
@@ -1366,7 +1389,9 @@ async def _run_observed_default_feed_batch_once(
     batch_timeout_s: float = 120.0,
 ) -> ObservedRunReport:
     """
-    Sprint 8AW C.0/C.6: Observed one-shot bounded feed batch run.
+    F162C DIAGNOSTIC ONLY: Observed one-shot bounded feed batch run.
+    This is a BENCHMARK/OBSERVED-RUN probe — NOT production sprint.
+    Canonical sprint production is core.__main__.run_sprint().
 
     Collects end-to-end signal + store rejection truth by calling
     async_run_live_feed_pipeline() directly per source (instead of the
@@ -2478,10 +2503,14 @@ async def _run_sprint_mode(
     install_signal_handlers: bool = False,
 ) -> None:
     """
+    F162C NON-CANONICAL ALTERNATE: This is NOT the canonical sprint owner.
     Sprint 8PC: 30-minute autonomous sprint cycle entrypoint.
 
     BOOT → WARMUP (5s) → ACTIVE (parallel pipeline runs)
            → WINDUP (T-3min) → EXPORT → TEARDOWN
+
+    Canonical sprint owner is core.__main__.run_sprint().
+    This function is a residual/alternate path — prefer canonical owner.
 
     In ACTIVE:
         - Runs live_feed_pipeline.async_run_default_feed_batch() every 60s
@@ -2964,12 +2993,15 @@ async def run_warmup(
     do_ane_warmup: bool = False,
 ) -> dict:
     """
-    WARMUP fáze — jediná canonical WARMUP orchestration truth.
+    F162C NON-CANONICAL RESIDUAL: This function lives in root __main__.py
+    (residual/alternate entrypoint) but claims to be the "canonical WARMUP
+    orchestration truth" — that claim is misleading. Canonical WARMUP truth
+    lives in core.__main__.run_sprint() lifecycle, not here.
 
-    Tato funkce je SPRINT 8VY — jediná WARMUP orchestration truth.
-    Volá se z:
-      - _run_sprint_mode() (sprint hot-path)
-      - test_e2e_dry_run.py (test, bez lifecycle)
+    This is a SHARED utility called from:
+      - _run_sprint_mode() (alternate sprint hot-path)
+      - test_e2e_dry_run.py (test, without lifecycle)
+    Prefer the canonical WARMUP orchestration in core lifecycle.
 
     Args:
         scheduler: SprintScheduler instance (或其 mock)
