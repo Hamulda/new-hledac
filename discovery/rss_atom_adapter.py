@@ -921,6 +921,65 @@ def _parse_feed_xml(
 
 
 # ---------------------------------------------------------------------------
+# F170B — Canonical source-accessibility mapping from fetch-layer truth
+# ---------------------------------------------------------------------------
+
+
+def _map_fetch_result_to_source_accessibility(result: "FetchResult") -> str | None:
+    """Return canonical source_accessibility_error from fetch-layer truth (F170B).
+
+    Priority: failure_stage + network_error_kind (F169B structured fields) over
+    raw error string parsing.  Returns None when the fetch error is a local
+    configuration problem (URL validation) or when the source body was reached
+    (body/size failures) — those are not source accessibility issues.
+
+    Canonical values produced:
+      source_dns_failure        — DNS resolution failure
+      source_connect_failure    — TCP/connection refused or reset
+      source_tls_failure        — TLS handshake failure
+      source_timeout            — request timed out before body
+      source_http_unreachable   — HTTP-level error (4xx / 5xx / content-type rejection)
+    """
+    failure_stage: str | None = getattr(result, "failure_stage", None)
+    network_error_kind: str | None = getattr(result, "network_error_kind", None)
+
+    # --- Structured path (F169B fields present) ---
+    if failure_stage == "connection":
+        if network_error_kind == "dns_error":
+            return "source_dns_failure"
+        if network_error_kind == "connect_error":
+            return "source_connect_failure"
+        if network_error_kind == "timeout":
+            return "source_timeout"
+        return "source_connect_failure"  # kind unknown, but connection-level
+
+    if failure_stage == "tls":
+        return "source_tls_failure"
+
+    if failure_stage == "http":
+        return "source_http_unreachable"
+
+    if failure_stage in ("validation", "body", "size"):
+        # validation = bad URL (config error, not source inaccessible)
+        # body/size   = body started arriving (source was reachable)
+        return None
+
+    # --- Legacy / unstructured path (no failure_stage set) ---
+    err: str = result.error or ""
+    if err == "timeout":
+        return "source_timeout"
+    if err.startswith("fetch_error:"):
+        return "source_connect_failure"
+    if err.startswith("retryable:") or err.startswith("content_type_rejected:"):
+        return "source_http_unreachable"
+    if err.startswith("url_"):
+        return None  # URL validation error — not a source accessibility issue
+
+    # Unknown / edge-case — pass raw string through as degraded truth
+    return err or None
+
+
+# ---------------------------------------------------------------------------
 # Public API — Feed Fetching
 # ---------------------------------------------------------------------------
 
@@ -969,13 +1028,16 @@ async def async_fetch_feed_entries(
 
     # Handle fetch-level errors fail-soft
     if result.error or result.text is None:
-        # F169C: fetch-level errors are source accessibility errors
-        src_err = result.error or "fetch_returned_none"
+        # F170B: canonical source accessibility mapping — use failure_stage/network_error_kind
+        # instead of passing raw error string. error= keeps raw bucket for routing;
+        # source_accessibility_error= carries the canonical accessibility truth.
+        fetch_err = result.error or "fetch_returned_none"
+        src_accessibility = _map_fetch_result_to_source_accessibility(result)
         return FeedBatchResult(
             feed_url=feed_url,
             entries=(),
-            error=src_err,
-            source_accessibility_error=src_err,
+            error=fetch_err,
+            source_accessibility_error=src_accessibility,
         )
 
     # Guard removed by Sprint 8AR: DOCTYPE/ENTITY handling is now done

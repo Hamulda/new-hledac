@@ -1719,7 +1719,7 @@ async def async_run_live_feed_pipeline(
 
     # Handle fetch-level errors fail-soft
     if batch.error:
-        # Sprint F169D: extract upstream blocker from batch.error
+        # F170C: extract granular upstream blocker from batch.error
         _fetch_err = batch.error or ""
         _parse_blocker: str | None = None
         _fetch_blocker: str | None = None
@@ -1729,6 +1729,19 @@ async def async_run_live_feed_pipeline(
             _parse_blocker = "wrong_content_type"
         elif "redirect" in _fetch_err.lower():
             _parse_blocker = "redirected_non_feed"
+        # F170C: granular fetch blocker from error string patterns
+        elif "timeout" in _fetch_err.lower() or "timed out" in _fetch_err.lower():
+            _fetch_blocker = "timeout"
+        elif "dns" in _fetch_err.lower() or "name or service not known" in _fetch_err.lower():
+            _fetch_blocker = "dns_failure"
+        elif "connection" in _fetch_err.lower() or "connect" in _fetch_err.lower():
+            _fetch_blocker = "connection_error"
+        elif "robot" in _fetch_err.lower() or "blocked" in _fetch_err.lower():
+            _fetch_blocker = "robots_blocked"
+        elif "403" in _fetch_err or "401" in _fetch_err or "Forbidden" in _fetch_err:
+            _fetch_blocker = "http_error"
+        elif "500" in _fetch_err or "502" in _fetch_err or "503" in _fetch_err or "504" in _fetch_err:
+            _fetch_blocker = "http_error"
         else:
             _fetch_blocker = "http_error"
         # F169C: source_accessibility_error from adapter carries the true source-level failure
@@ -1767,6 +1780,10 @@ async def async_run_live_feed_pipeline(
 
     # Handle empty but valid response
     if fetched_count == 0:
+        # F170C: source_accessibility_error from adapter carries source-level truth
+        _source_blocker_empty: str | None = None
+        if hasattr(batch, "source_accessibility_error") and batch.source_accessibility_error:
+            _source_blocker_empty = batch.source_accessibility_error
         return FeedPipelineRunResult(
             feed_url=feed_url,
             fetched_entries=0,
@@ -1785,7 +1802,7 @@ async def async_run_live_feed_pipeline(
             findings_built_pre_store=0,
             assembled_text_chars_total=0,
             avg_assembled_text_len=0.0,
-            signal_stage="unknown",
+            signal_stage="empty_fetch",
             # Sprint 8BE: enrichment
             entries_with_rich_feed_content=0,
             entries_with_article_fallback=0,
@@ -1796,10 +1813,10 @@ async def async_run_live_feed_pipeline(
             sample_enriched_texts=(),
             enrichment_phase_used="none",
             temporal_feed_vocabulary_mismatch=False,
-            # Sprint F169D: root-cause propagation
+            # Sprint F169D + F170C: root-cause propagation
             upstream_fetch_blocker=None,
             upstream_parse_blocker=None,
-            source_accessibility_blocker=None,
+            source_accessibility_blocker=_source_blocker_empty,
             root_zero_yield_reason="empty_fetch",
             had_substantive_content_but_no_hits=False,
         )

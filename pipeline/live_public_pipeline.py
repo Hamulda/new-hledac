@@ -107,6 +107,8 @@ class PipelinePageResult(msgspec.Struct, frozen=True, gc=False):
     discovery_false_positive: bool = False  # True if discovery signal was legitimate but page converted to waste
     waste_category: str = ""  # "" | "structural" | "signalless" | "false_positive" | "error"
     structural_quality: str = ""  # "" | "healthy" | "thin" | "dead"
+    # Sprint F170D: fetch accessibility truth — failure_stage from FetchResult
+    failure_stage: str | None = None  # validation | connection | tls | http | body | size
 
 
 class PipelineRunResult(msgspec.Struct, frozen=True, gc=False):
@@ -153,6 +155,15 @@ class PipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     waste_reason_breakdown: str = ""   # waste category distribution
     # Sprint F163B: backend degradation flag — true when fetch errors dominate discovery output
     backend_degraded: bool = False
+    # Sprint F170D: lower-layer truth consumption — discovery block / fetch accessibility
+    # None | "uma_emergency_abort" | "backend_error_no_fallback" | "backend_error_fallback_failed"
+    public_discovery_blocker: str | None = None
+    # True when any page had fetch accessibility failure (DNS/TLS/connection/timeout)
+    public_fetch_accessibility_blocker: bool = False
+    # None | "primary_failed_fallback_succeeded" | "primary_failed_fallback_failed" | "no_fallback_needed"
+    public_discovery_fallback_state: str | None = None
+    # Dominant failure mode across all pages and discovery
+    dominant_public_failure_mode: str | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -682,6 +693,7 @@ async def _fetch_and_process_page(
                 discovery_false_positive=discovery_false_positive,
                 waste_category=waste_category,
                 structural_quality=structural_quality,
+                failure_stage=None,
             )
 
         try:
@@ -710,6 +722,7 @@ async def _fetch_and_process_page(
                 discovery_false_positive=discovery_false_positive,
                 waste_category=waste_category,
                 structural_quality=structural_quality,
+                failure_stage="connection",
             )
         except asyncio.CancelledError:
             raise  # [I6] propagate, never swallow
@@ -734,12 +747,16 @@ async def _fetch_and_process_page(
                 discovery_false_positive=discovery_false_positive,
                 waste_category=waste_category,
                 structural_quality=structural_quality,
+                failure_stage=fetched_failure_stage if 'fetched_failure_stage' in dir() else "connection",
             )
 
         # Unpack fetch result (FetchResult frozen struct)
+        # Sprint F170D: also read failure_stage for accessibility truth
         fetched_text: str | None
+        fetched_failure_stage: str | None = None
         if hasattr(result, "text"):
             fetched_text = result.text
+            fetched_failure_stage = getattr(result, "failure_stage", None)
         else:
             fetched_text = None
 
@@ -764,6 +781,7 @@ async def _fetch_and_process_page(
                 discovery_false_positive=discovery_false_positive,
                 waste_category=waste_category,
                 structural_quality=structural_quality,
+                failure_stage=None,
             )
 
         # ---- Extract ---------------------------------------------------------
@@ -793,6 +811,7 @@ async def _fetch_and_process_page(
                 discovery_false_positive=discovery_false_positive,
                 waste_category=waste_category,
                 structural_quality=structural_quality,
+                failure_stage=fetched_failure_stage,
             )
 
         # Hard cap
@@ -834,6 +853,7 @@ async def _fetch_and_process_page(
                 discovery_false_positive=discovery_false_positive,
                 waste_category=waste_category,
                 structural_quality=structural_quality,
+                failure_stage=fetched_failure_stage,
             )
 
         # Sprint F150I: enrich extracted text with discovery metadata
@@ -877,6 +897,7 @@ async def _fetch_and_process_page(
                 discovery_false_positive=discovery_false_positive,
                 waste_category=waste_category,
                 structural_quality=structural_quality,
+                failure_stage=fetched_failure_stage,
             )
 
         # ---- Per-page dedup: (value, label, pattern) exact dedup -----------
@@ -950,6 +971,7 @@ async def _fetch_and_process_page(
             discovery_false_positive=discovery_false_positive,
             waste_category=waste_category,
             structural_quality=structural_quality,
+            failure_stage=fetched_failure_stage,
         )
 
 
@@ -1047,6 +1069,10 @@ async def async_run_live_public_pipeline(
             patterns_configured=_get_patterns_configured_count(),
             pages=(),
             error="uma_emergency_abort",
+            public_discovery_blocker="uma_emergency_abort",
+            public_fetch_accessibility_blocker=False,
+            public_discovery_fallback_state=None,
+            dominant_public_failure_mode="uma_emergency_abort",
         )
 
     effective_concurrency = fetch_concurrency
@@ -1088,6 +1114,10 @@ async def async_run_live_public_pipeline(
             pages=(),
             error=discovery_error or "discovery_empty",
             public_proof_grade="no_discovery",
+            public_discovery_blocker=discovery_error if discovery_error else "no_discovery",
+            public_fetch_accessibility_blocker=False,
+            public_discovery_fallback_state="primary_failed_fallback_failed" if discovery_error else None,
+            dominant_public_failure_mode=discovery_error if discovery_error else "no_discovery",
         )
 
     # ---- Fetch batch ---------------------------------------------------------
@@ -1355,6 +1385,49 @@ async def async_run_live_public_pipeline(
     public_branch_verdict["backend_degraded"] = _backend_degraded
     public_branch_verdict["public_proof_grade"] = _derived_proof_grade
 
+    # Sprint F170D: lower-layer truth consumption
+    # Read fallback_triggered from discovery_result
+    fallback_triggered: str | None = getattr(discovery_result, "fallback_triggered", None)
+
+    # public_discovery_fallback_state: None | primary_failed_fallback_succeeded | primary_failed_fallback_failed | no_fallback_needed
+    if fallback_triggered == "primary_backend_failed_fallback_succeeded":
+        public_discovery_fallback_state = "primary_failed_fallback_succeeded"
+    elif fallback_triggered == "primary_backend_failed_fallback_failed":
+        public_discovery_fallback_state = "primary_failed_fallback_failed"
+    elif discovery_error is None:
+        public_discovery_fallback_state = "no_fallback_needed"
+    else:
+        public_discovery_fallback_state = None
+
+    # public_discovery_blocker: None | uma_emergency_abort | backend_error_no_fallback | backend_error_fallback_failed
+    if uma_state == "UMA_STATE_EMERGENCY":
+        public_discovery_blocker = "uma_emergency_abort"
+    elif discovery_error is not None and fallback_triggered is None:
+        public_discovery_blocker = "backend_error_no_fallback"
+    elif discovery_error is not None and fallback_triggered == "primary_backend_failed_fallback_failed":
+        public_discovery_blocker = "backend_error_fallback_failed"
+    else:
+        public_discovery_blocker = None
+
+    # public_fetch_accessibility_blocker: True when any page had connectivity/TLS/timeout failure
+    # failure_stage IN {connection, tls, http} OR network_error_kind signals accessibility issue
+    _accessibility_failure_stages = {"connection", "tls", "http"}
+    public_fetch_accessibility_blocker = any(
+        p.failure_stage in _accessibility_failure_stages
+        for p in all_page_results
+    )
+
+    # dominant_public_failure_mode: aggregate failure story
+    _failure_modes: list[str] = []
+    if public_discovery_blocker:
+        _failure_modes.append(public_discovery_blocker)
+    if public_fetch_accessibility_blocker:
+        _failure_modes.append("fetch_accessibility_blocker")
+    # Add dominant waste category if present
+    if run_waste_pattern_code and run_waste_pattern_code != "none":
+        _failure_modes.append(f"waste:{run_waste_pattern_code}")
+    dominant_public_failure_mode = _failure_modes[0] if _failure_modes else None
+
     return PipelineRunResult(
         query=query,
         discovered=total_discovered,
@@ -1389,6 +1462,10 @@ async def async_run_live_public_pipeline(
         run_waste_pattern_code=run_waste_pattern_code,
         waste_reason_breakdown=waste_reason_breakdown,
         backend_degraded=_backend_degraded,
+        public_discovery_blocker=public_discovery_blocker,
+        public_fetch_accessibility_blocker=public_fetch_accessibility_blocker,
+        public_discovery_fallback_state=public_discovery_fallback_state,
+        dominant_public_failure_mode=dominant_public_failure_mode,
     )
 
 

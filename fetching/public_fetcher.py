@@ -516,6 +516,9 @@ async def async_fetch_public_text(
             elapsed_ms = (time.monotonic() - t0) * 1000
             err_str = f"fetch_error;{type(exc).__name__};{exc}"
             failure_stage, network_error_kind = _derive_failure_stage_and_network_kind(err_str)
+            # body_read_error=True only when body stream was actually entered and failed.
+            # For connection/tls/http stages the body was never reached — flag stays False.
+            body_read_error = failure_stage in ("body", "size")
             return FetchResult(
                 url=url,
                 final_url=url,
@@ -526,15 +529,16 @@ async def async_fetch_public_text(
                 declared_length=-1,
                 elapsed_ms=elapsed_ms,
                 error=err_str,
-                body_read_error=True,
+                body_read_error=body_read_error,
                 failure_stage=failure_stage,
                 network_error_kind=network_error_kind,
             )
 
-    # Should not reach here, but as safeguard:
+    # Should not reach here, but as safeguard (retry exhaustion after loop):
     elapsed_ms = (time.monotonic() - t0) * 1000
     err_str = last_error or "retry_exhausted"
     failure_stage, network_error_kind = _derive_failure_stage_and_network_kind(err_str)
+    body_read_error = failure_stage in ("body", "size")
     return FetchResult(
         url=url,
         final_url=url,
@@ -545,7 +549,7 @@ async def async_fetch_public_text(
         declared_length=-1,
         elapsed_ms=elapsed_ms,
         error=err_str,
-        body_read_error=True,
+        body_read_error=body_read_error,
         failure_stage=failure_stage,
         network_error_kind=network_error_kind,
     )
