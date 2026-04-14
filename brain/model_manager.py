@@ -585,23 +585,34 @@ class ModelManager:
         model_type = self._current_model
         model_name = model_type.name.lower()
 
-        try:
-            model = self._loaded_models.get(model_type)
-            if model:
-                if hasattr(model, 'unload'):
-                    logger.info(f"[MODEL RELEASE] {model_name} start")
-                    if inspect.iscoroutinefunction(model.unload):
-                        await model.unload()
-                    else:
-                        loop = asyncio.get_running_loop()
-                        await loop.run_in_executor(None, model.unload)
-                    logger.info(f"[MODEL RELEASE] {model_name} done")
-                del self._loaded_models[model_type]
-            self._current_model = None
-            await self._cleanup_memory_async(model_type)
+        # F168E: Capture model reference BEFORE registry deletion
+        # (for unload call — must happen after _current_model clear but before del)
+        model = self._loaded_models.get(model_type)
 
-        except Exception as e:
-            logger.error(f"Error releasing current model: {e}")
+        # F168E: Always remove from registry first — before unload attempt
+        # Mirrors _release_model_async() symmetry (F166E)
+        if model_type in self._loaded_models:
+            del self._loaded_models[model_type]
+
+        if self._current_model == model_type:
+            self._current_model = None
+
+        # Attempt unload — failure is logged but never propagated
+        if model is not None and hasattr(model, 'unload'):
+            logger.info(f"[MODEL RELEASE] {model_name} start")
+            try:
+                if inspect.iscoroutinefunction(model.unload):
+                    await model.unload()
+                else:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, model.unload)
+                logger.info(f"[MODEL RELEASE] {model_name} done")
+            except Exception as e:
+                logger.error(f"Failed to release model {model_name}: {e}")
+                # F168E: Exception swallowed — model already removed from registry
+
+        # Memory cleanup regardless of unload outcome
+        await self._cleanup_memory_async(model_type)
 
     async def _cleanup_memory_async(self, model_type: Optional[ModelType] = None) -> None:
         """Agresivní async čištění paměti po uvolnění modelu.
