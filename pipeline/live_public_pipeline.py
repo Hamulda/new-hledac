@@ -70,6 +70,9 @@ _FETCH_BUDGET_SKIP: float = 0.0       # SKIP_WEAK — dead until Fix A in F150J
 _PRE_FETCH_TEXT_MIN_CHARS: int = 150
 """Minimum extracted text chars to consider fetch worthwhile."""
 
+# Sprint F163B: low-entropy gate — detect repetitive placeholder noise
+_LOW_ENTROPY_UNIQUE_WORD_RATIO: float = 0.25
+
 # Sprint F161B: discovery false-positive band — legitimate signal but no conversion
 _DISCOVERY_FALSE_POSITIVE_THRESHOLD: float = 0.5
 """Discovery score above this with zero patterns = false positive, not waste."""
@@ -148,6 +151,8 @@ class PipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     factual_value_density: float = 0.0  # stored / fetched (real conversion density)
     run_waste_pattern_code: str = ""   # dominant waste category clean code
     waste_reason_breakdown: str = ""   # waste category distribution
+    # Sprint F163B: backend degradation flag — true when fetch errors dominate discovery output
+    backend_degraded: bool = False
 
 
 # -----------------------------------------------------------------------------
@@ -378,9 +383,19 @@ def _score_page_quality(
     query_lower = query.lower()
     query_terms = frozenset(query_lower.split())
 
-    # --- Pre-filter: skip pages with almost no content ------------
-    if len(extracted_text) < 200:
+    # --- Pre-filter: skip pages with almost no content BEFORE signal scoring ---
+    # Sprint F163B: apply text-length gate first — avoids wasting compute on dead pages
+    if len(extracted_text) < _PRE_FETCH_TEXT_MIN_CHARS:
         return "SKIP_WEAK:very_low_text"
+
+    # --- Signalless gate: very low word-level entropy = spam/placeholder ---
+    # Sprint F163B: detect "lorem ipsum" / repetitive filler / template noise
+    # This is orthogonal to text length — catches thin-but-long pages
+    words = extracted_text.split()
+    if len(words) >= 10:
+        unique_ratio = len(frozenset(w.lower() for w in words)) / len(words)
+        if unique_ratio < 0.25:
+            return "SKIP_WEAK:low_entropy"
 
     # --- Title query-term density --------------------------------
     title_words = frozenset(hit_title.lower().split())
@@ -491,7 +506,17 @@ def _compute_page_usable_fields(
         return True, tier, reason, false_pos, waste_cat, structural
 
     # Fetched but nothing matched — distinguish waste categories
-    if discovery_signal and discovery_score is not None and discovery_score >= _DISCOVERY_FALSE_POSITIVE_THRESHOLD:
+    # Sprint F163B: signalless detection BEFORE SKIP_WEAK — signalless is a real category
+    if not discovery_signal:
+        # No discovery signal at all — signalless waste (not structural)
+        tier = "waste"
+        reason = quality_reason or "no_discovery_signal"
+        false_pos = False
+        waste_cat = "signalless"
+        structural = "thin" if extracted_text_len < _PRE_FETCH_TEXT_MIN_CHARS else "healthy"
+        return False, tier, reason, false_pos, waste_cat, structural
+
+    if discovery_score is not None and discovery_score >= _DISCOVERY_FALSE_POSITIVE_THRESHOLD:
         # Sprint F161B: legitimate discovery signal, no pattern yield = false positive
         tier = "low"
         reason = "discovery_signal_no_patterns"
@@ -508,7 +533,7 @@ def _compute_page_usable_fields(
         structural = "thin"
         return False, tier, reason, false_pos, waste_cat, structural
 
-    # Signalless waste: no discovery signal, no patterns
+    # Final fallback
     tier = "waste"
     reason = quality_reason or "no_match_no_signal"
     false_pos = False
@@ -1062,6 +1087,7 @@ async def async_run_live_public_pipeline(
             patterns_configured=_get_patterns_configured_count(),
             pages=(),
             error=discovery_error or "discovery_empty",
+            public_proof_grade="no_discovery",
         )
 
     # ---- Fetch batch ---------------------------------------------------------
@@ -1302,17 +1328,32 @@ async def async_run_live_public_pipeline(
         f"{v}{k[:3]}" for k, v in sorted(waste_category_counts.items()) if v > 0
     ) if any(v > 0 for v in waste_category_counts.values()) else "none"
 
-    # Sprint F162B: public_proof_grade calibrated on factual_value_density + structural_health_ratio + noise_fetch_ratio
-    if factual_value_density >= 0.5 and structural_health_ratio >= 0.7 and noise_fetch_ratio <= 0.3:
-        public_proof_grade = "strong"
+    # Sprint F163B: backend_degraded — fetch errors dominate discovery output
+    # Not "low value" — true infrastructure failure that makes content inaccessible
+    # Threshold: >60% of all pages had fetch errors OR discovery failed with zero fetches
+    _error_page_count = sum(1 for p in all_page_results if p.error is not None and "fetch_exception" in p.error)
+    _error_dominated = total_discovered > 0 and _error_page_count / total_discovered > 0.6
+    _backend_degraded = bool(_error_dominated or (discovery_error is not None and total_fetched == 0))
+
+    # Sprint F163B: enhanced public_proof_grade — decouple backend failure from weak content
+    # "no_discovery" and "empty" are discovery problems, not content problems
+    # "backend_degraded" overrides everything below it — the content was never even evaluated
+    if _backend_degraded:
+        _derived_proof_grade = "backend_degraded"
+    elif factual_value_density >= 0.5 and structural_health_ratio >= 0.7 and noise_fetch_ratio <= 0.3:
+        _derived_proof_grade = "strong"
     elif factual_value_density >= 0.3 and noise_fetch_ratio <= 0.5:
-        public_proof_grade = "moderate"
+        _derived_proof_grade = "moderate"
     elif factual_value_density > 0 or total_stored > 0:
-        public_proof_grade = "weak"
+        _derived_proof_grade = "weak"
     elif total_discovered > 0:
-        public_proof_grade = "empty"
+        _derived_proof_grade = "empty"
     else:
-        public_proof_grade = "no_discovery"
+        _derived_proof_grade = "no_discovery"
+
+    # Sprint F163B: embed backend_degraded and public_proof_grade into verdict dict
+    public_branch_verdict["backend_degraded"] = _backend_degraded
+    public_branch_verdict["public_proof_grade"] = _derived_proof_grade
 
     return PipelineRunResult(
         query=query,
@@ -1338,7 +1379,7 @@ async def async_run_live_public_pipeline(
         usable_findings_ratio=usable_findings_ratio,
         discovery_to_findings_efficiency=discovery_to_findings_efficiency,
         quality_mix=quality_mix,
-        public_proof_grade=public_proof_grade,
+        public_proof_grade=_derived_proof_grade,
         public_value_density=public_value_density,
         top_waste_pattern=top_waste_pattern,
         discovery_false_positive_count=discovery_false_positive_count,
@@ -1347,6 +1388,7 @@ async def async_run_live_public_pipeline(
         factual_value_density=factual_value_density,
         run_waste_pattern_code=run_waste_pattern_code,
         waste_reason_breakdown=waste_reason_breakdown,
+        backend_degraded=_backend_degraded,
     )
 
 

@@ -124,23 +124,30 @@ _telemetry = {
 @dataclass(frozen=True)
 class UMAStatus:
     """
-    Sprint 8AB: Unified UMA accounting snapshot.
+    Sprint 8AB + F163F: Unified UMA accounting snapshot.
 
     Fields:
         rss_gib: Process RSS in GiB (diagnostic, NOT threshold driver).
         system_used_gib: (total - available) in GiB (THRESHOLD DRIVER).
         system_available_gib: Available system memory in GiB.
-        swap_used_gib: Swap usage in GiB (diagnostic only).
+        swap_used_gib: Swap usage in GiB (diagnostic only — F163F).
+        swap_detected: True if swap > 0.05 GiB (active swap = systemic pressure).
         metal_cache_limit_bytes: Metal cache limit from 8T surface (or None).
         metal_wired_limit_bytes: Metal wired limit from 8T surface (or None).
         state: "ok" | "warn" | "critical" | "emergency".
         io_only: True if I/O-only mode should be active.
         last_error: Error message if sampling failed (None = OK).
+
+    F163F CHANGE: swap_detected added — any active swap indicates M1 UMA
+    pressure that is SYSTEMIC (not process-bound). On M1 8GB, swap is a
+    critical diagnostic signal that confirms memory pressure is real,
+    not an artifact of measurement timing.
     """
     rss_gib: float
     system_used_gib: float
     system_available_gib: float
     swap_used_gib: float
+    swap_detected: bool
     metal_cache_limit_bytes: Optional[int]
     metal_wired_limit_bytes: Optional[int]
     state: str
@@ -421,6 +428,7 @@ def sample_uma_status() -> UMAStatus:
         system_used_gib=system_used_gib,
         system_available_gib=system_available_gib,
         swap_used_gib=swap_used_gib,
+        swap_detected=swap_used_gib > 0.05,  # F163F: any active swap = systemic pressure
         metal_cache_limit_bytes=metal_cache_limit_bytes,
         metal_wired_limit_bytes=metal_wired_limit_bytes,
         state=state,

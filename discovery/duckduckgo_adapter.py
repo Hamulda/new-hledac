@@ -413,6 +413,12 @@ async def _ddgs_text_search(
     Uses asyncio.to_thread() because duckduckgo_search v8.1.1 does NOT
     provide an AsyncDDGS class — only a sync DDGS class.
 
+    Per-request httpx timeouts are passed directly to the DDGS backend so
+    that network stalls are bounded at the httpx layer — not just at the
+    asyncio wrapper level.  This prevents thread leakage when the asyncio
+    timeout fires: the httpx request is cancelled by its own timeout first,
+    yielding the thread promptly.
+
     Raises:
         CancelledError: propagated from the cancelled task.
         DuckDuckGoSearchException (subclasses): translated to error strings.
@@ -423,10 +429,17 @@ async def _ddgs_text_search(
         # Lazy import so that import-time of this module has zero network effect
         from duckduckgo_search import DDGS  # noqa: T1009
 
-        backend: DDGS = DDGS()
+        # timeout_s bounds the *entire* DDGS init + request lifecycle inside
+        # this thread.  Without it, httpx uses its default ~10s connect +
+        # indefinite read, meaning a hung network can outlive the asyncio
+        # timeout and leave a zombie thread occupying the pool.
+        backend: DDGS = DDGS(timeout=timeout_s)
         try:
             results = list(
-                backend.text(query, max_results=max_results, proxy=proxy)
+                backend.text(
+                    query, max_results=max_results, proxy=proxy,
+                    timeout=timeout_s  # per-request read/write timeout
+                )
             )
             return results
         finally:

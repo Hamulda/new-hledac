@@ -387,9 +387,11 @@ async def run_sprint(
             src_mix.append(f"{src}={cnt}")
         src_mix_str = ", ".join(src_mix) if src_mix else "none"
 
-        # Verdict heuristics
+        # Verdict heuristics — public_error is authoritative over depleted interpretation
         if result.aborted:
             verdict = "⚠️  ABORTED"
+        elif result.public_error:
+            verdict = "🌐  DEGRADED: public branch blocked — check network/TOR/proxy"
         elif result.accepted_findings == 0:
             if result.public_discovered > 0:
                 verdict = "🔍  NOVELTY: public found hits, feed accepted nothing"
@@ -519,11 +521,13 @@ async def run_sprint(
             runtime_truth_level,
         )
 
-        # CHECKPOINT-0 taxonomy (Sprint F155 + E0-T4)
-        # Bucket set: signal_reaches_findings | short_signal | depleted | windup_export_fail_soft | authority_census
+        # CHECKPOINT-0 taxonomy (Sprint F155 + E0-T4 + F163C)
+        # Bucket set: signal_reaches_findings | short_signal | degraded_public_blocker | depleted | windup_export_fail_soft | authority_census
         _ckpt_category = (
             "signal_reaches_findings"
             if result.accepted_findings > 0
+            else "degraded_public_blocker"
+            if result.public_error
             else "short_signal"
             if is_meaningful and result.total_pattern_hits > 0
             else "depleted"
@@ -534,20 +538,20 @@ async def run_sprint(
             if not is_meaningful
             else "depleted"
         )
-        # Sprint F162D: simplified reason chain — all branches reachable.
-        # Structure mirrors _ckpt_category for consistency.
-        # smoke: is_meaningful=False → evidence_note (short descriptive string)
-        # active: is_meaningful=True, findings>0 → "signal_reaches_findings"
-        # short_signal: is_meaningful=True, hits>0, no findings → "short_signal_no_findings"
-        # meaningful_empty: is_meaningful=True, hits=0, no findings → "depleted_no_pattern_hits"
-        # The "public_only" and "depleted_no_signal" branches are consolidated into
-        # "depleted_no_pattern_hits" (the only remaining meaningful_empty sub-case after
-        # short_signal_no_findings is separated out). No unknown fallback.
+        # Sprint F163C: reason chain — public_error is primary signal over depleted.
+        # smoke: is_meaningful=False → evidence_note
+        # active: findings>0 → "signal_reaches_findings"
+        # degraded_public: public_error set → "degraded_public_branch_blocked:{public_error}"
+        # short_signal: meaningful, hits>0, no findings → "short_signal_no_findings"
+        # depleted: meaningful, hits=0, no findings → "depleted_no_pattern_hits"
+        # windup_export_fail_soft: zero findings, windup fired → "windup_export_fail_soft"
         _checkpoint_zero_reason = (
             evidence_note
             if not is_meaningful
             else "signal_reaches_findings"
             if result.accepted_findings > 0
+            else f"degraded_public_branch_blocked:{result.public_error}"
+            if result.public_error
             else "short_signal_no_findings"
             if is_meaningful and result.total_pattern_hits > 0
             else "depleted_no_pattern_hits"
@@ -645,6 +649,8 @@ async def run_sprint(
                 "effective_timeouts": {},
                 "active_iteration_count": active_iterations,
                 "export_finish_layer_status": _export_finish_status,
+                # Sprint F163C: public_error must surface at canonical boundary
+                "public_error": result.public_error,
                 # Sprint F160E: Canonical timing truth — separates active window from full run
                 "timing_truth": timing_truth,
             },
@@ -726,6 +732,8 @@ async def run_sprint(
                     "effective_timeouts": {},
                     "active_iteration_count": active_iterations,
                     "export_finish_layer_status": _export_finish_status,
+                    # Sprint F163C: public_error must surface at canonical boundary
+                    "public_error": result.public_error,
                     # Sprint F160E: Canonical timing truth — separates active window from full run
                     "timing_truth": timing_truth,
                 },
