@@ -38,6 +38,12 @@ class FetchResult(msgspec.Struct, frozen=True, gc=False):
     """Frozen msgspec result — no mutations after construction.
 
     Backward-compatible: added fields have defaults so existing callers are unaffected.
+
+    Access-path truth fields (F169B):
+    - redirected: True when final_url != url (explicit redirect flag, downstream-friendly)
+    - redirect_target: redirect destination (set only when redirected=True)
+    - failure_stage: coarse classification of where fetch pipeline failed
+    - network_error_kind: fine-grained network error kind for connection/tls/dns failures
     """
 
     url: str
@@ -53,6 +59,11 @@ class FetchResult(msgspec.Struct, frozen=True, gc=False):
     xml_recovered: bool = False  # True: body was XML-ish but Content-Type was wrong, body is now text
     decode_replaced: bool = False  # True: UTF-8 decode used replacement chars
     body_read_error: bool = False  # True: headers were OK but body stream failed mid-read
+    # Added in F169B — access-path truth hardening
+    redirected: bool = False  # True: final_url != url (explicit redirect signal)
+    redirect_target: str | None = None  # redirect destination (set only when redirected=True)
+    failure_stage: str | None = None  # validation | connection | tls | http | body | size
+    network_error_kind: str | None = None  # dns_error | connect_error | tls_error | timeout
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +159,87 @@ def _build_retry_error(status_code: int, retry_after: float | None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# F169B: Access-path truth helpers — derive-only, no new transport
+# ---------------------------------------------------------------------------
+
+
+def _derive_redirect_fields(url: str, final_url: str) -> tuple[bool, str | None]:
+    """Return (redirected, redirect_target) based on URL comparison.
+
+    downstream can use redirected=True as explicit signal instead of
+    computing final_url != url themselves.
+    """
+    if final_url != url:
+        return (True, final_url)
+    return (False, None)
+
+
+def _derive_failure_stage_and_network_kind(error: str | None) -> tuple[str | None, str | None]:
+    """Parse error string to extract structured failure_stage and network_error_kind.
+
+    Returns (failure_stage, network_error_kind).
+    Both are None when error is None (success) or for URL-validation errors.
+
+    failure_stage taxonomy:
+      - validation  : URL was invalid before any network call
+      - connection  : TCP/DNS/connection-level failure (body never reached)
+      - tls          : TLS handshake failure
+      - http         : HTTP-level failure (response received, non-2xx)
+      - body         : headers OK but body read failed mid-stream
+      - size         : body truncated due to size cap
+
+    network_error_kind (connection/tls only):
+      - dns_error    : DNS resolution failure
+      - connect_error: TCP connection refused/reset
+      - tls_error    : TLS handshake/verification failure
+      - timeout      : request timed out
+    """
+    if error is None:
+        return (None, None)
+
+    # URL validation errors — pre-connection, network_error_kind stays None
+    if error.startswith("url_"):
+        return ("validation", None)
+
+    # Timeout — explicit in code, no ambiguity
+    if error == "timeout":
+        return ("connection", "timeout")
+
+    # Size cap — structured, no network error kind
+    if error == "size_cap_exceeded":
+        return ("size", None)
+
+    # content_type_rejected — HTTP response but content unacceptable
+    if error.startswith("content_type_rejected:"):
+        return ("http", None)
+
+    # retryable status codes — HTTP-level
+    if error.startswith("retryable:"):
+        return ("http", None)
+
+    # Generic fetch_error; prefix — connection/tls level
+    if error.startswith("fetch_error;"):
+        # Format: "fetch_error;ExceptionType;message"
+        parts = error.split(";", 2)
+        exc_type = parts[1] if len(parts) > 1 else ""
+
+        # TLS variants
+        if "SSL" in exc_type or "TLS" in exc_type or "Certificate" in exc_type:
+            return ("tls", "tls_error")
+        # DNS
+        if "DNS" in exc_type or "Resolver" in exc_type:
+            return ("connection", "dns_error")
+        # Connection (refused, reset, connect timeout)
+        if "Connect" in exc_type or "Connection" in exc_type or "Network" in exc_type:
+            return ("connection", "connect_error")
+        # Default for any other fetch_error: connection-level unknown
+        return ("connection", "connect_error")
+
+    # Unknown error format — body-level if we got here without a clear stage
+    return ("body", None)
+
+
+# ---------------------------------------------------------------------------
 # XML-ish body sniffing helper — bounded, fail-safe
 # ---------------------------------------------------------------------------
 
@@ -235,6 +327,7 @@ async def async_fetch_public_text(
             declared_length=-1,
             elapsed_ms=elapsed_ms,
             error="url_empty",
+            failure_stage="validation",
         )
 
     # --- URL validation (strip happens inside _validate_url) ---
@@ -251,6 +344,7 @@ async def async_fetch_public_text(
             declared_length=-1,
             elapsed_ms=elapsed_ms,
             error=validation_error,
+            failure_stage="validation",
         )
 
     # --- Size cap enforcement ---
@@ -284,6 +378,7 @@ async def async_fetch_public_text(
                             continue
                         # Exhausted retries — return with error prefix
                         elapsed_ms = (time.monotonic() - t0) * 1000
+                        redirected, redirect_target = _derive_redirect_fields(url, final_url)
                         return FetchResult(
                             url=url,
                             final_url=final_url,
@@ -294,6 +389,9 @@ async def async_fetch_public_text(
                             declared_length=-1,
                             elapsed_ms=elapsed_ms,
                             error=last_error,
+                            redirected=redirected,
+                            redirect_target=redirect_target,
+                            failure_stage="http",
                         )
 
                     # --- Content-type gate with XML-ish body recovery (Feed ingress hardening F164A) ---
@@ -325,6 +423,7 @@ async def async_fetch_public_text(
                                 # First chunk is not XML-ish and we haven't accumulated anything —
                                 # non-XML body under wrong CT: reject without reading remainder
                                 elapsed_ms = (time.monotonic() - t0) * 1000
+                                redirected, redirect_target = _derive_redirect_fields(url, final_url)
                                 return FetchResult(
                                     url=url,
                                     final_url=final_url,
@@ -335,6 +434,9 @@ async def async_fetch_public_text(
                                     declared_length=declared_length,
                                     elapsed_ms=elapsed_ms,
                                     error=f"content_type_rejected:{raw_content_type}",
+                                    redirected=redirected,
+                                    redirect_target=redirect_target,
+                                    failure_stage="http",
                                 )
 
                         if total_read + chunk_len > max_bytes:
@@ -344,6 +446,7 @@ async def async_fetch_public_text(
                                 total_read += remaining
                             accumulated_ok = False
                             elapsed_ms = (time.monotonic() - t0) * 1000
+                            redirected, redirect_target = _derive_redirect_fields(url, final_url)
                             return FetchResult(
                                 url=url,
                                 final_url=final_url,
@@ -354,6 +457,9 @@ async def async_fetch_public_text(
                                 declared_length=declared_length,
                                 elapsed_ms=elapsed_ms,
                                 error="size_cap_exceeded",
+                                redirected=redirected,
+                                redirect_target=redirect_target,
+                                failure_stage="size",
                             )
                         body_chunks.append(chunk)
                         total_read += chunk_len
@@ -371,6 +477,7 @@ async def async_fetch_public_text(
                         decode_replaced = False
 
                     elapsed_ms = (time.monotonic() - t0) * 1000
+                    redirected, redirect_target = _derive_redirect_fields(url, final_url)
                     return FetchResult(
                         url=url,
                         final_url=final_url,
@@ -383,6 +490,8 @@ async def async_fetch_public_text(
                         error=None,
                         xml_recovered=xml_recovered,
                         decode_replaced=decode_replaced,
+                        redirected=redirected,
+                        redirect_target=redirect_target,
                     )
 
         except asyncio.TimeoutError:
@@ -397,12 +506,16 @@ async def async_fetch_public_text(
                 declared_length=-1,
                 elapsed_ms=elapsed_ms,
                 error="timeout",
+                failure_stage="connection",
+                network_error_kind="timeout",
             )
         except asyncio.CancelledError:
             elapsed_ms = (time.monotonic() - t0) * 1000
             raise
         except Exception as exc:
             elapsed_ms = (time.monotonic() - t0) * 1000
+            err_str = f"fetch_error;{type(exc).__name__};{exc}"
+            failure_stage, network_error_kind = _derive_failure_stage_and_network_kind(err_str)
             return FetchResult(
                 url=url,
                 final_url=url,
@@ -412,12 +525,16 @@ async def async_fetch_public_text(
                 fetched_bytes=0,
                 declared_length=-1,
                 elapsed_ms=elapsed_ms,
-                error=f"fetch_error;{type(exc).__name__};{exc}",
+                error=err_str,
                 body_read_error=True,
+                failure_stage=failure_stage,
+                network_error_kind=network_error_kind,
             )
 
     # Should not reach here, but as safeguard:
     elapsed_ms = (time.monotonic() - t0) * 1000
+    err_str = last_error or "retry_exhausted"
+    failure_stage, network_error_kind = _derive_failure_stage_and_network_kind(err_str)
     return FetchResult(
         url=url,
         final_url=url,
@@ -427,8 +544,10 @@ async def async_fetch_public_text(
         fetched_bytes=0,
         declared_length=-1,
         elapsed_ms=elapsed_ms,
-        error=last_error or "retry_exhausted",
+        error=err_str,
         body_read_error=True,
+        failure_stage=failure_stage,
+        network_error_kind=network_error_kind,
     )
 
 

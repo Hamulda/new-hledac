@@ -271,6 +271,12 @@ class FeedPipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     feed_confidence_score: int = 0                       # 0-100, adapter-informed confidence
     # Sprint F151A: winning source breakdown for scheduler/exporter
     winning_source_breakdown: dict[str, int] = dict()     # {"feed_native": N, "fallback": N, "mixed": N}
+    # Sprint F169D: root-cause propagation into FeedPipelineRunResult
+    upstream_fetch_blocker: str | None = None       # "http_error" | "timeout" | "dns_failure" | "connection_error" | "robots_blocked"
+    upstream_parse_blocker: str | None = None        # "malformed_xml" | "wrong_content_type" | "redirected_non_feed"
+    source_accessibility_blocker: str | None = None  # source-level fetch failure label
+    root_zero_yield_reason: str | None = None       # canonical root cause of zero findings
+    had_substantive_content_but_no_hits: bool = False  # True if entries_with_text > 0 but findings == 0
     # Sprint F160A: hits that arrived but were filtered by per-entry dedup
     findings_lost_to_dedup: int = 0
 
@@ -1713,6 +1719,22 @@ async def async_run_live_feed_pipeline(
 
     # Handle fetch-level errors fail-soft
     if batch.error:
+        # Sprint F169D: extract upstream blocker from batch.error
+        _fetch_err = batch.error or ""
+        _parse_blocker: str | None = None
+        _fetch_blocker: str | None = None
+        if "xml" in _fetch_err.lower() or "parse" in _fetch_err.lower() or "malformed" in _fetch_err.lower():
+            _parse_blocker = "malformed_xml"
+        elif "content" in _fetch_err.lower() or "type" in _fetch_err.lower():
+            _parse_blocker = "wrong_content_type"
+        elif "redirect" in _fetch_err.lower():
+            _parse_blocker = "redirected_non_feed"
+        else:
+            _fetch_blocker = "http_error"
+        # F169C: source_accessibility_error from adapter carries the true source-level failure
+        _source_blocker: str | None = None
+        if hasattr(batch, "source_accessibility_error") and batch.source_accessibility_error:
+            _source_blocker = batch.source_accessibility_error
         return FeedPipelineRunResult(
             feed_url=feed_url,
             fetched_entries=0,
@@ -1722,6 +1744,22 @@ async def async_run_live_feed_pipeline(
             matched_patterns=0,
             pages=(),
             error=f"fetch_error:{batch.error}",
+            entries_seen=0,
+            entries_with_empty_assembled_text=0,
+            entries_with_text=0,
+            entries_scanned=0,
+            entries_with_hits=0,
+            total_pattern_hits=0,
+            findings_built_pre_store=0,
+            assembled_text_chars_total=0,
+            avg_assembled_text_len=0.0,
+            signal_stage="empty_fetch",
+            # Sprint F169D: root-cause propagation
+            upstream_fetch_blocker=_fetch_blocker,
+            upstream_parse_blocker=_parse_blocker,
+            source_accessibility_blocker=_source_blocker,
+            root_zero_yield_reason="fetch_error",
+            had_substantive_content_but_no_hits=False,
         )
 
     entries = batch.entries
@@ -1758,6 +1796,12 @@ async def async_run_live_feed_pipeline(
             sample_enriched_texts=(),
             enrichment_phase_used="none",
             temporal_feed_vocabulary_mismatch=False,
+            # Sprint F169D: root-cause propagation
+            upstream_fetch_blocker=None,
+            upstream_parse_blocker=None,
+            source_accessibility_blocker=None,
+            root_zero_yield_reason="empty_fetch",
+            had_substantive_content_but_no_hits=False,
         )
 
     # Step 3: Per-entry processing — pattern-backed
@@ -2124,6 +2168,18 @@ async def async_run_live_feed_pipeline(
             _adapter_entry_usefulness_band_acc,
             _adapter_selection_reason_acc,
             _feed_branch_signal_present,
+        ),
+        # Sprint F169D: root-cause propagation
+        upstream_fetch_blocker=None,
+        upstream_parse_blocker=None,
+        source_accessibility_blocker=None,
+        root_zero_yield_reason=signal_stage if (
+            signal_stage in ("empty_fetch", "content_empty", "no_pattern_hits",
+                            "no_pattern_hits_with_content", "findings_build_loss", "empty_registry")
+            and total_accepted == 0
+        ) else None,
+        had_substantive_content_but_no_hits=bool(
+            entries_with_text > 0 and entries_with_hits == 0 and total_accepted == 0
         ),
     )
 

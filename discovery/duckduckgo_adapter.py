@@ -72,10 +72,18 @@ class DiscoveryBatchResult(msgspec.Struct, frozen=True, gc=False):
     On any backend error the hits tuple is empty and error is set.
     On cancel (asyncio.CancelledError) the error is NOT swallowed —
     the exception is re-raised after the call unwinds.
+
+    fallback_triggered is set when a bounded fallback was attempted
+    after a primary-backend failure (backend_error / timeout).
+    Values:
+      - None                     : no fallback needed or used
+      - "primary_backend_failed_fallback_succeeded"  : fallback returned hits
+      - "primary_backend_failed_fallback_failed"    : fallback also returned empty
     """
 
     hits: tuple[DiscoveryHit, ...]
     error: str | None = None
+    fallback_triggered: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +536,71 @@ async def async_search_public_web(
             error_tag = "backend_error"
 
         _last_error = error_tag
-        return DiscoveryBatchResult(hits=(), error=error_tag)
+
+        # ---- bounded fallback: backend_error / timeout only (NOT rate_limited) --
+        if error_tag not in ("backend_error", "timeout"):
+            return DiscoveryBatchResult(hits=(), error=error_tag)
+
+        try:
+            fallback_hits = await _scrape_mojeek(trimmed, n=max_results)
+        except Exception:
+            fallback_hits = []
+        if fallback_hits:
+            # Convert list[dict] to list[DiscoveryHit] using same ranking logic
+            seen_urls: dict[str, int] = {}
+            host_counts: dict[str, int] = {}
+            retrieved_ts = time.time()
+            hits_list: list[DiscoveryHit] = []
+            max_from_host = max(1, int(max_results * MAX_HOST_SHARE_RATIO))
+            for raw in fallback_hits:
+                raw_url = raw.get("url") or ""
+                title = (raw.get("title") or "").strip()
+                snippet = (raw.get("snippet") or "").strip()
+                if _is_noise_result(title, raw_url, snippet):
+                    continue
+                norm = _normalize_url_for_dedup(raw_url)
+                if not norm or norm in seen_urls:
+                    continue
+                host = _extract_host(norm)
+                if host and host_counts.get(host, 0) >= max_from_host:
+                    continue
+                seen_urls[norm] = len(hits_list)
+                host_counts[host] = host_counts.get(host, 0) + 1
+                signals = _build_signals(trimmed, title, raw_url, snippet)
+                reason = signals["reasons"][0] if signals["reasons"] else None
+                hits_list.append(
+                    DiscoveryHit(
+                        query=trimmed,
+                        title=title,
+                        url=raw_url,
+                        snippet=snippet,
+                        source=raw.get("source", "mojeek_scrape"),
+                        rank=0,
+                        retrieved_ts=retrieved_ts,
+                        score=signals["score"],
+                        reason=reason,
+                    )
+                )
+            hits_list.sort(key=lambda h: (-h.score, h.rank))
+            final_hits = tuple(
+                DiscoveryHit(
+                    query=h.query, title=h.title, url=h.url, snippet=h.snippet,
+                    source=h.source, rank=i, retrieved_ts=h.retrieved_ts,
+                    score=h.score, reason=h.reason,
+                )
+                for i, h in enumerate(hits_list[:max_results])
+            )
+            return DiscoveryBatchResult(
+                hits=final_hits,
+                error=error_tag,
+                fallback_triggered="primary_backend_failed_fallback_succeeded",
+            )
+        else:
+            return DiscoveryBatchResult(
+                hits=(),
+                error=error_tag,
+                fallback_triggered="primary_backend_failed_fallback_failed",
+            )
 
     # ---- noise filter + signal-based ranking ---------------------------------
     seen_urls: dict[str, int] = {}

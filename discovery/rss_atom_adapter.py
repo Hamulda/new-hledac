@@ -103,6 +103,10 @@ class FeedBatchResult(msgspec.Struct, frozen=True, gc=False):
     feed_url: str
     entries: tuple[FeedEntryHit, ...]
     error: str | None = None
+    # F169C: source-level accessibility error — feed ingress root cause
+    # beyond parse-level error. Carries the fetch-layer signal when the
+    # feed was inaccessible at the source level.
+    source_accessibility_error: str | None = None
 
 
 # Sprint 8AJ — Feed Discovery DTOs
@@ -965,10 +969,13 @@ async def async_fetch_feed_entries(
 
     # Handle fetch-level errors fail-soft
     if result.error or result.text is None:
+        # F169C: fetch-level errors are source accessibility errors
+        src_err = result.error or "fetch_returned_none"
         return FeedBatchResult(
             feed_url=feed_url,
             entries=(),
-            error=result.error or "fetch_returned_none",
+            error=src_err,
+            source_accessibility_error=src_err,
         )
 
     # Guard removed by Sprint 8AR: DOCTYPE/ENTITY handling is now done
@@ -983,9 +990,12 @@ async def async_fetch_feed_entries(
         stripped = result.text.strip()
         starts_html = stripped.startswith(("<!DOCTYPE", "<html"))
 
-        # Detect redirect: if result carries redirected_to, this is a non-feed endpoint.
-        redirected_to = getattr(result, "redirected_to", None) or None
-        if redirected_to and starts_html:
+        # F169C: redirect drift fix — fetch layer carries final_url + redirected flag,
+        # not redirected_to. Use final_url != url AND redirected flag for truth.
+        final_url = getattr(result, "final_url", None) or None
+        redirected_flag = getattr(result, "redirected", False) or False
+        is_redirect = redirected_flag or (final_url and final_url != result.url and starts_html)
+        if is_redirect and starts_html:
             error_tag = "redirected_non_feed_endpoint"
         elif starts_html:
             error_tag = "fetch_returned_html_not_xml"
@@ -995,10 +1005,16 @@ async def async_fetch_feed_entries(
         else:
             error_tag = "xml_parse_error"
 
+        # F169C: propagate source-accessibility error when redirect detected
+        src_err: str | None = None
+        if error_tag == "redirected_non_feed_endpoint":
+            src_err = "source_redirected_to_non_feed"
+
         return FeedBatchResult(
             feed_url=feed_url,
             entries=(),
             error=error_tag,
+            source_accessibility_error=src_err,
         )
 
     # Deduplicate (preserve-first within this feed)

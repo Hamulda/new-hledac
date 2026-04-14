@@ -277,6 +277,23 @@ class SprintSchedulerResult:
     # Dedup preload telemetry
     dedup_preload_count: int | None = None
     dedup_preload_elapsed_s: float | None = None
+    # Sprint F169E: True ACTIVE phase entry (separate from pre-loop guard time)
+    entered_active_phase_at_monotonic: float | None = None
+    # Sprint F169E: Feed branch blocker aggregation (additive, fail-soft)
+    # Set to True when corresponding signal_stage/zero_signal_reason appears in any feed cycle
+    feed_zero_yield_detected: bool = False        # zero_signal_reason was set
+    feed_inaccessible_detected: bool = False      # empty_fetch in any feed source
+    feed_content_empty_detected: bool = False     # content_empty in any feed source
+    feed_no_pattern_with_content: bool = False   # no_pattern_hits_with_content in any feed
+    findings_build_loss_detected: bool = False   # findings_build_loss in any feed
+    feed_no_signal_sources: list[str] = field(default_factory=list)  # source URLs with zero_signal_reason
+    # Sprint F169E: Public branch blocker aggregation
+    public_backend_degraded: bool = False         # backend_degraded was True in any public cycle
+    # Sprint F169E: Dominant blocker summary (first non-empty wins per category)
+    dominant_public_blocker: str = ""            # "backend_degraded" | "public_error:{msg}"
+    dominant_feed_blocker: str = ""              # one of feed blocker type names above
+    dominant_branch_blocker: str = ""            # "public" or "feed" — whichever first had non-empty blocker
+    branch_degradation_summary: str = ""         # e.g. "public_degraded_feed_zero"
 
 
 # ---------------------------------------------------------------------------
@@ -796,6 +813,9 @@ class SprintScheduler:
                 # ── Sprint 8SA: Source scoring re-ordering ───────────────────
                 # Re-prioritize at the start of each ACTIVE cycle using latest graph stats
                 current_phase_str = adapter._current_phase
+                # Sprint F169E: Capture true ACTIVE phase entry (separate from pre-loop guard)
+                if current_phase_str == "ACTIVE" and self._result.entered_active_phase_at_monotonic is None:
+                    self._result.entered_active_phase_at_monotonic = _time.monotonic() - self._wall_clock_start
                 if current_phase_str == "ACTIVE":
                     ordered_sources = self.prioritize_sources(
                         ordered_sources, _graph_stats
@@ -900,6 +920,49 @@ class SprintScheduler:
         if self._bg_tasks:
             await asyncio.gather(*self._bg_tasks, return_exceptions=True)
         self._bg_tasks.clear()
+
+        # Sprint F169E: Compute dominant branch blocker summary (additive, first-non-empty wins)
+        _r = self._result
+        # dominant_public_blocker: backend_degraded takes priority, else error string
+        if _r.public_backend_degraded:
+            _r.dominant_public_blocker = "backend_degraded"
+        elif _r.public_error and _r.public_error not in ("", "null"):
+            # Truncate long error strings to first 80 chars
+            _r.dominant_public_blocker = _r.public_error[:80]
+        # dominant_feed_blocker: first non-empty feed blocker type
+        if _r.feed_inaccessible_detected:
+            _r.dominant_feed_blocker = "feed_inaccessible"
+        elif _r.feed_content_empty_detected:
+            _r.dominant_feed_blocker = "feed_content_empty"
+        elif _r.feed_no_pattern_with_content:
+            _r.dominant_feed_blocker = "feed_no_pattern_with_content"
+        elif _r.findings_build_loss_detected:
+            _r.dominant_feed_blocker = "findings_build_loss"
+        elif _r.feed_zero_yield_detected:
+            _r.dominant_feed_blocker = "feed_zero_yield"
+        # dominant_branch_blocker: whichever branch had a non-empty blocker first
+        if _r.dominant_public_blocker and not _r.dominant_feed_blocker:
+            _r.dominant_branch_blocker = "public"
+        elif _r.dominant_feed_blocker and not _r.dominant_public_blocker:
+            _r.dominant_branch_blocker = "feed"
+        elif _r.dominant_public_blocker and _r.dominant_feed_blocker:
+            _r.dominant_branch_blocker = "both"
+        # branch_degradation_summary: descriptive tag combining all detected conditions
+        _tags: list[str] = []
+        if _r.public_backend_degraded:
+            _tags.append("public_degraded")
+        if _r.feed_inaccessible_detected:
+            _tags.append("feed_inaccessible")
+        if _r.feed_content_empty_detected:
+            _tags.append("feed_content_empty")
+        if _r.feed_no_pattern_with_content:
+            _tags.append("feed_no_pattern")
+        if _r.findings_build_loss_detected:
+            _tags.append("findings_build_loss")
+        if _r.feed_zero_yield_detected:
+            _tags.append("feed_zero_yield")
+        if _tags:
+            _r.branch_degradation_summary = "_".join(_tags)
 
         return self._result
 
@@ -1041,6 +1104,9 @@ class SprintScheduler:
             pbv = getattr(public_result, 'public_branch_verdict', None)
             if pbv and isinstance(pbv, dict) and len(self._public_verdicts) < 10:
                 self._public_verdicts.append(pbv)
+            # Sprint F169E: Public branch blocker aggregation — fail-soft
+            if getattr(public_result, 'backend_degraded', False):
+                self._result.public_backend_degraded = True
 
             log.debug(
                 f"[8XE] Public discovery: discovered={public_result.discovered} "
@@ -1098,6 +1164,24 @@ class SprintScheduler:
             verdict = result.feed_economics_verdict
             if verdict and isinstance(verdict, (list, tuple)) and len(verdict) == 5:
                 self._feed_verdicts.append(tuple(verdict))
+        # Sprint F169E: Feed branch blocker aggregation — fail-soft, additive
+        _zsr = getattr(result, 'zero_signal_reason', None)
+        _stage = getattr(result, 'signal_stage', 'unknown')
+        if _zsr:
+            self._result.feed_zero_yield_detected = True
+            if _zsr == "empty_fetch":
+                self._result.feed_inaccessible_detected = True
+            elif _zsr == "content_empty":
+                self._result.feed_content_empty_detected = True
+            elif _zsr == "no_pattern_hits_with_content":
+                self._result.feed_no_pattern_with_content = True
+            elif _zsr == "findings_build_loss":
+                self._result.findings_build_loss_detected = True
+                self._result.feed_no_signal_sources.append(feed_url)
+            # Bounded: max 20 sources in blocker list
+            if len(self._result.feed_no_signal_sources) < 20:
+                if feed_url not in self._result.feed_no_signal_sources:
+                    self._result.feed_no_signal_sources.append(feed_url)
         # Sprint 8VN: Accumulate findings for correlation + hypothesis seams
         # Bounded to 500 to stay M1 8GB safe
         if hasattr(result, 'matched_patterns') and result.matched_patterns > 0:

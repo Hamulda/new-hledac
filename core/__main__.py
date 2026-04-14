@@ -415,8 +415,14 @@ async def run_sprint(
             "pre_scheduler_boot_s": round(pre_scheduler_boot_s, 2),
             # F166C: Scheduler wall time (WARMUP→WINDUP, full scheduler elapsed)
             "scheduler_wall_s": round(scheduler_wall_s, 2),
-            # F166C: Scheduler returned phase label
-            "scheduler_returned_phase": "ACTIVE" if "ACTIVE" in _phase_times else "entry_only",
+            # F169F: scheduler_returned_phase — derive from result state, not dict inspection
+            # F167B fix: use result.entered_active_at_monotonic, NOT _phase_times["ACTIVE"]
+            # (which is never set — only BOOT/WARMUP/WINDUP/TEARDOWN are written)
+            "scheduler_returned_phase": (
+                "ACTIVE"
+                if result.entered_active_at_monotonic is not None
+                else "entry_only"
+            ),
             # F167B fix: use _first_cycle_started (first cycle STARTED) not cycles_completed (>0 means finished)
             "entered_active_truth": _entered_active,
             "first_cycle_truth": _first_cycle_started,
@@ -439,17 +445,42 @@ async def run_sprint(
         feed_fnd = result.accepted_findings - result.public_accepted_findings
         public_pct = (result.public_accepted_findings / result.accepted_findings * 100) if result.accepted_findings > 0 else 0.0
 
+        # F169F: inline helper — must be defined before verdict heuristics and _ckpt_category
+        # "httpx" anchor prevents "Error" substring false-positive on generic errors
+        _public_backend_degraded = bool(
+            result.public_error
+            and (
+                "httpx" in result.public_error
+                or any(
+                    err in result.public_error
+                    for err in (
+                        "NetworkProxyError", "ClientProxyError",
+                        "HTTPStatusError",
+                        "ClientConnectorError", "ClientConnectorSSLError",
+                    )
+                )
+            )
+        )
+        _feed_zero = result.accepted_findings == 0 and feed_fnd == 0
+        _cross_branch_fail = (
+            result.accepted_findings == 0
+            and result.total_pattern_hits > 0
+            and not _public_backend_degraded
+            and not result.public_error
+        )
+
         # Source mix
         src_mix: list[str] = []
         for src, cnt in sorted(result.hits_per_source.items(), key=lambda x: x[1], reverse=True):
             src_mix.append(f"{src}={cnt}")
         src_mix_str = ", ".join(src_mix) if src_mix else "none"
 
-        # Verdict heuristics — public_error is authoritative over depleted interpretation
+        # Verdict heuristics — F169F: infra/backend/accessibility failure must NOT be
+        # called "DEPLETED". public_error is authoritative; new buckets refine interpretation.
         if result.aborted:
             verdict = "⚠️  ABORTED"
-        elif result.public_error:
-            verdict = "🌐  DEGRADED: public branch blocked — check network/TOR/proxy"
+        elif _public_backend_degraded:
+            verdict = "🌐  DEGRADED: public backend/network error — check TOR/proxy/config"
         elif result.accepted_findings == 0:
             if result.public_discovered > 0:
                 verdict = "🔍  NOVELTY: public found hits, feed accepted nothing"
@@ -585,59 +616,97 @@ async def run_sprint(
             runtime_truth_level,
         )
 
-        # CHECKPOINT-0 taxonomy (Sprint F155 + E0-T4 + F163C + F164D)
+        # CHECKPOINT-0 taxonomy (Sprint F155 + E0-T4 + F163C + F164D + F169F)
         # Disjoint machine-readable buckets — report layer must not conflate these.
         # Bucket set:
-        #   signal_reaches_findings  — findings accepted
-        #   short_signal             — meaningful, hits>0, no findings
-        #   meaningful_empty_run     — F164D: meaningful, no hits, no findings (active window ran)
-        #   degraded_public_blocker  — public branch error blocked acceptance
-        #   feed_ingress_blocker     — F164D: feed failed, public may have hits
-        #   depleted                 — no signal anywhere (smoke or entry-only)
-        #   windup_export_fail_soft  — windup fired on zero-findings run
-        # Priority: findings > public_error > short_signal > meaningful_empty > feed_ingress > depleted
+        #   signal_reaches_findings      — findings accepted
+        #   short_signal                — meaningful, hits>0, no findings
+        #   meaningful_empty_run        — F164D: meaningful, no hits, no findings (active window ran)
+        #   public_backend_degraded     — F169F: public branch backend error (NetworkProxyError, HTTP errors)
+        #   feed_source_inaccessible    — F169F: all feed sources returned zero signal, public may have none
+        #   cross_branch_source_inaccessible — F169F: cross-branch sources failed, feed/public accessible
+        #   true_depleted_query         — F169F: query vocabulary exhaustively checked, no signal anywhere
+        #   degraded_public_blocker     — public branch error (legacy, non-backend errors)
+        #   windup_export_fail_soft     — windup fired on zero-findings run
+        # Priority: findings > public_backend_degraded > feed_ingress > true_depleted > cross_branch > degraded > short_signal > meaningful_empty > windup > depleted
+        _public_backend_degraded = bool(
+            result.public_error
+            and (
+                "httpx" in result.public_error
+                or any(
+                    err in result.public_error
+                    for err in (
+                        "NetworkProxyError", "ClientProxyError",
+                        "HTTPStatusError",
+                        "ClientConnectorError", "ClientConnectorSSLError",
+                    )
+                )
+            )
+        )
+        _feed_zero = result.accepted_findings == 0 and feed_fnd == 0
+        _cross_branch_fail = (
+            result.accepted_findings == 0
+            and result.total_pattern_hits > 0
+            and not _public_backend_degraded
+            and not result.public_error
+        )
         _ckpt_category = (
             "signal_reaches_findings"
             if result.accepted_findings > 0
+            # F169F: explicit backend degraded first (httpx/network errors)
+            else "public_backend_degraded"
+            if _public_backend_degraded
+            # F169F: degraded_public_blocker BEFORE meaningful_empty_run
             else "degraded_public_blocker"
             if result.public_error
-            else "short_signal"
-            if is_meaningful and result.total_pattern_hits > 0
+            # F169F: feed_ingress_blocker before meaningful_empty_run
+            else "feed_ingress_blocker"
+            if _feed_zero and result.public_discovered > 0
+            # F169F: feed source inaccessible — feed failed AND total hits=0 AND no infra error
+            else "feed_source_inaccessible"
+            if _feed_zero and result.total_pattern_hits == 0 and not result.public_error
+            # F169F: meaningful_empty_run after feed_source_inaccessible
             else "meaningful_empty_run"
             if is_meaningful and result.total_pattern_hits == 0 and result.accepted_findings == 0
-            # F164D: feed_ingress_blocker — feed sources returned nothing, public may have hits.
-            # feed_fnd (= accepted_findings - public_accepted_findings) is 0 means no feed yield.
-            # Distinct from degraded_public_blocker which has a concrete error string;
-            # feed ingress means no feed signal whatsoever.
-            else "feed_ingress_blocker"
-            if result.accepted_findings == 0 and feed_fnd == 0 and result.public_discovered > 0
-            else "depleted"
-            if result.accepted_findings == 0 and result.total_pattern_hits == 0
+            # F169F: query depleted — hits exist but pattern matched nothing accepted
+            else "true_depleted_query"
+            if result.accepted_findings == 0 and result.total_pattern_hits > 0 and not _public_backend_degraded
+            # F169F: cross-branch source inaccessible — hits seen but blocked by source-level failure
+            else "cross_branch_source_inaccessible"
+            if _cross_branch_fail
+            else "short_signal"
+            if is_meaningful and result.total_pattern_hits > 0
             else "windup_export_fail_soft"
             if result.accepted_findings == 0 and _phase_times.get("WINDUP", 0) > 0 and is_meaningful
             else "depleted"
         )
-        # F164D reason chain — machine-readable, mutually exclusive.
-        # smoke: is_meaningful=False → evidence_note
-        # active: findings>0 → "signal_reaches_findings"
-        # degraded_public: public_error set → "degraded_public_branch_blocked:{public_error}"
-        # short_signal: meaningful, hits>0, no findings → "short_signal_no_findings"
-        # meaningful_empty: meaningful, no hits, no findings → "meaningful_empty_run"
-        # feed_ingress: feed zero, public discovered >0 → "feed_ingress_blocker:{public_discovered}"
-        # depleted: meaningful, hits=0, no findings → "depleted_no_pattern_hits"
+        # F169F reason chain — machine-readable, mutually exclusive.
+        # Covers all F169F buckets with explicit reason per bucket.
         _checkpoint_zero_reason = (
             evidence_note
             if not is_meaningful
             else "signal_reaches_findings"
             if result.accepted_findings > 0
+            # F169F: backend degraded — httpx/network errors
+            else f"public_backend_degraded:{result.public_error}"
+            if _public_backend_degraded
             else f"degraded_public_branch_blocked:{result.public_error}"
             if result.public_error
-            else "short_signal_no_findings"
-            if is_meaningful and result.total_pattern_hits > 0
-            else "meaningful_empty_run"
-            if is_meaningful and result.total_pattern_hits == 0 and result.accepted_findings == 0
+            # F169F: feed_ingress_blocker before meaningful_empty_run
             else f"feed_ingress_blocker:{result.public_discovered}"
             if result.accepted_findings == 0 and feed_fnd == 0 and result.public_discovered > 0
+            # F169F: feed source inaccessible before meaningful_empty_run
+            else "feed_source_inaccessible"
+            if result.accepted_findings == 0 and result.total_pattern_hits == 0 and not result.public_error
+            else "meaningful_empty_run"
+            if is_meaningful and result.total_pattern_hits == 0 and result.accepted_findings == 0
+            # F169F: true depleted query — hits seen but nothing accepted, no infra error
+            else "true_depleted_query:hits_without_acceptance"
+            if result.accepted_findings == 0 and result.total_pattern_hits > 0 and not _public_backend_degraded
+            else "cross_branch_source_inaccessible"
+            if _cross_branch_fail
+            else "short_signal_no_findings"
+            if is_meaningful and result.total_pattern_hits > 0
             else "depleted_no_pattern_hits"
         )
         _export_finish_status = (
