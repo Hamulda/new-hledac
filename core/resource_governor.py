@@ -147,11 +147,11 @@ class UMAStatus:
     system_used_gib: float
     system_available_gib: float
     swap_used_gib: float
-    swap_detected: bool
     metal_cache_limit_bytes: Optional[int]
     metal_wired_limit_bytes: Optional[int]
     state: str
     io_only: bool
+    swap_detected: bool = False
     last_error: Optional[str] = None
 
 
@@ -301,12 +301,19 @@ def evaluate_uma_state(system_used_gib: float) -> str:
     return UMA_STATE_OK
 
 
-def should_enter_io_only_mode(system_used_gib: float, previous_io_only: bool = False) -> bool:
+def should_enter_io_only_mode(system_used_gib: float, previous_io_only: bool = False, swap_detected: bool = False) -> bool:
     """
-    Sprint 8AB: Hysteresis-based I/O-only mode gate.
+    Sprint 8AB + F165E: Hysteresis-based I/O-only mode gate.
+
+    F165E CHANGE: swap_detected optional param.
+    When swap is present (systemic pressure signal), enter io_only one tier sooner
+    (WARN threshold 6.0 GiB) instead of waiting for CRITICAL threshold (6.5 GiB).
+    This reflects the M1 8GB reality: any active swap means memory pressure is
+    real and systemic, not a measurement artifact.
 
     Contract:
-        - Enter io_only when >= CRITICAL (6.5 GiB) and previous_io_only == False
+        - Enter io_only when >= CRITICAL (6.5 GiB) and swap_detected=False
+        - Enter io_only when >= WARN (6.0 GiB) and swap_detected=True (accelerated)
         - Stay in io_only while system_used_gib > HYSTERESIS_EXIT (5.8 GiB)
         - Exit io_only only when system_used_gib <= 5.8 GiB (and previous_io_only == True)
 
@@ -315,6 +322,7 @@ def should_enter_io_only_mode(system_used_gib: float, previous_io_only: bool = F
     Args:
         system_used_gib: Current system memory used in GiB.
         previous_io_only: True if io_only was already active.
+        swap_detected: True if any active swap is present (systemic pressure signal).
 
     Returns:
         True if caller should enter / stay in I/O-only mode.
@@ -322,7 +330,9 @@ def should_enter_io_only_mode(system_used_gib: float, previous_io_only: bool = F
     if previous_io_only:
         # Stay in io_only while above hysteresis floor
         return system_used_gib > _HYSTERESIS_EXIT_GIB
-    # Enter io_only only at critical threshold
+    # Enter io_only: CRITICAL by default, WARN if swap present (one tier sooner)
+    if swap_detected:
+        return system_used_gib >= _THRESHOLD_WARN_GIB
     return system_used_gib >= _THRESHOLD_CRITICAL_GIB
 
 

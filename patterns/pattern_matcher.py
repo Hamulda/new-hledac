@@ -314,6 +314,11 @@ _PATTERN_PACK_METADATA: dict[str, dict] = {
     "leaks": {"layer": 4, "source_vocab": "osint", "mitre_tactic": None},
     "infected": {"layer": 3, "source_vocab": "malware", "mitre_tactic": None},
     "infection": {"layer": 3, "source_vocab": "malware", "mitre_tactic": None},
+    # Sprint F165A — new structured IOC coverage
+    "usdt_trc20": {"layer": 1, "source_vocab": "identifier", "mitre_tactic": None},
+    "ltc_address": {"layer": 1, "source_vocab": "identifier", "mitre_tactic": None},
+    "doge_address": {"layer": 1, "source_vocab": "identifier", "mitre_tactic": None},
+    "eth_contract": {"layer": 1, "source_vocab": "identifier", "mitre_tactic": None},
 }
 
 
@@ -368,24 +373,21 @@ _RE_PGP_FP = re.compile(r"\b(?:[0-9A-F]{4}\s?){10}\b", re.IGNORECASE)
 # IPFS CIDv0: Qm + 44 base58 chars
 _RE_IPFS_CID = re.compile(r"\bQm[1-9A-HJ-NP-Za-km-z]{44}\b", re.IGNORECASE)
 
-# V5 literal sets — frozensets for O(1) lookup
-_V5_DARK_PROTOCOL_LITERALS = frozenset({
-    "i2p", "yggdrasil", "zeronet", "freenet", "ipfs://", "magnet:",
-    ".b32.i2p", ".i2p", "ed2k:", "gnutella", "retroshare",
-})
-_V5_PGP_LITERALS = frozenset({
-    "-----begin pgp", "pgp key", "pgp fingerprint", "gpg key",
-    "public key block", "-----end pgp", "keybase.io",
-})
-_V5_CRYPTO_PAYMENT_LITERALS = frozenset({
-    "monero", "xmr address", "xmr wallet", "donate xmr",
-    "zcash", "zec address", "privacy coin", "untraceable payment",
-})
-_V5_DARK_MARKET_LITERALS = frozenset({
-    "darknet market", "dark market", "vendor shop",
-    "escrow service", "dispute resolution", "pgp required",
-    "jabber xmpp", "hidden service marketplace",
-})
+# === SPRINT F165A — STRUCTURED IOC COVERAGE GAPS ===
+# USDT TRC20 (Tron network): T prefix + 33 base58 chars = 34 total
+_RE_USDT_TRC20 = re.compile(r"\bT[A-HJ-NP-Za-km-z1-9]{33}\b", re.IGNORECASE)
+# Litecoin P2PKH: L prefix + 33 base58 chars = 34 total
+_RE_LTC_ADDR = re.compile(r"\bL[1-9A-HJ-NP-Za-km-z]{33}\b", re.IGNORECASE)
+# Dogecoin P2PKH: D prefix + 33 base58 chars = 34 total
+# Full base58 alphabet (no I, O, 0, l): 123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz
+_RE_DOGE_ADDR = re.compile(
+    r"\bD[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]{33}\b",
+    re.IGNORECASE
+)
+# Ethereum contract address: 0x prefix + 40 hex, commonly a contract (not just EOA)
+# Identical regex to _RE_ETH_ADDR — labeled distinctly for contract vs EOA context
+_RE_ETH_CONTRACT = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
+
 
 
 class ExtractedEntity(NamedTuple):
@@ -412,6 +414,11 @@ def extract_high_precision_entities(text: str) -> list[ExtractedEntity]:
         (_RE_MD5, "md5_hash"),
         (_RE_SHA1, "sha1_hash"),
         (_RE_ETH_ADDR, "eth_address"),
+        # Sprint F165A — new structured IOC coverage
+        (_RE_USDT_TRC20, "usdt_trc20"),
+        (_RE_LTC_ADDR, "ltc_address"),
+        (_RE_DOGE_ADDR, "doge_address"),
+        (_RE_ETH_CONTRACT, "eth_contract"),
     ]:
         for m in pattern.finditer(text):
             entities.append(ExtractedEntity(
@@ -582,6 +589,11 @@ def match_text(
         (_RE_MD5, "md5_hash"),
         (_RE_SHA1, "sha1_hash"),
         (_RE_ETH_ADDR, "eth_address"),
+        # Sprint F165A — new structured IOC coverage
+        (_RE_USDT_TRC20, "usdt_trc20"),
+        (_RE_LTC_ADDR, "ltc_address"),
+        (_RE_DOGE_ADDR, "doge_address"),
+        (_RE_ETH_CONTRACT, "eth_contract"),
     ]:
         for m in _pattern.finditer(text_lower):
             hits.append(PatternHit(
