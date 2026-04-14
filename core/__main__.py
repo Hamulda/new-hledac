@@ -444,6 +444,12 @@ async def run_sprint(
         is_meaningful = runtime_truth["is_meaningful"]
         evidence_note = runtime_truth["evidence_note"]
 
+        # F164D: explicit active-runtime occurred flag — guards against
+        # "windup only, no active window" drift in report layer.
+        # time_to_windup_s > 0 alone is insufficient (windupLead fires immediately
+        # on entry-only runs); requires is_meaningful too.
+        timing_truth["active_runtime_occurred"] = is_meaningful and time_to_windup_s > 0
+
         # Clear separation: [SMOKE] vs [ACTIVE]
         if is_meaningful:
             logger.info(
@@ -521,8 +527,17 @@ async def run_sprint(
             runtime_truth_level,
         )
 
-        # CHECKPOINT-0 taxonomy (Sprint F155 + E0-T4 + F163C)
-        # Bucket set: signal_reaches_findings | short_signal | degraded_public_blocker | depleted | windup_export_fail_soft | authority_census
+        # CHECKPOINT-0 taxonomy (Sprint F155 + E0-T4 + F163C + F164D)
+        # Disjoint machine-readable buckets — report layer must not conflate these.
+        # Bucket set:
+        #   signal_reaches_findings  — findings accepted
+        #   short_signal             — meaningful, hits>0, no findings
+        #   meaningful_empty_run     — F164D: meaningful, no hits, no findings (active window ran)
+        #   degraded_public_blocker  — public branch error blocked acceptance
+        #   feed_ingress_blocker     — F164D: feed failed, public may have hits
+        #   depleted                 — no signal anywhere (smoke or entry-only)
+        #   windup_export_fail_soft  — windup fired on zero-findings run
+        # Priority: findings > public_error > short_signal > meaningful_empty > feed_ingress > depleted
         _ckpt_category = (
             "signal_reaches_findings"
             if result.accepted_findings > 0
@@ -530,21 +545,28 @@ async def run_sprint(
             if result.public_error
             else "short_signal"
             if is_meaningful and result.total_pattern_hits > 0
+            else "meaningful_empty_run"
+            if is_meaningful and result.total_pattern_hits == 0 and result.accepted_findings == 0
+            # F164D: feed_ingress_blocker — feed sources returned nothing, public may have hits.
+            # feed_fnd (= accepted_findings - public_accepted_findings) is 0 means no feed yield.
+            # Distinct from degraded_public_blocker which has a concrete error string;
+            # feed ingress means no feed signal whatsoever.
+            else "feed_ingress_blocker"
+            if result.accepted_findings == 0 and feed_fnd == 0 and result.public_discovered > 0
             else "depleted"
             if result.accepted_findings == 0 and result.total_pattern_hits == 0
             else "windup_export_fail_soft"
-            if result.accepted_findings == 0 and _phase_times.get("WINDUP", 0) > 0
-            else "authority_census"
-            if not is_meaningful
+            if result.accepted_findings == 0 and _phase_times.get("WINDUP", 0) > 0 and is_meaningful
             else "depleted"
         )
-        # Sprint F163C: reason chain — public_error is primary signal over depleted.
+        # F164D reason chain — machine-readable, mutually exclusive.
         # smoke: is_meaningful=False → evidence_note
         # active: findings>0 → "signal_reaches_findings"
         # degraded_public: public_error set → "degraded_public_branch_blocked:{public_error}"
         # short_signal: meaningful, hits>0, no findings → "short_signal_no_findings"
+        # meaningful_empty: meaningful, no hits, no findings → "meaningful_empty_run"
+        # feed_ingress: feed zero, public discovered >0 → "feed_ingress_blocker:{public_discovered}"
         # depleted: meaningful, hits=0, no findings → "depleted_no_pattern_hits"
-        # windup_export_fail_soft: zero findings, windup fired → "windup_export_fail_soft"
         _checkpoint_zero_reason = (
             evidence_note
             if not is_meaningful
@@ -554,6 +576,10 @@ async def run_sprint(
             if result.public_error
             else "short_signal_no_findings"
             if is_meaningful and result.total_pattern_hits > 0
+            else "meaningful_empty_run"
+            if is_meaningful and result.total_pattern_hits == 0 and result.accepted_findings == 0
+            else f"feed_ingress_blocker:{result.public_discovered}"
+            if result.accepted_findings == 0 and feed_fnd == 0 and result.public_discovered > 0
             else "depleted_no_pattern_hits"
         )
         _export_finish_status = (

@@ -19,7 +19,7 @@ import asyncio
 import heapq
 import time
 import uuid
-from typing import Dict, List, Optional, Any, Union, Callable, Tuple
+from typing import Dict, List, Optional, Any, Union, Callable, Tuple, Set
 from collections import OrderedDict
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -453,6 +453,12 @@ class UnifiedWebIntelligence:
         if operation_id not in self._queued_ops:
             return
         target, op_types, result = self._queued_ops.pop(operation_id)
+        # Bound: _queued_ops stays in sync with operation_queue — stale entries pruned on next dequeue
+        if len(self._queued_ops) > self._MAX_QUEUE * 2:
+            stale = [k for k in self._queued_ops if k not in [oid for _, _, oid in self.operation_queue]]
+            for k in stale:
+                self._queued_ops.pop(k, None)
+                self._queued_op_times.pop(k, None)
         # Remove enqueue time
         self._queued_op_times.pop(operation_id, None)
         # Place result where _execute_operation_async expects it
@@ -522,6 +528,9 @@ class UnifiedWebIntelligence:
                 break
             except asyncio.TimeoutError:
                 pass  # normal tick
+            except asyncio.CancelledError:
+                # Task was cancelled externally — exit immediately without processing
+                break
             if not self.operation_queue:
                 continue
             now = time.time()
@@ -916,9 +925,11 @@ class UnifiedWebIntelligence:
         }
 
     async def cleanup(self) -> None:
-        """Cleanup all system resources."""
+        """Cleanup all system resources. Idempotent — safe to call multiple times."""
         try:
             # Signal aging task shutdown and wait for graceful exit
+            if self._aging_shutdown.is_set():
+                return  # already cleaned up — idempotent guard
             self._aging_shutdown.set()
             if self._aging_task:
                 self._aging_task.cancel()

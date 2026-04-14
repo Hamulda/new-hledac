@@ -812,6 +812,8 @@ class FeedSourceRunResult(msgspec.Struct, frozen=True, gc=False):
     elapsed_ms: float = 0.0
     error: str | None = None
     signal_stage: str = "unknown"
+    # F164C: per-source dedup loss counter
+    findings_lost_to_dedup: int = 0
 
 
 class FeedSourceBatchRunResult(msgspec.Struct, frozen=True, gc=False):
@@ -825,6 +827,8 @@ class FeedSourceBatchRunResult(msgspec.Struct, frozen=True, gc=False):
     error: str | None = None
     # Sprint 8BE Phase 3: dominant signal stage across all sources (mode)
     dominant_signal_stage: str = "unknown"
+    # Sprint F164C: batch-level dedup loss aggregation (per-entry hits filtered by dedup)
+    findings_lost_to_dedup: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -2020,6 +2024,13 @@ async def async_run_live_feed_pipeline(
     _avg_bias = _adapter_source_priority_bias_acc / max(1, _adapter_signal_count)
     _avg_timestamp = _adapter_timestamp_reliability_acc / max(1, _adapter_signal_count)
 
+    # F164C: compute once, use twice — eliminates duplicate recompute drift
+    _next_action_and_note = _compute_feed_next_action_and_confidence(
+        _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
+        _findings_from_rich_feed, _findings_from_fallback,
+        _squandered_high_usefulness_entries, _metadata_strong_but_content_weak, _low_trust_feed_hits,
+    )
+
     return FeedPipelineRunResult(
         feed_url=feed_url,
         fetched_entries=fetched_count,
@@ -2089,16 +2100,9 @@ async def async_run_live_feed_pipeline(
         feed_native_yield_ratio=(
             _findings_from_rich_feed / max(1, _findings_from_rich_feed + _findings_from_fallback)
         ),
-        feed_next_action=_compute_feed_next_action_and_confidence(
-            _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
-            _findings_from_rich_feed, _findings_from_fallback,
-            _squandered_high_usefulness_entries, _metadata_strong_but_content_weak, _low_trust_feed_hits,
-        )[0],
-        feed_confidence_note=_compute_feed_next_action_and_confidence(
-            _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
-            _findings_from_rich_feed, _findings_from_fallback,
-            _squandered_high_usefulness_entries, _metadata_strong_but_content_weak, _low_trust_feed_hits,
-        )[1],
+        # F164C: use pre-computed result (computed before return block)
+        feed_next_action=_next_action_and_note[0],
+        feed_confidence_note=_next_action_and_note[1],
         feed_branch_verdict=_compute_feed_branch_verdict(
             _feed_branch_signal_present, _fallback_useful_count, _fallback_waste_count,
             _findings_from_rich_feed, _findings_from_fallback,
@@ -2286,6 +2290,8 @@ async def async_run_feed_source_batch(
             elapsed_ms=elapsed_ms,
             error=result.error,
             signal_stage=result.signal_stage,
+            # F164C: propagate per-source dedup loss counter
+            findings_lost_to_dedup=result.findings_lost_to_dedup,
         )
 
     results: list[FeedSourceRunResult] = []
@@ -2339,6 +2345,9 @@ async def async_run_feed_source_batch(
     _logger = logging.getLogger(__name__)
     _logger.info(f"[BATCH] dominant_signal_stage={dominant_stage}")
 
+    # F164C: aggregate findings_lost_to_dedup from all sources
+    _batch_dedup_loss = sum(r.findings_lost_to_dedup for r in results)
+
     return FeedSourceBatchRunResult(
         total_sources=len(normalized),
         completed_sources=completed,
@@ -2348,6 +2357,8 @@ async def async_run_feed_source_batch(
         sources=tuple(results),
         error=batch_error,
         dominant_signal_stage=dominant_stage,
+        # F164C: batch-level dedup loss
+        findings_lost_to_dedup=_batch_dedup_loss,
     )
 
 
@@ -2364,15 +2375,15 @@ async def async_run_default_feed_batch(
 
     Unchanged signature from 8AL.
 
-    Runtime RSS/Atom enforcement (Sprint F025A.1):
-        Only ``curated_seed`` sources are routed to the feed pipeline.
-        ``topology_candidate`` sources are excluded from the default batch path.
+    F164C: Uses get_runtime_feed_seeds() SSOT — returns ONLY curated_seed sources,
+    pre-sorted by priority descending. topology_candidates are excluded at the
+    accessor level (get_runtime_feed_seeds is the canonical curated_seed surface).
     """
-    from hledac.universal.discovery.rss_atom_adapter import get_default_feed_seeds
+    # F164C: use SSOT accessor — get_runtime_feed_seeds() returns ONLY curated_seed
+    # sources, pre-sorted by priority descending. No manual filter needed.
+    from hledac.universal.discovery.rss_atom_adapter import get_runtime_feed_seeds
 
-    seeds = get_default_feed_seeds()
-    # Sprint F025A.1: filter to curated_seed only (topology_candidates are non-feed endpoints)
-    runtime_seeds = tuple(s for s in seeds if s.source == "curated_seed")
+    runtime_seeds = get_runtime_feed_seeds()
     return await async_run_feed_source_batch(
         sources=runtime_seeds,
         store=store,

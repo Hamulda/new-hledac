@@ -35,7 +35,10 @@ MAX_BYTES_HARD: Final[int] = 10_000_000
 
 
 class FetchResult(msgspec.Struct, frozen=True, gc=False):
-    """Frozen msgspec result — no mutations after construction."""
+    """Frozen msgspec result — no mutations after construction.
+
+    Backward-compatible: added fields have defaults so existing callers are unaffected.
+    """
 
     url: str
     final_url: str
@@ -46,6 +49,10 @@ class FetchResult(msgspec.Struct, frozen=True, gc=False):
     declared_length: int  # Content-Length header value, -1 if absent
     elapsed_ms: float
     error: str | None = None
+    # Added in F164A — feed ingress hardening
+    xml_recovered: bool = False  # True: body was XML-ish but Content-Type was wrong, body is now text
+    decode_replaced: bool = False  # True: UTF-8 decode used replacement chars
+    body_read_error: bool = False  # True: headers were OK but body stream failed mid-read
 
 
 # ---------------------------------------------------------------------------
@@ -127,12 +134,58 @@ def _compute_backoff_seconds(retry_after: float | None, attempt: int) -> float:
 
 
 def _build_retry_error(status_code: int, retry_after: float | None) -> str:
+    """Build retry error string with : separator between code and details.
+
+    Adapter uses .split(":", 2) — first two parts are always prefix+code,
+    any additional colons in the message body are preserved in part[2].
+    """
     parts = [f"retryable:{status_code}"]
     if retry_after is not None:
         parts.append(f"retry_after={retry_after:.1f}s")
     else:
         parts.append("backoff=exp")
     return "|".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# XML-ish body sniffing helper — bounded, fail-safe
+# ---------------------------------------------------------------------------
+
+_XML_MARKER = b"<?xml"
+_XML_TAG_RE = re.compile(rb"^\s*<[a-zA-Z]", re.IGNORECASE)
+
+
+def _looks_xmlish(body: bytes) -> bool:
+    """Return True if body starts like XML (<?xml or <tag).
+
+    Strips leading ASCII whitespace so servers that prepend newlines
+    before the XML declaration are correctly identified.
+    """
+    stripped = body.lstrip()
+    if stripped.startswith(_XML_MARKER):
+        return True
+    return bool(_XML_TAG_RE.match(stripped))
+
+
+# ---------------------------------------------------------------------------
+# Decode helper — fail-soft, truth-bearing
+# ---------------------------------------------------------------------------
+
+def _try_decode(body: bytes) -> tuple[str, bool]:
+    """Decode bytes to str, return (text, replaced_bool).
+
+    replaced_bool=True when UTF-8 decoder used replacement chars (U+FFFD).
+    This tells the adapter that the body was garbled, not truly empty.
+    """
+    try:
+        text = body.decode("utf-8", errors="strict")
+        return (text, False)
+    except UnicodeDecodeError:
+        # Use replacement mode so we still get a usable string
+        text = body.decode("utf-8", errors="replace")
+        # Count how many replacement chars were inserted
+        replaced = "\ufffd" in text
+        return (text, replaced)
 
 
 # ---------------------------------------------------------------------------
@@ -243,25 +296,9 @@ async def async_fetch_public_text(
                             error=last_error,
                         )
 
-                    # --- Content-type gate ---
-                    if raw_content_type not in ACCEPTED_CONTENT_TYPES:
-                        elapsed_ms = (time.monotonic() - t0) * 1000
-                        return FetchResult(
-                            url=url,
-                            final_url=final_url,
-                            status_code=last_status_code,
-                            content_type=content_type,
-                            text=None,
-                            fetched_bytes=0,
-                            declared_length=-1,
-                            elapsed_ms=elapsed_ms,
-                            error=f"content_type_rejected:{raw_content_type}",
-                        )
-
-                    # --- Chunked body read with size cap ---
-                    body_chunks: list[bytes] = []
-                    total_read = 0
-                    accumulated_ok = True
+                    # --- Content-type gate with XML-ish body recovery (Feed ingress hardening F164A) ---
+                    xml_recovered = False
+                    rejected_ct = raw_content_type not in ACCEPTED_CONTENT_TYPES
 
                     raw_declared = resp.headers.get("Content-Length")
                     try:
@@ -269,8 +306,37 @@ async def async_fetch_public_text(
                     except (ValueError, TypeError):
                         declared_length = -1
 
+                    # --- Chunked body read with size cap ---
+                    body_chunks: list[bytes] = []
+                    total_read = 0
+                    accumulated_ok = True
+                    first_chunk_peeked = False
+
                     async for chunk in resp.content.iter_chunked(8192):
                         chunk_len = len(chunk)
+
+                        # Peek: check first chunk for XML-ish body when CT is wrong
+                        if rejected_ct and not first_chunk_peeked:
+                            first_chunk_peeked = True
+                            if _looks_xmlish(chunk):
+                                # Feed ingress recovery: wrong CT but XML body — accept it
+                                xml_recovered = True
+                            elif total_read == 0:
+                                # First chunk is not XML-ish and we haven't accumulated anything —
+                                # non-XML body under wrong CT: reject without reading remainder
+                                elapsed_ms = (time.monotonic() - t0) * 1000
+                                return FetchResult(
+                                    url=url,
+                                    final_url=final_url,
+                                    status_code=last_status_code,
+                                    content_type=content_type,
+                                    text=None,
+                                    fetched_bytes=0,
+                                    declared_length=declared_length,
+                                    elapsed_ms=elapsed_ms,
+                                    error=f"content_type_rejected:{raw_content_type}",
+                                )
+
                         if total_read + chunk_len > max_bytes:
                             remaining = max_bytes - total_read
                             if remaining > 0:
@@ -295,11 +361,14 @@ async def async_fetch_public_text(
                     if accumulated_ok and body_chunks:
                         try:
                             body_bytes = b"".join(body_chunks)
-                            text = body_bytes.decode("utf-8", errors="replace")
+                            # Detect decode replacement chars for truth
+                            text, decode_replaced = _try_decode(body_bytes)
                         except Exception:
                             text = None
+                            decode_replaced = False
                     else:
                         text = None
+                        decode_replaced = False
 
                     elapsed_ms = (time.monotonic() - t0) * 1000
                     return FetchResult(
@@ -312,6 +381,8 @@ async def async_fetch_public_text(
                         declared_length=declared_length,
                         elapsed_ms=elapsed_ms,
                         error=None,
+                        xml_recovered=xml_recovered,
+                        decode_replaced=decode_replaced,
                     )
 
         except asyncio.TimeoutError:
@@ -341,7 +412,8 @@ async def async_fetch_public_text(
                 fetched_bytes=0,
                 declared_length=-1,
                 elapsed_ms=elapsed_ms,
-                error=f"fetch_error:{type(exc).__name__}:{exc}",
+                error=f"fetch_error;{type(exc).__name__};{exc}",
+                body_read_error=True,
             )
 
     # Should not reach here, but as safeguard:
@@ -356,6 +428,7 @@ async def async_fetch_public_text(
         declared_length=-1,
         elapsed_ms=elapsed_ms,
         error=last_error or "retry_exhausted",
+        body_read_error=True,
     )
 
 
@@ -370,6 +443,8 @@ __all__ = [
     "_is_retryable_status",
     "_extract_retry_after",
     "_compute_backoff_seconds",
+    "_try_decode",
+    "_looks_xmlish",
 ]
 
 # ---------------------------------------------------------------------------

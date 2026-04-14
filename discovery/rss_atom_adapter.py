@@ -832,6 +832,7 @@ def _parse_feed_xml(
     feed_url: str,
     retrieved_ts: float,
     _parse_mode_out: list[str] | None = None,
+    _feed_type_out: list[str] | None = None,
 ) -> list[FeedEntryHit]:
     """
     Detect feed type and parse accordingly.
@@ -846,6 +847,11 @@ def _parse_feed_xml(
 
     ``_parse_mode_out``, if provided, is appended with the parse mode
     label for observability (never raises, never affects results).
+
+    ``_feed_type_out``, if provided, is appended with the matched feed type
+    ("rss" | "feed") when a recognized root tag is found, even if the resulting
+    entry list is empty. This distinguishes a valid-but-empty feed from an
+    unrecognized root tag. Never raises.
     """
     # ---- Step 1: primary defusedxml on raw input ----
     try:
@@ -854,8 +860,12 @@ def _parse_feed_xml(
             _report_parse_mode(_parse_mode_out, _ParseMode.RAW_DEFUSEDXML)
             local_root = _local_name(root.tag)
             if local_root == "rss":
+                if _feed_type_out is not None:
+                    _feed_type_out.append("rss")
                 return _parse_rss(root, feed_url, retrieved_ts)
             elif local_root == "feed":
+                if _feed_type_out is not None:
+                    _feed_type_out.append("feed")
                 return _parse_atom(root, feed_url, retrieved_ts)
             else:
                 return []
@@ -870,8 +880,12 @@ def _parse_feed_xml(
             _report_parse_mode(_parse_mode_out, _ParseMode.SANITIZED_DEFUSEDXML)
             local_root = _local_name(root.tag)
             if local_root == "rss":
+                if _feed_type_out is not None:
+                    _feed_type_out.append("rss")
                 return _parse_rss(root, feed_url, retrieved_ts)
             elif local_root == "feed":
+                if _feed_type_out is not None:
+                    _feed_type_out.append("feed")
                 return _parse_atom(root, feed_url, retrieved_ts)
             else:
                 return []
@@ -885,8 +899,12 @@ def _parse_feed_xml(
             _report_parse_mode(_parse_mode_out, _ParseMode.SANITIZED_STDLIB_FALLBACK)
             local_root = _local_name(root.tag)
             if local_root == "rss":
+                if _feed_type_out is not None:
+                    _feed_type_out.append("rss")
                 return _parse_rss(root, feed_url, retrieved_ts)
             elif local_root == "feed":
+                if _feed_type_out is not None:
+                    _feed_type_out.append("feed")
                 return _parse_atom(root, feed_url, retrieved_ts)
             else:
                 return []
@@ -956,15 +974,27 @@ async def async_fetch_feed_entries(
     # Guard removed by Sprint 8AR: DOCTYPE/ENTITY handling is now done
     # via sanitized recovery inside _parse_feed_xml.
 
-    # Parse
-    parsed = _parse_feed_xml(result.text, feed_url, retrieved_ts)
+    # Parse — track feed type so we can distinguish valid-but-empty from unrecognized root
+    _feed_type: list[str] = []
+    parsed = _parse_feed_xml(result.text, feed_url, retrieved_ts, _feed_type_out=_feed_type)
+    had_valid_feed_type: bool = bool(_feed_type)
 
     if not parsed and result.text.strip():
-        # Distinguish HTML (likely dead/moved feed) from genuinely malformed XML.
-        # HTML pages typically start with <!DOCTYPE or <html; XML with <?xml or <rss/<feed.
         stripped = result.text.strip()
         starts_html = stripped.startswith(("<!DOCTYPE", "<html"))
-        error_tag = "xml_parse_error" if not starts_html else "fetch_returned_html_not_xml"
+
+        # Detect redirect: if result carries redirected_to, this is a non-feed endpoint.
+        redirected_to = getattr(result, "redirected_to", None) or None
+        if redirected_to and starts_html:
+            error_tag = "redirected_non_feed_endpoint"
+        elif starts_html:
+            error_tag = "fetch_returned_html_not_xml"
+        elif had_valid_feed_type:
+            # F164B: valid RSS/Atom root found but zero entries
+            error_tag = "valid_empty_feed"
+        else:
+            error_tag = "xml_parse_error"
+
         return FeedBatchResult(
             feed_url=feed_url,
             entries=(),
@@ -989,6 +1019,7 @@ async def async_fetch_feed_entries(
 
     # ---- F150J: Score + pre-filter + deterministic rerank ----
     scored: list[tuple[FeedEntryHit, float, float, str, str, float, float, str, str, float, str]] = []
+    all_filtered_out: bool = len(deduped) > 0  # True if we had entries but all got pre-filtered
 
     for entry in deduped:
         # Light pre-filter: skip obvious noise
@@ -1000,6 +1031,8 @@ async def async_fetch_feed_entries(
         if title_len == 0 and summary_len == 0 and rc_len == 0:
             continue
 
+        # We got at least one entry that passed the pre-filter
+        all_filtered_out = False
         freshness_score, freshness_tier = _compute_freshness(
             entry.published_ts, retrieved_ts
         )
@@ -1088,8 +1121,8 @@ async def async_fetch_feed_entries(
 
     # Sort: highest combined score desc; preserve-first tie-break via stable sort
     # F150K: source_priority_bias is additive bias — fold into sort key.
-    # BUG FIX (F150J): was sorting by quality_score (x[2]) instead of combined (x[5]).
-    scored.sort(key=lambda x: (-(x[5] + x[9]), scored.index(x)))
+    # Python sort is stable so equal keys preserve insertion order (preserve-first).
+    scored.sort(key=lambda x: -(x[5] + x[9]))
 
     # Clamp to max_entries and rebuild with scoring metadata
     entries: list[FeedEntryHit] = []
@@ -1150,7 +1183,20 @@ async def async_fetch_feed_entries(
             )
         )
 
-    return FeedBatchResult(feed_url=feed_url, entries=tuple(entries))
+    # ---- F164B: propagate parsed-but-filtered signal ----
+    if all_filtered_out and entries:
+        # This is a logic guard: scored entries that passed pre-filter
+        # should never result in zero entries here, but track it anyway.
+        pass
+    error_tag: str | None = None
+    if not entries and all_filtered_out:
+        error_tag = "parsed_but_filtered"
+    elif not entries and had_valid_feed_type:
+        # F164B: valid RSS/Atom root found but zero entries after parsing
+        error_tag = "valid_empty_feed"
+    # else: entries found → no error, normal success
+
+    return FeedBatchResult(feed_url=feed_url, entries=tuple(entries), error=error_tag)
 
 
 # ---------------------------------------------------------------------------

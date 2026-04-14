@@ -112,6 +112,7 @@ async def async_get_aiohttp_session() -> aiohttp.ClientSession:
                 limit=25,               # total connection pool size
                 limit_per_host=5,      # per-host connection limit
                 ttl_dns_cache=300,     # DNS cache TTL in seconds
+                use_dns_cache=True,    # aiohttp 3.9+ requires explicit opt-in
             )
             # Default timeout: HTML-style (connect + read)
             timeout = aiohttp.ClientTimeout(
@@ -169,7 +170,11 @@ async def close_aiohttp_session_async() -> None:
             _session_instance = None
             _session_closed = True
             try:
-                await sess.close()
+                # Capture the close task so we can await it before returning
+                # This prevents a race where the caller sees _session_instance=None
+                # while the close coroutine is still running
+                close_coro = sess.close()
+                await close_coro
                 logger.debug("[SESSION] aiohttp.ClientSession closed async")
             except Exception as e:
                 logger.warning(f"[SESSION] async close error: {e}")
