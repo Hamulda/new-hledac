@@ -109,6 +109,9 @@ class PipelinePageResult(msgspec.Struct, frozen=True, gc=False):
     structural_quality: str = ""  # "" | "healthy" | "thin" | "dead"
     # Sprint F170D: fetch accessibility truth — failure_stage from FetchResult
     failure_stage: str | None = None  # validation | connection | tls | http | body | size
+    # Sprint F171A: redirect truth surfaces — redirect-induced non-content vs weak conversion
+    redirected: bool = False  # True when page was redirected (final_url != original_url)
+    redirect_target: str | None = None  # redirect destination URL when redirected=True
 
 
 class PipelineRunResult(msgspec.Struct, frozen=True, gc=False):
@@ -694,6 +697,8 @@ async def _fetch_and_process_page(
                 waste_category=waste_category,
                 structural_quality=structural_quality,
                 failure_stage=None,
+                redirected=False,
+                redirect_target=None,
             )
 
         try:
@@ -723,6 +728,8 @@ async def _fetch_and_process_page(
                 waste_category=waste_category,
                 structural_quality=structural_quality,
                 failure_stage="connection",
+                redirected=False,
+                redirect_target=None,
             )
         except asyncio.CancelledError:
             raise  # [I6] propagate, never swallow
@@ -747,16 +754,23 @@ async def _fetch_and_process_page(
                 discovery_false_positive=discovery_false_positive,
                 waste_category=waste_category,
                 structural_quality=structural_quality,
-                failure_stage=fetched_failure_stage if 'fetched_failure_stage' in dir() else "connection",
+                failure_stage="connection",
+                redirected=False,
+                redirect_target=None,
             )
 
         # Unpack fetch result (FetchResult frozen struct)
         # Sprint F170D: also read failure_stage for accessibility truth
+        # Sprint F171A: also read redirected + redirect_target for redirect-induced non-content detection
         fetched_text: str | None
         fetched_failure_stage: str | None = None
+        fetched_redirected: bool = False
+        fetched_redirect_target: str | None = None
         if hasattr(result, "text"):
             fetched_text = result.text
             fetched_failure_stage = getattr(result, "failure_stage", None)
+            fetched_redirected = getattr(result, "redirected", False)
+            fetched_redirect_target = getattr(result, "redirect_target", None)
         else:
             fetched_text = None
 
@@ -782,6 +796,8 @@ async def _fetch_and_process_page(
                 waste_category=waste_category,
                 structural_quality=structural_quality,
                 failure_stage=None,
+                redirected=fetched_redirected,
+                redirect_target=fetched_redirect_target,
             )
 
         # ---- Extract ---------------------------------------------------------
@@ -812,6 +828,8 @@ async def _fetch_and_process_page(
                 waste_category=waste_category,
                 structural_quality=structural_quality,
                 failure_stage=fetched_failure_stage,
+                redirected=fetched_redirected,
+                redirect_target=fetched_redirect_target,
             )
 
         # Hard cap
@@ -854,6 +872,8 @@ async def _fetch_and_process_page(
                 waste_category=waste_category,
                 structural_quality=structural_quality,
                 failure_stage=fetched_failure_stage,
+                redirected=fetched_redirected,
+                redirect_target=fetched_redirect_target,
             )
 
         # Sprint F150I: enrich extracted text with discovery metadata
@@ -898,6 +918,8 @@ async def _fetch_and_process_page(
                 waste_category=waste_category,
                 structural_quality=structural_quality,
                 failure_stage=fetched_failure_stage,
+                redirected=fetched_redirected,
+                redirect_target=fetched_redirect_target,
             )
 
         # ---- Per-page dedup: (value, label, pattern) exact dedup -----------
@@ -972,6 +994,8 @@ async def _fetch_and_process_page(
             waste_category=waste_category,
             structural_quality=structural_quality,
             failure_stage=fetched_failure_stage,
+            redirected=fetched_redirected,
+            redirect_target=fetched_redirect_target,
         )
 
 
@@ -1418,11 +1442,20 @@ async def async_run_live_public_pipeline(
     )
 
     # dominant_public_failure_mode: aggregate failure story
+    # Priority: discovery blocker > fetch_accessibility_blocker > redirect_non_content > waste:*
     _failure_modes: list[str] = []
     if public_discovery_blocker:
         _failure_modes.append(public_discovery_blocker)
     if public_fetch_accessibility_blocker:
         _failure_modes.append("fetch_accessibility_blocker")
+    # Sprint F171A: redirect-induced non-content — redirected AND ended as structural/signalless waste
+    # Only triggers for pages that were actually fetched and found thin/dead content at redirect target
+    _any_redirect_non_content = any(
+        p.redirected and p.waste_category in ("structural", "signalless")
+        for p in all_page_results
+    )
+    if _any_redirect_non_content:
+        _failure_modes.append("redirect_non_content")
     # Add dominant waste category if present
     if run_waste_pattern_code and run_waste_pattern_code != "none":
         _failure_modes.append(f"waste:{run_waste_pattern_code}")

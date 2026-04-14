@@ -886,14 +886,14 @@ class SprintScheduler:
                 # Sprint 8UC B.4: Speculative prefetch every 15s
                 now_mono = _time.monotonic()
                 if (now_mono - self._last_speculative) >= 15.0:
-                    _t = asyncio.create_task(self._speculative_prefetch(None, n=3))
+                    _t = asyncio.create_task(self._speculative_prefetch(n=3))
                     self._bg_tasks.add(_t)
                     _t.add_done_callback(self._bg_tasks.discard)
                     self._last_speculative = now_mono
 
                 # Sprint 8UC B.5: OODA cycle every 60s
                 if (now_mono - self._last_ooda) >= self._ooda_interval:
-                    _t = asyncio.create_task(self._run_ooda_cycle(self._pivot_ioc_graph, None))
+                    _t = asyncio.create_task(self._run_ooda_cycle(self._pivot_ioc_graph))
                     self._bg_tasks.add(_t)
                     _t.add_done_callback(self._bg_tasks.discard)
                     self._last_ooda = now_mono
@@ -1586,7 +1586,6 @@ class SprintScheduler:
 
     async def _execute_pivot(self, task: PivotTask) -> None:
         """Dispatch pivot task to appropriate intelligence client."""
-        import aiohttp
         from hledac.universal.intelligence.exposure_clients import (
             GitHubCodeSearchClient,
             MalwareBazaarClient,
@@ -1597,21 +1596,16 @@ class SprintScheduler:
         from hledac.universal.paths import CACHE_ROOT
         from hledac.universal.tool_registry import get_task_handler
 
-        session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=15),
-            headers={"User-Agent": "curl/7.0"},
-        )
-        try:
-            # Sprint 8VF: Registry dispatch — OSINT handlers registered via @register_task
-            handler = get_task_handler(task.task_type)
-            if handler is not None:
-                await handler(task, self)
-                return
+        # Sprint 8VF: Registry dispatch — OSINT handlers registered via @register_task
+        handler = get_task_handler(task.task_type)
+        if handler is not None:
+            await handler(task, self)
+            return
 
             # Sprint 8VF: Inline lifecycle handlers only (max 5 branches)
             # Sprint 8VF §E.3: hypothesis_probe — keyword extraction from natural language
             # Sprint 8VI §C: Hypothesis → DuckPGQ confirmed_by feedback
-            elif task.task_type == "hypothesis_probe":
+        elif task.task_type == "hypothesis_probe":
                 words = task.ioc_value.split()
                 queries = sorted(
                     {w.lower() for w in words if len(w) > 5},
@@ -1643,17 +1637,15 @@ class SprintScheduler:
                         pass
 
             # Sprint 8VF §C: Sprint lifecycle inline handlers (only these stay as elif)
-            elif task.task_type == "sprint_windup":
+        elif task.task_type == "sprint_windup":
                 # Signal windup — nothing to do in pivot
                 pass
 
-            else:
+        else:
                 # Sprint 8VF: OSINT handlers moved to @register_task registry
                 # (ti_feed_adapter, duckduckgo_adapter). Remaining types are either
                 # unregistered or lifecycle-only.
                 log.debug(f"[DISPATCH] Unknown task type: {task.task_type}")
-        finally:
-            await session.close()
 
     async def _buffer_ioc_pivot(
         self, ioc_type: str, ioc_value: str, confidence: float
@@ -1692,7 +1684,6 @@ class SprintScheduler:
 
     async def _speculative_prefetch(
         self,
-        session,  # aiohttp.ClientSession
         n: int = 3,
     ) -> None:
         """Spustit top-n pivot tasků spekulativně jako background tasks."""
@@ -1748,7 +1739,6 @@ class SprintScheduler:
     async def _run_ooda_cycle(
         self,
         ioc_graph,
-        session,
     ) -> None:
         """Jeden OODA cyklus — 60s interval."""
         log.info("OODA: cycle start")

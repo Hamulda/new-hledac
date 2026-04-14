@@ -1066,7 +1066,8 @@ def _get_correlation_from_handoff(eh: "ExportHandoff") -> dict[str, Any] | None:
     # Priority 2: scorecard["correlation"] dict
     scorecard = eh.scorecard if eh.scorecard else {}
     if not scorecard:
-        return None
+        # F171B S3: explicit no-correlation flag for empty scorecard
+        return {"_no_correlation_data": True}
     corr = scorecard.get("correlation") or scorecard.get("run_correlation")
     if corr and isinstance(corr, dict):
         return corr
@@ -1079,6 +1080,9 @@ def _get_correlation_from_handoff(eh: "ExportHandoff") -> dict[str, Any] | None:
     risk_score = scorecard.get("risk_score")
     verdict = scorecard.get("verdict") or scorecard.get("risk_verdict") or ""
 
+    # F171B §3: explicit no-correlation flag when scorecard has empty correlation dict
+    # Previously returned None — _build_operator_brief then set so_what="" with no explanation.
+    # Now returns explicit flag so the operator brief can surface "no correlation data" clearly.
     if so_what or dominant_cluster or campaign_hints or high_risk:
         result = {}
         if so_what:
@@ -1093,9 +1097,9 @@ def _get_correlation_from_handoff(eh: "ExportHandoff") -> dict[str, Any] | None:
             result["risk_score"] = risk_score
         if verdict:
             result["verdict"] = verdict
-        return result if result else None
+        return result if result else {"_no_correlation_data": True}
 
-    return None
+    return {"_no_correlation_data": True}
 
 
 def _get_runtime_truth(eh: "ExportHandoff") -> dict[str, Any] | None:  # type: ignore[name-defined]
@@ -1590,11 +1594,16 @@ def _build_operator_brief(
     # --- Correlation-derived operator intelligence (F150M) ---
     # Correlation fields flow: workflow_orchestrator.correlate_findings() → scorecard
     # Fail-soft: correlation may not be present in older sprints (scorecard built before F150M)
+    # F171B §3: explicit "_no_correlation_data" flag from _get_correlation_from_handoff
     so_what = ""
     dominant_cluster: str | None = None
     campaign_hints: list[dict] = []
     high_risk_branch: list[dict] = []
-    if correlation:
+    no_correlation_data = False
+    if correlation and correlation.get("_no_correlation_data") is True:
+        no_correlation_data = True
+        so_what = "korelační data nedostupná — store nedostupný nebo korelace neběžela"
+    elif correlation:
         so_what = correlation.get("so_what") or ""
         dominant_cluster = correlation.get("dominant_cluster") or correlation.get("cluster") or None
         # campaign_hints: list of dicts with campaign signals
@@ -1653,8 +1662,15 @@ def _build_operator_brief(
     cb_open = pvs.get("cb_open_domains", [])
     if cb_open:
         weaknesses.append(f"circuit breaker open: {len(cb_open)} domains")
+    # F171B §1: guard against misleading "clean sprint" when signal is unknown
+    # (store unavailable or degraded produces unknown signal with no real evidence)
     if not weaknesses:
-        weaknesses.append("žádné výrazné slabiny — sprint byl čistý")
+        if signal == "unknown" and accepted == 0 and total_rejected == 0:
+            weaknesses.append("nedostatek dat — store nedostupný nebo sprint neběžel; skutečný stav neznámý")
+        elif signal == "unknown":
+            weaknesses.append("signál neznámý — store nedostupný; doporučuji ověřit dostupnost dat")
+        else:
+            weaknesses.append("žádné výrazné slabiny — sprint byl čistý")
 
     # --- Co dělat dál: akční next step ---
     next_step = _derive_next_step(signal, branch_value, correlation)
@@ -1713,6 +1729,8 @@ def _build_operator_brief(
         "sprint_verdict": sprint_verdict,
         # Sprint F157: synthesis_outcome_payload
         "synthesis_outcome_payload": synthesis_outcome_payload,
+        # F171B §3: data availability flags for degraded truth transparency
+        "no_correlation_data": no_correlation_data,
     }
 
 
@@ -1903,6 +1921,11 @@ def _derive_confidence_band(
 
     # Depleted = LOW (minimální data)
     if pvs.get("signal_quality") == "depleted":
+        return "LOW"
+
+    # F171B §4: unknown signal = LOW confidence — store unavailable or sprint didn't run
+    # Previously fell through to MEDIUM default — misleading when we have no real data
+    if pvs.get("signal_quality") == "unknown":
         return "LOW"
 
     # Medium/other = MEDIUM
@@ -2164,7 +2187,12 @@ def _build_sprint_summary(pvs: dict[str, Any], seeds_count: int) -> dict[str, An
     elif signal == "depleted":
         what_found = "sprint nic nepřinesl — vyčerpaný prostor nebo špatné zdroje"
     else:
-        what_found = f"nedefinovaný stav: accepted={accepted}"
+        # F171B §2: accepted>0 with unknown signal = degraded truth, not "undefined"
+        # Store unavailable or scorecard built before F150P — don't claim clarity we don't have
+        if accepted > 0:
+            what_found = f"částečný sprint: {accepted} IOC nalezeno, ale signál neznámý (store nedostupný)"
+        else:
+            what_found = "nedostatek dat — sprint neproběhl nebo store nedostupný"
 
     # --- what_didnt_work ---
     didnt_work: list[str] = []

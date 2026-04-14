@@ -1,18 +1,12 @@
 """
-Unified Web Intelligence System - Hive Mind Integration
-==========================================================
+Web Intelligence Helper — OSINT scraping and analysis utilities.
 
-Enhances and integrates existing Hledac web scraping and OSINT capabilities
-into a unified, next-generation intelligence platform.
+Provides a lightweight wrapper around Hledac's scraping and OSINT components
+with bounded queue management and graceful degradation when optional
+dependencies are unavailable.
 
-Features:
-- Unified API for all web intelligence operations
-- Advanced orchestration with FlashAttention acceleration
-- Comprehensive OSINT reporting and analysis
-- Real-time stealth management and evasion
-- M1 Ultra-optimized performance (15-20× speedup)
-- Distributed intelligence gathering
-- Advanced threat assessment and vulnerability analysis
+This is a utility module, not a canonical runtime owner. All heavy
+orchestration lives in the autonomous_orchestrator.
 """
 
 import asyncio
@@ -120,18 +114,18 @@ class IntelligenceResult:
 
 class UnifiedWebIntelligence:
     """
-    Unified Web Intelligence System - Hive Mind Integration Platform.
+    Web intelligence helper — OSINT scraping and threat analysis utilities.
 
-    This system integrates all existing Hledac web scraping and OSINT capabilities
-    into a single, cohesive intelligence platform with advanced orchestration.
+    Provides a bounded, lazy-initialized wrapper around Hledac's optional scraping
+    and OSINT components. This is a utility helper, not a canonical runtime
+    owner; all heavy orchestration lives in autonomous_orchestrator.
 
     Key Features:
-    1. Unified API for all web intelligence operations
-    2. Advanced orchestration with existing components
-    3. Real-time performance optimization and monitoring
-    4. Comprehensive threat assessment and vulnerability analysis
-    5. M1 Ultra-optimized execution
-    6. Distributed intelligence gathering coordination
+    1. Bounded queue with priority aging
+    2. Lazy component initialization on first operation
+    3. Graceful degradation when optional dependencies are unavailable
+    4. Task ownership tracking with symmetric cleanup
+    5. Memory pressure awareness for M1 8GB environments
     """
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
@@ -1029,4 +1023,5 @@ async def example_usage():
 
 
 if __name__ == "__main__":
+    import json
     asyncio.run(example_usage())
