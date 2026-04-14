@@ -72,12 +72,12 @@ _io_only_latch: bool = False
 _io_only_latch_lock: _threading.Lock = _threading.Lock()
 
 
-def _compute_io_only_latch(system_used_gib: float, current_latch: bool) -> bool:
+def _compute_io_only_latch(system_used_gib: float, current_latch: bool, swap_detected: bool = False) -> bool:
     """
     Compute next io_only value based on hysteresis rules.
     Returns the new latch value (True = stay in io_only, False = exit).
     """
-    target = should_enter_io_only_mode(system_used_gib, previous_io_only=current_latch)
+    target = should_enter_io_only_mode(system_used_gib, previous_io_only=current_latch, swap_detected=swap_detected)
     if target:
         return True
     elif system_used_gib <= _HYSTERESIS_EXIT_GIB:
@@ -86,16 +86,17 @@ def _compute_io_only_latch(system_used_gib: float, current_latch: bool) -> bool:
         return current_latch
 
 
-def _update_io_only_latch_with_lock(system_used_gib: float) -> tuple[bool, bool]:
+def _update_io_only_latch_with_lock(system_used_gib: float, swap_detected: bool = False) -> tuple[bool, bool]:
     """
     Sprint 8AK: Atomically read latch, compute new value, write back.
     Returns (io_only, new_latch).
     Thread-safe via _io_only_latch_lock.
+    F166F: swap_detected propagates into latch computation for accelerated io_only entry.
     """
     global _io_only_latch
     with _io_only_latch_lock:
         current = _io_only_latch
-        new_val = _compute_io_only_latch(system_used_gib, current)
+        new_val = _compute_io_only_latch(system_used_gib, current, swap_detected=swap_detected)
         _io_only_latch = new_val
         return new_val, new_val
 
@@ -410,8 +411,12 @@ def sample_uma_status() -> UMAStatus:
     # Compute state and io_only
     state = evaluate_uma_state(system_used_gib)
 
+    # F166F: swap_detected computed BEFORE latch so it can propagate into the decision
+    swap_detected = swap_used_gib > 0.05
+
     # Sprint 8AK: Shared hysteresis latch — thread-safe, prevents state thrashing
-    io_only, _ = _update_io_only_latch_with_lock(system_used_gib)
+    # F166F: swap_detected accelerates io_only entry to WARN threshold (6.0 GiB)
+    io_only, _ = _update_io_only_latch_with_lock(system_used_gib, swap_detected=swap_detected)
 
     # Update telemetry — F130A: all counters are transition-based, not state-sampled.
     # - transition_count: every state change (ok→warn, warn→critical, etc.)
@@ -438,7 +443,7 @@ def sample_uma_status() -> UMAStatus:
         system_used_gib=system_used_gib,
         system_available_gib=system_available_gib,
         swap_used_gib=swap_used_gib,
-        swap_detected=swap_used_gib > 0.05,  # F163F: any active swap = systemic pressure
+        swap_detected=swap_detected,
         metal_cache_limit_bytes=metal_cache_limit_bytes,
         metal_wired_limit_bytes=metal_wired_limit_bytes,
         state=state,

@@ -263,6 +263,20 @@ class SprintSchedulerResult:
     public_accepted_findings: int = 0
     public_stored_findings: int = 0
     public_error: str = ""
+    # Sprint F166B: Pre-loop starvation tracking
+    # Set when ACTIVE phase is first observed (loop guard entry)
+    entered_active_at_monotonic: float | None = None
+    # Wall-clock seconds from run() entry to loop guard entry
+    pre_loop_elapsed_s: float | None = None
+    # Set at first cycles_started += 1
+    first_cycle_started_at_monotonic: float | None = None
+    # True when gap between entered_active and first_cycle_started > 30s (M1 warmup budget)
+    pre_active_starved: bool = False
+    # First identified pre-loop cost center (additive, never overwritten)
+    pre_loop_blocker_reason: str = ""
+    # Dedup preload telemetry
+    dedup_preload_count: int | None = None
+    dedup_preload_elapsed_s: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -725,7 +739,15 @@ class SprintScheduler:
                 pass  # Let scheduler handle - will likely be stuck but won't crash
 
         # Sprint 8RA: Load persistent dedup at BOOT
+        _dedup_t0 = _time.monotonic()
         await self._load_dedup()
+        _dedup_elapsed = _time.monotonic() - _dedup_t0
+        self._result.dedup_preload_elapsed_s = _dedup_elapsed
+        self._result.dedup_preload_count = len(self._dedup_seen) if hasattr(self, '_dedup_seen') and self._dedup_seen is not None else 0
+
+        # Sprint F166B: Identify pre-loop cost center (additive — first reason only)
+        if _dedup_elapsed > 1.0 and not self._result.pre_loop_blocker_reason:
+            self._result.pre_loop_blocker_reason = "dedup_preload"
 
         # Sprint 8SA: Source scoring — order sources by priority at start of ACTIVE
         _DEFAULT_SOURCE_TYPES = [
@@ -736,6 +758,12 @@ class SprintScheduler:
         ordered_sources = self.prioritize_sources(
             list(sources) if sources else _DEFAULT_SOURCE_TYPES, _graph_stats
         )
+
+        # Sprint F166B: Capture pre-loop surfaces before entering while loop
+        _pre_loop_elapsed = _time.monotonic() - self._wall_clock_start
+        self._result.pre_loop_elapsed_s = _pre_loop_elapsed
+        # entered_active_at_monotonic: first observation of ACTIVE (loop guard)
+        self._result.entered_active_at_monotonic = _pre_loop_elapsed
 
         try:
             # Sprint 8VD §C: Start memory pressure monitoring loop
@@ -779,6 +807,15 @@ class SprintScheduler:
                     break
 
                 self._result.cycles_started += 1
+                # Sprint F166B: Capture first_cycle_started at cycles_started += 1
+                if self._result.first_cycle_started_at_monotonic is None:
+                    self._result.first_cycle_started_at_monotonic = _time.monotonic() - self._wall_clock_start
+                    # Sprint F166B: Check starvation — gap > 30s = pre-active starvation
+                    gap = self._result.first_cycle_started_at_monotonic - self._result.entered_active_at_monotonic
+                    if gap > 30.0:
+                        self._result.pre_active_starved = True
+                        if not self._result.pre_loop_blocker_reason:
+                            self._result.pre_loop_blocker_reason = "pre_loop_slow"
                 # Sprint 8BK: Wall-clock duration guard — catches cases where lifecycle
                 # remaining_time() does not decrease between cycles (e.g. async tick gap).
                 # Force-enter-windup if wall-clock exceeds sprint_duration_s + grace.

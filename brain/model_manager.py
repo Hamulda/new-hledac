@@ -543,33 +543,34 @@ class ModelManager:
 
     async def _release_model_async(self, model_type: ModelType, model_name: str) -> None:
         """Interní async implementace uvolnění modelu."""
-        try:
-            model = self._loaded_models[model_type]
+        model = self._loaded_models.get(model_type)
+        unload_error: Optional[Exception] = None
 
-            # Zavoláme unload metodu pokud existuje
-            if hasattr(model, 'unload'):
-                logger.info(f"[MODEL RELEASE] {model_name} start")
+        # F166E: Always remove from registry first — before unload attempt
+        # This ensures no partial-init leak regardless of unload outcome
+        if model_type in self._loaded_models:
+            del self._loaded_models[model_type]
+
+        if self._current_model == model_type:
+            self._current_model = None
+
+        # Attempt unload — failure is logged but never propagated
+        if model is not None and hasattr(model, 'unload'):
+            logger.info(f"[MODEL RELEASE] {model_name} start")
+            try:
                 if inspect.iscoroutinefunction(model.unload):
                     await model.unload()
                 else:
-                    # Sync metodu zavoláme v executoru
                     loop = asyncio.get_running_loop()
                     await loop.run_in_executor(None, model.unload)
                 logger.info(f"[MODEL RELEASE] {model_name} done")
+            except Exception as e:
+                unload_error = e
+                logger.error(f"Failed to release model {model_name}: {e}")
+                # F166E: Exception swallowed — model already removed from registry
 
-            # Odstraníme z registru
-            del self._loaded_models[model_type]
-
-            # Aktualizujeme current model
-            if self._current_model == model_type:
-                self._current_model = None
-
-            # Agresivní čištění paměti
-            await self._cleanup_memory_async(model_type)
-
-        except Exception as e:
-            logger.error(f"Failed to release model {model_name}: {e}")
-            raise
+        # Memory cleanup regardless of unload outcome
+        await self._cleanup_memory_async(model_type)
 
     async def release_current(self) -> None:
         """Async uvolnění aktuálně načteného modelu."""

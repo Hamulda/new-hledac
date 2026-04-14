@@ -70,6 +70,7 @@ class SprintLifecycleManager:
     _started_at: Optional[float] = field(default=None, repr=False)
     _current_phase: SprintPhase = field(default=SprintPhase.BOOT, repr=False)
     _entered_phase_at: Optional[float] = field(default=None, repr=False)
+    _phase_history: dict = field(default_factory=dict, repr=False)  # phase→entered_at timestamp
     _export_started: bool = field(default=False, repr=False)
     _teardown_started: bool = field(default=False, repr=False)
     _abort_requested: bool = field(default=False, repr=False)
@@ -84,7 +85,7 @@ class SprintLifecycleManager:
             raise SprintLifecycleError("Sprint has already been started.")
         now = _now(now_monotonic)
         self._started_at = now
-        self._transition_to_unlocked(SprintPhase.WARMUP)
+        self._transition_to_unlocked(SprintPhase.WARMUP, now)
 
     # ── transition_to ────────────────────────────────────────────────────────
 
@@ -196,6 +197,7 @@ class SprintLifecycleManager:
             "started_at_monotonic": self._started_at,
             "current_phase": self._current_phase.name,
             "entered_phase_at": self._entered_phase_at,
+            "phase_history": {ph.name: ts for ph, ts in self._phase_history.items()},
             "export_started": self._export_started,
             "teardown_started": self._teardown_started,
             "abort_requested": self._abort_requested,
@@ -452,6 +454,56 @@ class SprintLifecycleManager:
         """
         return self._current_phase == phase
 
+    # ── Read-only phase-entry seams (F166D) ─────────────────────────────────
+
+    def has_reached_phase(self, phase: SprintPhase) -> bool:
+        """
+        True when the given phase has ever been entered (including current).
+
+        DIAGNOSTIC ONLY — read-only seam for observability.
+        Does NOT mutate state. Does not check ordering.
+        """
+        return phase in self._phase_history
+
+    def entered_phase_at(self, phase: SprintPhase) -> Optional[float]:
+        """
+        Monotonic timestamp when the given phase was first entered.
+
+        Returns None if the phase has never been reached.
+
+        DIAGNOSTIC ONLY — read-only seam for observability.
+        """
+        return self._phase_history.get(phase)
+
+    def phase_durations_so_far(
+        self,
+        now_monotonic: Optional[float] = None,
+    ) -> dict[str, Optional[float]]:
+        """
+        Seconds each phase has been active so far.
+
+        Returns a dict mapping phase name → duration in seconds (or None if
+        the phase has never been reached, or is currently active).
+
+        For the current phase, duration is computed as:
+            now - entered_phase_at(current)
+
+        DIAGNOSTIC ONLY — read-only seam for observability.
+        """
+        now = _now(now_monotonic)
+        result: dict[str, Optional[float]] = {}
+        for ph in _PHASE_ORDER:
+            entered = self._phase_history.get(ph)
+            if entered is None:
+                result[ph.name] = None
+            elif ph == self._current_phase:
+                result[ph.name] = now - entered
+            else:
+                # Phase was exited — duration already recorded.
+                # We don't track exit times, so return None (observability only).
+                result[ph.name] = None
+        return result
+
     # ── Private helpers ─────────────────────────────────────────────────────
 
     def _transition_to_unlocked(self, phase: SprintPhase, now: Optional[float] = None) -> None:
@@ -459,6 +511,7 @@ class SprintLifecycleManager:
             now = _now(None)
         self._current_phase = phase
         self._entered_phase_at = now
+        self._phase_history[phase] = now
 
     def _is_valid_transition(self, from_phase: SprintPhase, to_phase: SprintPhase) -> bool:
         """Allow TEARDOWN from any phase (abort path)."""

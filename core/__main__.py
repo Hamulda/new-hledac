@@ -321,10 +321,41 @@ async def run_sprint(
         _phase_times["WINDUP"] = time.monotonic()
 
         # BOOT → WINDUP: when scheduler's should_enter_windup() fires.
-        # This is NOT the full run time — it reflects windup_lead_s offset.
-        # e.g. requested=300s, windup_lead_s=180 → time_to_windup_s ≈ 120s (correct, not a bug)
+        # This is the active window used (NOT full scheduler runtime —
+        # scheduler runs duration_s internally but windup_lead_s offsets entry).
+        # e.g. requested=300s, windup_lead_s=180 → time_to_windup_s ≈ 120s (correct).
         time_to_windup_s = _phase_times["WINDUP"] - _phase_times["BOOT"]
-        actual_duration = time_to_windup_s  # backward-compatible alias
+
+        # F166C: actual_duration is FULL BOOT→TEARDOWN wall-clock (not time_to_windup_s).
+        # time_to_windup_s was a misleading alias — it conflated pre-scheduler boot cost
+        # with active window. Actual runtime for metrics/thresholds must be full wall-clock.
+        actual_duration = _phase_times.get("TEARDOWN", time_to_windup_s) - _phase_times["BOOT"]
+
+        # F166C: Pre-scheduler boot time (BOOT→WARMUP).
+        # Captures import, store init, lifecycle creation overhead.
+        pre_scheduler_boot_s = _phase_times.get("WARMUP", 0) - _phase_times["BOOT"]
+
+        # F166C: Scheduler wall time (WARMUP→WINDUP).
+        # Full scheduler elapsed from instantiation to windup entry.
+        # If ACTIVE was reached, ACTIVE→WINDUP is part of this window (scheduled cycles ran).
+        _windup_mark = _phase_times.get("WINDUP", _phase_times.get("TEARDOWN", _phase_times["BOOT"]))
+        scheduler_wall_s = _windup_mark - _phase_times.get("WARMUP", _phase_times["BOOT"])
+
+        # F166C: Pre-ACTIVE starvation detection.
+        # starvation = scheduler ran (WARMUP→WINDUP) but ACTIVE was never reached,
+        # OR ACTIVE was reached but zero cycles completed before windup.
+        # This is distinct from "depleted" (smoke, scheduler never ran).
+        _entered_active = "ACTIVE" in _phase_times
+        _first_cycle_completed = result.cycles_completed > 0
+        if not _entered_active:
+            _pre_active_starvation = True
+            _pre_active_blocker = "never_entered_active"
+        elif _entered_active and result.cycles_started > 0 and result.cycles_completed == 0:
+            _pre_active_starvation = True
+            _pre_active_blocker = "zero_cycles_completed_before_windup"
+        else:
+            _pre_active_starvation = False
+            _pre_active_blocker = None
 
         # UMA peak
         uma_peak_gib = sample_uma_status().system_used_gib
@@ -372,6 +403,25 @@ async def run_sprint(
             "time_to_teardown_s": round(_teardown_time - _phase_times["BOOT"], 2),
             "active_window_budget_s": round(duration_s - config.windup_lead_s, 2),
             "windup_lead_observed_s": round(windup_lead_observed_s, 2),
+            # F166C: Pre-scheduler boot cost (import, store init, lifecycle creation)
+            "pre_scheduler_boot_s": round(pre_scheduler_boot_s, 2),
+            # F166C: Scheduler wall time (WARMUP→WINDUP, full scheduler elapsed)
+            "scheduler_wall_s": round(scheduler_wall_s, 2),
+            # F166C: Scheduler returned phase label
+            "scheduler_returned_phase": "ACTIVE" if "ACTIVE" in _phase_times else "entry_only",
+            # F166C: ACTIVE was reached and first cycle completed
+            "entered_active_truth": _entered_active,
+            "first_cycle_truth": _first_cycle_completed,
+            # F166C: Pre-ACTIVE starvation — scheduler ran but active window never produced cycles
+            "pre_active_starvation": _pre_active_starvation,
+            "pre_active_blocker": _pre_active_blocker,
+            # F166C: Full budget view for canonical runtime consumption
+            "canonical_runtime_budget_view": {
+                "pre_boot_s": round(pre_scheduler_boot_s, 2),
+                "scheduler_elapsed_s": round(scheduler_wall_s, 2),
+                "total_wallclock_s": round(actual_duration, 2),
+                "budget_consumed_pct": round((actual_duration / duration_s) * 100, 1) if duration_s > 0 else 0.0,
+            },
         }
 
         # --- Derived metrics --------------------------------------------------------
