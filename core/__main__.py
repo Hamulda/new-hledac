@@ -329,7 +329,12 @@ async def run_sprint(
         # F166C: actual_duration is FULL BOOT→TEARDOWN wall-clock (not time_to_windup_s).
         # time_to_windup_s was a misleading alias — it conflated pre-scheduler boot cost
         # with active window. Actual runtime for metrics/thresholds must be full wall-clock.
-        actual_duration = _phase_times.get("TEARDOWN", time_to_windup_s) - _phase_times["BOOT"]
+        # F167B fix: _phase_times["TEARDOWN"] is a timestamp; use it directly as timestamp.
+        # When TEARDOWN not yet recorded (early exit), fall back to BOOT→WINDUP which IS
+        # a duration stored in time_to_windup_s (not a timestamp). Guard with _phase_times["BOOT"]
+        # so the arithmetic is always timestamp - timestamp = duration.
+        _teardown_ts = _phase_times.get("TEARDOWN")
+        actual_duration = (_teardown_ts - _phase_times["BOOT"]) if _teardown_ts is not None else time_to_windup_s
 
         # F166C: Pre-scheduler boot time (BOOT→WARMUP).
         # Captures import, store init, lifecycle creation overhead.
@@ -345,8 +350,11 @@ async def run_sprint(
         # starvation = scheduler ran (WARMUP→WINDUP) but ACTIVE was never reached,
         # OR ACTIVE was reached but zero cycles completed before windup.
         # This is distinct from "depleted" (smoke, scheduler never ran).
-        _entered_active = "ACTIVE" in _phase_times
-        _first_cycle_completed = result.cycles_completed > 0
+        # F167B fix: use result.entered_active_at_monotonic (set by scheduler) instead of
+        # non-existent _phase_times["ACTIVE"]. Use result.first_cycle_started_at_monotonic
+        # instead of cycles_completed > 0 (which means cycle finished, not started).
+        _entered_active = result.entered_active_at_monotonic is not None
+        _first_cycle_started = result.first_cycle_started_at_monotonic is not None
         if not _entered_active:
             _pre_active_starvation = True
             _pre_active_blocker = "never_entered_active"
@@ -409,9 +417,9 @@ async def run_sprint(
             "scheduler_wall_s": round(scheduler_wall_s, 2),
             # F166C: Scheduler returned phase label
             "scheduler_returned_phase": "ACTIVE" if "ACTIVE" in _phase_times else "entry_only",
-            # F166C: ACTIVE was reached and first cycle completed
+            # F167B fix: use _first_cycle_started (first cycle STARTED) not cycles_completed (>0 means finished)
             "entered_active_truth": _entered_active,
-            "first_cycle_truth": _first_cycle_completed,
+            "first_cycle_truth": _first_cycle_started,
             # F166C: Pre-ACTIVE starvation — scheduler ran but active window never produced cycles
             "pre_active_starvation": _pre_active_starvation,
             "pre_active_blocker": _pre_active_blocker,
