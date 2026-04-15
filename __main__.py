@@ -45,59 +45,134 @@ except ImportError:
     logging.warning("[RUNTIME] uvloop not available, using default asyncio loop")
 
 # =============================================================================
-# Sprint F153: Authority Freeze — entrypoint authority story
+# Sprint F177D: Canonical Owner Freeze / Alternate Entrypoint Verdict
 # =============================================================================
-# Authority freezes the sprint ownership story without runtime change.
-# READ-ONLY labels — no branching logic, no delegation, no new APIs.
+# Hardened authority story — no new world, no new runtime, no new framework.
+# Labels are READ-ONLY; zero branching logic changes.
 #
-# canonical_sprint_owner : core.__main__.run_sprint() — canonical sprint production owner
-# root_role              : shell/delegation surface — main() dispatches to canonical owner
-# alternate_paths        : _run_sprint_mode() — residual/alternate path, not canonical owner
-# production_status      : "canonical" | "alternate" | "residual"
-# allowed_purpose        : why this path exists
+# Role taxonomy:
+#   canonical  — sole production sprint owner. All report truth flows from here.
+#   shell      — CLI dispatch only. Calls canonical or alternate, never owns sprint state.
+#   alternate  — legacy production path. Not canonical owner. Use for migration only.
+#   residual   — shared helper path. Owned by multiple callers. Not a sprint owner.
+#   diagnostic — probe/benchmark only. Not for production sprints.
+#
+# F177D sharpening:
+#   - "canonical" is now the ONLY production sprint owner role
+#   - root main() is shell_only (never sprint owner, only dispatcher)
+#   - _run_sprint_mode is confirmed alternate (NOT canonical)
+#   - run_warmup is confirmed residual (shared helper, NOT lifecycle owner)
+#   - _run_public_passive_once is confirmed alternate (NOT canonical)
+#   - _run_observed_default_feed_batch_once is confirmed diagnostic (probe only)
+#   - ENTRYPOINT_AUTHORITY is the single source of truth for role labeling
+# =============================================================================
 
 ENTRYPOINT_AUTHORITY = {
+    # Sole canonical sprint owner — all report truth, timing truth, export truth
+    # flow from this function. Every sprint that matters uses this path.
     "canonical_sprint_owner": "hledac.universal.core.__main__.run_sprint",
-    "root_role": "shell/delegation surface",
+    # Root role: shell/dispatcher — main() reads args, delegates to canonical or alternate.
+    # main() is NEVER a sprint owner. It only dispatches.
+    "root_role": "shell/dispatcher surface — main() dispatches, never owns sprint state",
     "alternate_paths": {
         "_run_sprint_mode": {
             "location": "hledac.universal.__main__._run_sprint_mode",
-            "production_status": "alternate",
-            "non_canonical": True,  # Freeze F153: not a truth owner, residual path only
-            "allowed_purpose": "legacy sprint hot-path; prefer canonical owner",
+            "role": "alternate",
+            "non_canonical": True,
+            "allowed_purpose": (
+                "F162C legacy sprint hot-path. "
+                "Owns full lifecycle state locally. "
+                "Canonical owner is core.__main__.run_sprint(). "
+                "Use only during migration; do not add new call-sites."
+            ),
+            "owner_status": "not_canonical — owns lifecycle state but NOT the canonical report boundary",
         },
         "_run_public_passive_once": {
             "location": "hledac.universal.__main__._run_public_passive_once",
-            "production_status": "alternate",
-            "non_canonical": True,  # F162C: full pipeline runner without canonical lifecycle
-            "allowed_purpose": "diagnostic/public-passive mode; not canonical sprint owner",
+            "role": "alternate",
+            "non_canonical": True,
+            "allowed_purpose": (
+                "F162C public-discovery-only pass. "
+                "Runs full pipeline without canonical lifecycle. "
+                "Not a sprint owner. Use for public-branch probe only."
+            ),
+            "owner_status": "not_canonical — bypasses canonical lifecycle, owns no report boundary",
         },
         "run_warmup": {
             "location": "hledac.universal.__main__.run_warmup",
-            "production_status": "residual",
-            "non_canonical": True,  # lives in root but claims canonical WARMUP truth
-            "allowed_purpose": "WARMUP orchestration shared with _run_sprint_mode; prefer canonical core.lifecycle",
+            "role": "residual",
+            "non_canonical": True,
+            "allowed_purpose": (
+                "WARMUP orchestration shared by _run_sprint_mode and canonical path. "
+                "Isolates pre-ACTIVE setup (DuckPGQ, IOCScorer, ring buffers, ANE warmup). "
+                "NOT a sprint owner — called by both canonical and alternate paths."
+            ),
+            "owner_status": "residual — shared helper, called by both canonical and alternate",
         },
         "_run_observed_default_feed_batch_once": {
             "location": "hledac.universal.__main__._run_observed_default_feed_batch_once",
-            "production_status": "diagnostic",
-            "non_canonical": True,  # F162C: observed-run diagnostic, not production sprint
-            "allowed_purpose": "benchmark/observed-run probe only",
+            "role": "diagnostic",
+            "non_canonical": True,
+            "allowed_purpose": "Benchmark/observed-run probe only. Not for production sprints.",
+            "owner_status": "diagnostic — probe only, no sprint ownership",
         },
     },
-    "_comment": "F162C: root __main__.py is NOT an equal sprint owner — core.__main__.run_sprint is.",
+    # F177D: authority census — summary of who calls what
     "_authority_census": {
-        "canonical_sprint_owner_calls": ["main() --sprint path → core.__main__.run_sprint()"],
-        "alternate_production_paths": ["_run_sprint_mode (alternate)", "_run_public_passive_once (alternate)"],
-        "residual_diagnostic_paths": ["run_warmup (residual)", "_run_observed_default_feed_batch_once (diagnostic)"],
-        "shell_only": ["main()", "get_entrypoint_authority_status()", "_run_boot_guard()", "_preflight_check()"],
+        "canonical_sprint_calls": ["main() --sprint → core.__main__.run_sprint()"],
+        "alternate_production_paths": ["_run_sprint_mode (owns lifecycle, NOT canonical report)", "_run_public_passive_once (no lifecycle, no report boundary)"],
+        "residual_helper_paths": ["run_warmup (shared WARMUP helper, called by both canonical and alternate)"],
+        "diagnostic_paths": ["_run_observed_default_feed_batch_once (probe only)"],
+        # Shell-only: main() and pure utility functions. Never sprint owners.
+        "shell_only": [
+            "main() — CLI dispatcher, reads args, calls canonical or alternate",
+            "get_entrypoint_authority_status() — read-only authority query",
+            "_run_boot_guard() — boot hygiene, no sprint ownership",
+            "_preflight_check() — capability check, no sprint ownership",
+            "get_runtime_status() — runtime snapshot, no ownership",
+            "get_boot_telemetry() — boot telemetry, no ownership",
+            "clear_boot_telemetry() — test utility only",
+        ],
     },
+    # F177D: role summary — quick lookup table
+    "_role_summary": {
+        "canonical_sprint_owner": "canonical",
+        "main()": "shell",
+        "_run_sprint_mode()": "alternate",
+        "_run_public_passive_once()": "alternate",
+        "run_warmup()": "residual",
+        "_run_observed_default_feed_batch_once()": "diagnostic",
+    },
+    # F177D: key invariant — no confusion between canonical and observed/diagnostic
+    "_non_confusion_invariant": (
+        "Canonical path (core.__main__.run_sprint) produces canonical_run_summary with "
+        "canonical_sprint_owner='core.__main__.run_sprint'. "
+        "No alternate/residual path may claim this field value."
+    ),
 }
 
 
 def get_entrypoint_authority_status() -> dict:
     """Read-only authority status — no side effects."""
     return ENTRYPOINT_AUTHORITY.copy()
+
+
+def get_entrypoint_role(name: str) -> str:
+    """
+    Return the role label for a named entrypoint.
+
+    Roles:
+        canonical  — sole production sprint owner (core.__main__.run_sprint)
+        shell      — CLI dispatcher, never owns sprint state
+        alternate  — legacy production path, not canonical
+        residual   — shared helper, not a sprint owner
+        diagnostic — probe/benchmark only, not production
+
+    Unknown names return "unknown".
+    """
+    return ENTRYPOINT_AUTHORITY.get("_role_summary", {}).get(name, "unknown")
+
+
 # =============================================================================
 
 import msgspec

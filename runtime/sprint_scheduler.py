@@ -4,6 +4,16 @@ Sprint 8BK — Tier-Aware Feed Sprint Scheduler V1.
 Sidecar over SprintLifecycleManager (8BI). Operational backbone for
 30-minute bounded sprint runs.
 
+================================================================
+F177D ROLE VERDICT
+================================================================
+ROLE: runtime worker / operational executor
+STATUS: NOT a sprint owner — scheduler executes work dispatched by sprint owner
+
+The scheduler is a RUNTIME WORKER. It receives a SprintLifecycleManager
+and sources from the sprint owner (core.__main__.run_sprint) and executes
+the sprint cycle. All report truth flows through the owner, not the scheduler.
+
 Tier ordering (high → low priority):
   surface → structured_ti → deep → archive → other
 

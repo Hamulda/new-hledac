@@ -736,20 +736,47 @@ class Hermes3Engine:
             raise
 
     async def _init_draft_model(self) -> None:
-        """Initialize draft model with memory guard (Sprint 75)."""
+        """
+        Initialize draft model with memory guard (Sprint 75).
+
+        F177C FIX: Uses resource_governor.sample_uma_status() for consistent
+        memory measurement across the runtime, instead of direct psutil call.
+        This aligns draft model selection with the same UMA state machinery
+        used by ModelManager._check_memory_admission() and ResourceGovernor.
+        """
         try:
-            import psutil
             import inspect
             from mlx_lm import load, generate as _mlx_generate
 
-            available_gb = psutil.virtual_memory().available / (1024**3)
+            # F177C: Use resource_governor for consistent UMA measurement
+            try:
+                from hledac.universal.core.resource_governor import sample_uma_status
+                uma = sample_uma_status()
+                # available = total * (1 - system_used_fraction)
+                # We use system_used_gib as threshold driver for consistency
+                system_used_gib = uma.system_used_gib
+                available_gb = uma.system_available_gib
+            except Exception:
+                # Fallback: direct psutil only if resource_governor unavailable
+                import psutil
+                available_gb = psutil.virtual_memory().available / (1024**3)
+                system_used_gib = float('inf')
 
             # Detect stream_generate and draft model support
             import mlx_lm
             self._supports_stream_generate = hasattr(mlx_lm, 'stream_generate')
             self._supports_draft = 'draft_model' in inspect.signature(_mlx_generate).parameters
 
-            # Select draft model based on available memory
+            # F177C: Use system_used_gib for threshold check (consistent with UMA state)
+            # Draft model loads AFTER main model, so we check against system_used_gib
+            # available_gb still used for final decision (fallback only)
+            # Thresholds: 5.5GB available ≈ 2.5GB used (on 8GB system), 4.0GB ≈ 4.0GB used
+            if system_used_gib >= 7.0:
+                # Emergency — do not load draft model
+                self._speculative_enabled = False
+                self._draft_model_name = None
+                logger.info(f"[SPEC] EMERGENCY state ({system_used_gib:.1f}GiB used), speculative decoding disabled")
+                return
             if available_gb > 5.5:
                 self._draft_model_name = "mlx-community/Hermes-3-Llama-3.2-1B-4bit"
                 self._speculative_enabled = True

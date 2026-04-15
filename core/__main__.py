@@ -4,6 +4,25 @@ Sprint 8RA — CLI Entry Point: python -m hledac.universal.core
 Pre-sprint checks, UMA wiring, sprint_delta reporting.
 Wires UMAAlarmDispatcher → SprintScheduler wind-down callbacks.
 
+================================================================
+F177D CANONICAL OWNER VERDICT — ROLE TABLE
+================================================================
+Role        | Function                        | Owner | Notes
+----------- | ------------------------------- | ----- | ----
+canonical   | run_sprint()                    | YES   | SOLE canonical sprint owner
+canonical   | _runtime_truth()                | YES   | part of canonical run boundary
+canonical   | _is_meaningful_run()            | YES   | part of canonical run boundary
+canonical   | run_pre_sprint_checks()          | YES   | part of canonical pre-flight
+canonical   | write_sprint_delta()             | YES   | part of canonical teardown
+alternate   | main() --sprint path            | NO    | calls run_sprint(), shell only
+alternate   | main() --ct-pivot path          | NO    | CT log tool, no sprint
+alternate   | main() --pivot path             | NO    | semantic pivot, no sprint
+residual    | _get_live_feed_urls()           | NO    | shared helper, called by canonical
+
+Canonical sprint owner: run_sprint()
+All report truth (canonical_run_summary, runtime_truth, timing_truth,
+checkpoint_zero_category, observed_run_tuple) flows from run_sprint().
+
 Usage:
     python -m hledac.universal.core --sprint --query "LockBit ransomware" --duration 1800
     python -m hledac.universal.core --ct-pivot example.com
@@ -283,6 +302,11 @@ async def run_sprint(
     """
     Run a full sprint lifecycle with UMA monitoring and delta reporting.
     Uses SprintScheduler.run() directly to enable compute_sprint_intelligence() access.
+
+    ROLE: CANONICAL SPRINT OWNER — SOLE production sprint authority.
+    All report truth surfaces (canonical_run_summary, runtime_truth, timing_truth,
+    checkpoint_zero_category, observed_run_tuple) are derived here.
+    No alternate or residual path may claim canonical_sprint_owner = "core.__main__.run_sprint".
     """
     # Sprint 8SA: Phase timing instrumentation
     _phase_times: dict[str, float] = {}

@@ -2049,8 +2049,8 @@ async def async_run_live_feed_pipeline(
             except asyncio.CancelledError:
                 raise
             except Exception:
-                # Storage fail-soft: count as accepted but not stored
-                accepted_findings = len(findings)
+                # Storage fail-soft: storage exception means neither accepted nor stored
+                accepted_findings = 0
                 stored_findings = 0
         else:
             # No store: count-only mode
