@@ -294,11 +294,13 @@ def _parse_published_ts(raw: str | None) -> float | None:
 # ---------------------------------------------------------------------------
 
 # Freshness tiers: age in seconds from retrieved_ts
+# F178E: relaxed from 180→365 days — OSINT content (CVE disclosures, malware campaigns)
+# remains valuable long after publication; 6-month-old IoCs are still actionable
 _TIER_RECENT_MAX: float = 3 * 86400       # ≤3 days  → "recent"
 _TIER_FRESH_MAX: float = 14 * 86400       # ≤14 days → "fresh"
-_TIER_AGED_MAX: float = 60 * 86400         # ≤60 days → "aged"
-_TIER_STALE_MAX: float = 180 * 86400      # ≤180 days → "stale"
-# >180 days or future → "unknown"
+_TIER_AGED_MAX: float = 60 * 86400        # ≤60 days → "aged"
+_TIER_STALE_MAX: float = 365 * 86400     # ≤365 days → "stale"
+# >365 days or future → "unknown"
 
 # Future penalty: entries with published_ts > retrieved_ts + this gap are penalized
 _FUTURE_GAP_MAX: float = 3600 * 6        # 6 hours ahead = tolerated noise
@@ -347,13 +349,106 @@ def _compute_freshness(
     return 0.1, "unknown"
 
 
+# F178E: spam domain patterns — known low-quality / parked / placeholder domains
+_SPAM_DOMAIN_PATTERNS: tuple[str, ...] = (
+    "blogspot.com",
+    "wordpress.com",
+    "livejournal.com",
+    "tumblr.com",
+    "blogspot.ru",
+    "wp.ru",
+    "site90.net",
+    "000webhost.com",
+    "110mb.com",
+    "freesitehost.com",
+    "blogcindi.com",
+    "bloggen.ru",
+    "blogrund.com",
+    "wordpress.org.ru",
+)
+
+
+def _is_spam_domain(url: str) -> bool:
+    """Return True for known low-quality / parked / placeholder domains."""
+    if not url:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(url)
+        netloc = parsed.netloc.lower()
+        return any(p in netloc for p in _SPAM_DOMAIN_PATTERNS)
+    except Exception:
+        return False
+
+
+# F178E: SEO spam / title-manipulation patterns
+_SEO_SPAM_TITLE_RE = __import__("re").compile(
+    r"(?:\b\w+\b\s*){30,}", re.IGNORECASE  # title with 30+ words = likely keyword-stuffed
+)
+_REPEATED_DOTS_RE = __import__("re").compile(r"^\.{3,}$")  # "..." only title
+_TEMPLATE_NOISE_RE = __import__("re").compile(
+    r"^\s*(?:title|untitled|article|post|page)\s*$", re.IGNORECASE
+)
+
+
+def _is_seo_spam_title(title: str) -> bool:
+    """Return True for SEO-optimized / template noise titles."""
+    t = title.strip()
+    if not t or len(t) < 3:
+        return True
+    # Template noise
+    if _TEMPLATE_NOISE_RE.match(t):
+        return True
+    # Repeated dots
+    if _REPEATED_DOTS_RE.match(t):
+        return True
+    # 30+ words = keyword stuffing
+    if _SEO_SPAM_TITLE_RE.match(t):
+        return True
+    return False
+
+
+# F178E: snippet noise patterns — "title • description" template
+_SNIPPET_TEMPLATE_RE = __import__("re").compile(
+    r"^\s*[\w\s\-]+\s*[•·|\-\"']\s*[\w\s\-]+\s*$"
+)
+
+
+def _is_template_snippet(snippet: str, title: str) -> bool:
+    """Return True for generic template snippet that adds no value."""
+    s = snippet.strip()
+    if not s:
+        return False
+    # "title • description" pattern noise
+    if _SNIPPET_TEMPLATE_RE.match(s) and len(s) < 80:
+        return True
+    return False
+
+
 def _compute_quality(entry: FeedEntryHit) -> float:
     """
     Compute quality_score (0.0-1.0) from entry metadata.
     Factors: rich_content, summary length, title length,
     entry_author presence, feed_language presence, URL structure.
+
+    F178E additions:
+    - Spam domain penalty (max -0.25)
+    - SEO spam title penalty (-0.3)
+    - Template snippet penalty (-0.1)
+    - Windows-1252 charset hint bonus (+0.05)
     """
     score = 0.0
+
+    # F178E: spam domain penalty
+    if _is_spam_domain(entry.entry_url):
+        score -= 0.25
+
+    # F178E: SEO spam title detection
+    if _is_seo_spam_title(entry.title):
+        score -= 0.30
+
+    # F178E: template snippet detection
+    if _is_template_snippet(entry.summary, entry.title):
+        score -= 0.10
 
     # rich_content — most important signal
     rc = entry.rich_content
@@ -366,14 +461,15 @@ def _compute_quality(entry: FeedEntryHit) -> float:
         else:
             score += 0.1
 
-    # summary length (words)
-    summary_words = len(entry.summary.split())
-    if summary_words >= 30:
-        score += 0.15
-    elif summary_words >= 10:
-        score += 0.08
-    elif summary_words > 0:
-        score += 0.03
+    # summary length (words) — only count if not template noise
+    if not _is_template_snippet(entry.summary, entry.title):
+        summary_words = len(entry.summary.split())
+        if summary_words >= 30:
+            score += 0.15
+        elif summary_words >= 10:
+            score += 0.08
+        elif summary_words > 0:
+            score += 0.03
 
     # title length (chars, excluding whitespace)
     title_len = len(entry.title.strip())
@@ -399,15 +495,19 @@ def _compute_quality(entry: FeedEntryHit) -> float:
     if eu:
         try:
             parsed = urllib.parse.urlparse(eu)
+            scheme = parsed.scheme.lower()
             path = parsed.path.rstrip("/")
-            if path.count("/") >= 2:
+            # Penalize non-http schemes
+            if scheme and scheme not in ("http", "https"):
+                score -= 0.15
+            elif path.count("/") >= 2:
                 score += 0.08  # structured URL = article
             elif path.count("/") == 1 and len(path) > 1:
                 score += 0.04
         except Exception:
             pass
 
-    return min(score, 1.0)
+    return max(min(score, 1.0), 0.0)
 
 
 # ---------------------------------------------------------------------------

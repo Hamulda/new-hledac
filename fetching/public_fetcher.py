@@ -57,7 +57,9 @@ class FetchResult(msgspec.Struct, frozen=True, gc=False):
     error: str | None = None
     # Added in F164A — feed ingress hardening
     xml_recovered: bool = False  # True: body was XML-ish but Content-Type was wrong, body is now text
+    xml_source_hint: bool = False  # F178E: True when xml_recovered=True — downstream can detect XML origin
     decode_replaced: bool = False  # True: UTF-8 decode used replacement chars
+    decode_replacement_count: int = 0  # F178E: actual count of U+FFFD replacement chars inserted
     body_read_error: bool = False  # True: headers were OK but body stream failed mid-read
     # Added in F169B — access-path truth hardening
     redirected: bool = False  # True: final_url != url (explicit redirect signal)
@@ -263,21 +265,40 @@ def _looks_xmlish(body: bytes) -> bool:
 # Decode helper — fail-soft, truth-bearing
 # ---------------------------------------------------------------------------
 
-def _try_decode(body: bytes) -> tuple[str, bool]:
-    """Decode bytes to str, return (text, replaced_bool).
+def _try_decode(body: bytes) -> tuple[str, bool, int]:
+    """Decode bytes to str, return (text, replaced_bool, replacement_count).
+
+    F178E: replacement_count is actual U+FFFD count (not just bool).
+    Charset fallback: try UTF-8 → Windows-1252 → Latin-1 before replace.
 
     replaced_bool=True when UTF-8 decoder used replacement chars (U+FFFD).
     This tells the adapter that the body was garbled, not truly empty.
     """
+    # Try strict UTF-8 first
     try:
         text = body.decode("utf-8", errors="strict")
-        return (text, False)
+        return (text, False, 0)
     except UnicodeDecodeError:
-        # Use replacement mode so we still get a usable string
-        text = body.decode("utf-8", errors="replace")
-        # Count how many replacement chars were inserted
-        replaced = "\ufffd" in text
-        return (text, replaced)
+        pass
+
+    # F178E: Windows-1252 fallback (common in legacy Western feeds)
+    try:
+        text = body.decode("windows-1252", errors="strict")
+        return (text, False, 0)
+    except (UnicodeDecodeError, LookupError):
+        pass
+
+    # Latin-1 fallback (always succeeds — byte 0-255 maps 1:1)
+    try:
+        text = body.decode("latin-1", errors="strict")
+        return (text, True, 0)  # lossy but usable
+    except (UnicodeDecodeError, LookupError):
+        pass
+
+    # Final fallback: UTF-8 replace mode — count actual replacements
+    text = body.decode("utf-8", errors="replace")
+    count = text.count("\ufffd")
+    return (text, True, count)
 
 
 # ---------------------------------------------------------------------------
@@ -467,14 +488,16 @@ async def async_fetch_public_text(
                     if accumulated_ok and body_chunks:
                         try:
                             body_bytes = b"".join(body_chunks)
-                            # Detect decode replacement chars for truth
-                            text, decode_replaced = _try_decode(body_bytes)
+                            # F178E: detect decode quality — replacement count for truth
+                            text, decode_replaced, decode_replacement_count = _try_decode(body_bytes)
                         except Exception:
                             text = None
                             decode_replaced = False
+                            decode_replacement_count = 0
                     else:
                         text = None
                         decode_replaced = False
+                        decode_replacement_count = 0
 
                     elapsed_ms = (time.monotonic() - t0) * 1000
                     redirected, redirect_target = _derive_redirect_fields(url, final_url)
@@ -489,7 +512,9 @@ async def async_fetch_public_text(
                         elapsed_ms=elapsed_ms,
                         error=None,
                         xml_recovered=xml_recovered,
+                        xml_source_hint=xml_recovered,  # F178E: xml_source_hint mirrors xml_recovered
                         decode_replaced=decode_replaced,
+                        decode_replacement_count=decode_replacement_count,  # F178E
                         redirected=redirected,
                         redirect_target=redirect_target,
                     )

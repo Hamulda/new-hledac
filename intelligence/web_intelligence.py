@@ -15,7 +15,7 @@ import time
 import uuid
 from typing import Dict, List, Optional, Any, Union, Callable, Tuple, Set
 from collections import OrderedDict
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from enum import Enum
 import logging

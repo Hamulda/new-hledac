@@ -486,6 +486,15 @@ class ModelManager:
                 )
                 await self._release_current_async()
 
+            # F178D: Memory barrier — force MLX lazy eval to settle before admission check.
+            # After async cleanup, metal cache may still be clearing. mx.eval([]) ensures
+            # the previous model's memory is fully released before we measure for the next load.
+            if MLX_AVAILABLE and mx is not None:
+                try:
+                    mx.eval([])
+                except Exception:
+                    pass
+
             # Sprint F150H: Hard fail-fast memory admission gate
             # Runs BEFORE factory() — prevents OOM on heavy model load
             self._check_memory_admission()

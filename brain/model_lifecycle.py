@@ -104,10 +104,18 @@ def request_emergency_unload() -> None:
 
     This is a SAFE pattern: watchdog sets flag, safe seam consumes it
     before next inference. Never blocks the watchdog loop.
+    Failsafe: callback errors are caught and logged, never propagate.
     """
     global _emergency_unload_requested
     _emergency_unload_requested = True
     logger.warning("[LIFECYCLE] Emergency unload requested (watchdog flag set)")
+    # Failsafe: invoke registered callback, never let callback errors propagate
+    cb = _emergency_callback
+    if cb is not None:
+        try:
+            cb()
+        except Exception as e:
+            logger.warning(f"[LIFECYCLE] Emergency callback raised (ignored): {e}")
 
 
 def is_emergency_unload_requested() -> bool:
@@ -535,14 +543,13 @@ def _unload_model_legacy(
         # Krok 4: gc.collect()
         gc.collect()
 
-        # Krok 5: mx.eval([])
         mx = _get_mlx_safe()
         if mx is not None:
+            # Krok 5: mx.eval([]) bezprostředně před clear_cache (M1 invariant §F178D)
             try:
                 mx.eval([])
             except Exception as e:
                 logger.debug(f"[LIFECYCLE] mx.eval([]): {e}")
-
             # Krok 6: mx.metal.clear_cache()
             try:
                 if hasattr(mx.metal, 'clear_cache'):

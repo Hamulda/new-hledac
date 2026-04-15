@@ -615,11 +615,18 @@ class WorkflowOrchestrator:
         if module in self._module_registry:
             return self._module_registry[module]
 
-        # Try to get from orchestrator
-        if hasattr(self.orchestrator, 'get_module'):
-            return self.orchestrator.get_module(module)
-        if hasattr(self.orchestrator, module):
-            return getattr(self.orchestrator, module)
+        # Try to get from orchestrator (defensive with try/except to avoid ANY exception)
+        try:
+            get_module = getattr(self.orchestrator, 'get_module', None)
+            if get_module is not None:
+                return get_module(module)
+        except Exception:
+            pass
+        try:
+            if hasattr(self.orchestrator, module):
+                return getattr(self.orchestrator, module)
+        except Exception:
+            pass
 
         return None
 

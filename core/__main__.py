@@ -540,7 +540,23 @@ async def run_sprint(
             and (_swap_detected_pre or _uma_state_pre in ("critical", "emergency"))
         )
         if result.aborted:
-            verdict = "⚠️  ABORTED"
+            # F178B: Aborted without findings = hard abort. Aborted WITH findings = partial signal.
+            # Both share the abort modifier but the base verdict reflects signal state.
+            if result.accepted_findings > 0:
+                _base_verdict = (
+                    "📦  NOISE-HEAVY: duplicated heavily"
+                    if dup_rate > 85
+                    else "🌐  PUBLIC-LED: public discovery dominated"
+                    if public_pct > 60
+                    else "⚖️  MIXED: public contributed meaningfully"
+                    if public_pct > 25
+                    else "✅  FEED-LED: feed sources strong"
+                    if feed_fnd > 0
+                    else "✅  SIGNAL: good feed performance"
+                )
+                verdict = f"⚠️  ABORTED (partial) — {_base_verdict}"
+            else:
+                verdict = "⚠️  ABORTED: hard stop, no signal collected"
         elif _inline_hardware_limited:
             verdict = "💾  HARDWARE-LIMITED: swap/memory pressure blocked entry"
         elif _public_backend_degraded:
@@ -680,13 +696,18 @@ async def run_sprint(
         # F176A adds: hardware_limited_smoke, pre_active_memory_starvation, survival_active_minimal
         # E0-T4: short_signal — <180s with pattern hits but no findings.
         # 180s floor in _is_meaningful_run is exempt for hits/findings early-returns.
+        # F178B: Priority order — more specific conditions must come BEFORE less specific.
+        # pre_active_memory_starvation (entered ACTIVE but zero cycles with memory pressure)
+        # MUST be checked before survival_active_minimal (bounded work with memory pressure).
+        # hardware_limited_smoke (never entered active, zero cycles, memory pressure) comes after
+        # pre_active_memory_starvation since the latter requires entered_active_at_monotonic.
         runtime_truth_level = (
             "active"
             if is_meaningful and result.accepted_findings > 0
-            else "survival_active_minimal"
-            if is_meaningful and _uma_state_pre in ("warn", "critical", "emergency")
             else "pre_active_memory_starvation"
             if _is_pre_active_mem_starved
+            else "survival_active_minimal"
+            if is_meaningful and _uma_state_pre in ("warn", "critical", "emergency")
             else "hardware_limited_smoke"
             if _is_hardware_limited
             else "short_signal"
@@ -750,17 +771,20 @@ async def run_sprint(
         _ckpt_category = (
             "signal_reaches_findings"
             if result.accepted_findings > 0
+            # F176A: Pre-active memory starvation — entered ACTIVE but zero cycles started
+            # under memory pressure. MUST come before survival_active_minimal (entered active
+            # with cycles started under memory pressure). More specific than hardware_limited_smoke
+            # because it requires entered_active_at_monotonic set (we reached loop guard).
+            else "pre_active_memory_starvation"
+            if _is_pre_active_mem_starved
             # F176A: Survival minimal active — bounded work under memory pressure
             # (entered ACTIVE, cycles started, but reduced config active)
             else "survival_active_minimal"
             if is_meaningful and _uma_state_pre in ("warn", "critical", "emergency")
             # F176A: Hardware-limited smoke — zero cycles, hardware pressure
-            # MUST come before depleted (which is query vocabulary failure)
+            # (never entered active OR entered but cycles_started still 0)
             else "hardware_limited_smoke"
             if _is_hardware_limited
-            # F176A: Pre-active memory starvation
-            else "pre_active_memory_starvation"
-            if _is_pre_active_mem_starved
             # F169F: explicit backend degraded first (httpx/network errors)
             else "public_backend_degraded"
             if _public_backend_degraded
@@ -824,9 +848,10 @@ async def run_sprint(
             else "depleted_no_pattern_hits"
         )
         _export_finish_status = (
-            "finished" if result.final_phase in ("EXPORT", "TEARDOWN") and result.accepted_findings > 0
-            else "empty_run" if result.accepted_findings == 0
+            "finished"
+            if result.final_phase in ("EXPORT", "TEARDOWN") and result.accepted_findings > 0 and not result.aborted
             else "aborted" if result.aborted
+            else "empty_run" if result.accepted_findings == 0
             else "unknown"
         )
 
@@ -915,6 +940,10 @@ async def run_sprint(
                 "effective_parallelism": len(live_feed_urls),
                 "effective_timeouts": {},
                 "active_iteration_count": active_iterations,
+                # F166B+F178B: Pre-loop and pre-active starvation surfaces
+                "pre_loop_elapsed_s": result.pre_loop_elapsed_s,
+                "pre_loop_blocker_reason": result.pre_loop_blocker_reason,
+                "pre_active_starvation": result.pre_active_starved,
                 "export_finish_layer_status": _export_finish_status,
                 # Sprint F163C: public_error must surface at canonical boundary
                 "public_error": result.public_error,
@@ -998,6 +1027,10 @@ async def run_sprint(
                     "effective_parallelism": len(live_feed_urls),
                     "effective_timeouts": {},
                     "active_iteration_count": active_iterations,
+                    # F166B+F178B: Pre-loop and pre-active starvation surfaces
+                    "pre_loop_elapsed_s": result.pre_loop_elapsed_s,
+                    "pre_loop_blocker_reason": result.pre_loop_blocker_reason,
+                    "pre_active_starvation": result.pre_active_starved,
                     "export_finish_layer_status": _export_finish_status,
                     # Sprint F163C: public_error must surface at canonical boundary
                     "public_error": result.public_error,

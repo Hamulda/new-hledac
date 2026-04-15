@@ -377,7 +377,7 @@ def _derive_query_seeds(pvs: dict[str, Any]) -> list[dict[str, Any]]:
       - low_density / slow_novelty → suggest different query strategy
       - depleted → no query seeds (already tried hard, switch approach)
     """
-    signal = pvs.get("signal_quality", "unknown")
+    signal = pvs.get("_signal_quality_classification", "unknown")
     accepted = pvs.get("accepted", 0)
     ioc_density = pvs.get("ioc_density", 0.0)
     findings_per_minute = pvs.get("findings_per_minute", 0.0)
@@ -447,7 +447,7 @@ def _derive_source_revisit_seeds(pvs: dict[str, Any]) -> list[dict[str, Any]]:
     """
     seeds: list[dict[str, Any]] = []
     cb_open: list[str] = pvs.get("cb_open_domains") or []
-    signal = pvs.get("signal_quality", "unknown")
+    signal = pvs.get("_signal_quality_classification", "unknown")
 
     if cb_open:
         for domain in cb_open[:3]:  # Max 3 domains from circuit breaker
@@ -682,48 +682,45 @@ def _build_product_value_summary(
         scorecard.get("synthesis_engine_used", "unknown") or "unknown"
     )
 
-    # Sprint F150I §4: Build signal_quality — condensed quality verdict
-    # Pro další sprint: je tenhle sprint dobrý seed source?
+    # Sprint F178C: signal_quality renamed to _signal_quality_classification
+    # PRECISE SEPARATION of FACTS vs DERIVED:
+    # - FACTS (raw data from scorecard/store): accepted, reject_breakdown, total_rejected,
+    #   findings_per_minute, ioc_density, peak_rss_mb, phase_durations, cb_open_domains,
+    #   gnn_predictions, synthesis_engine, dedup_effective, dedup_lmdb_path, hot_cache
+    # - DERIVED (computed from facts): _signal_quality_classification
+    #   NOTE: _prefix means "derived classification, not raw fact"
     if accepted > 0 and findings_per_minute > 0:
-        # Good signal: we found things and did it efficiently
         if ioc_density >= 0.5:
-            signal_quality = "high_density"
+            _signal_quality = "high_density"
         elif ioc_density >= 0.2:
-            signal_quality = "medium_density"
+            _signal_quality = "medium_density"
         else:
-            signal_quality = "low_density"
+            _signal_quality = "low_density"
     elif accepted > 0 and findings_per_minute == 0:
-        signal_quality = "slow_novelty"
+        _signal_quality = "slow_novelty"
     elif accepted == 0 and dedup_status:
-        signal_quality = "depleted"
+        _signal_quality = "depleted"
     else:
-        signal_quality = "unknown"
+        _signal_quality = "unknown"
 
     summary: dict[str, Any] = {
         "sprint_id": sprint_id,
-        # Accepted reality
+        # FACTS — raw data from scorecard/store
         "accepted": accepted,
-        # Reject breakdown (Sprint 8AV extended dedup status)
         "reject_breakdown": reject_breakdown,
         "total_rejected": total_rejected,
-        # Dedup infrastructure state
-        "dedup_effective": dedup_effective,
-        "dedup_lmdb_path": dedup_lmdb_path,
-        "hot_cache": hot_cache,
-        # Circuit breaker
-        "cb_open_domains": cb_open_domains,
-        # ML signal
-        "gnn_predictions": gnn_predictions,
-        # Synthesis engine
-        "synthesis_engine": synthesis_engine,
-        # Scorecard basics
         "findings_per_minute": findings_per_minute,
         "ioc_density": ioc_density,
         "peak_rss_mb": peak_rss_mb,
-        # Phase timings
         "phase_durations": phase_timings if phase_timings else None,
-        # Decision signal for next sprint
-        "signal_quality": signal_quality,
+        "cb_open_domains": cb_open_domains,
+        "gnn_predictions": gnn_predictions,
+        "synthesis_engine": synthesis_engine,
+        "dedup_effective": dedup_effective,
+        "dedup_lmdb_path": dedup_lmdb_path,
+        "hot_cache": hot_cache,
+        # DERIVED — computed from facts (prefix _ = classification, not raw fact)
+        "_signal_quality_classification": _signal_quality,
     }
 
     # Remove None fields for cleaner output (keep 0 as valid)
@@ -765,7 +762,7 @@ def _derive_hypothesis_queries(
 
     # Build findings string from pvs signal
     findings: list[str] = []
-    signal = pvs.get("signal_quality", "unknown")
+    signal = pvs.get("_signal_quality_classification", "unknown")
 
     if signal == "high_density":
         accepted = pvs.get("accepted", 0)
@@ -820,7 +817,7 @@ def _derive_focus_expand(pvs: dict[str, Any]) -> list[dict[str, Any]]:
     Returns:
         List of recommendation dicts with keys: task_type, suggested_action, priority, reason
     """
-    signal = pvs.get("signal_quality", "unknown")
+    signal = pvs.get("_signal_quality_classification", "unknown")
     accepted = pvs.get("accepted", 0)
     ioc_density = pvs.get("ioc_density", 0.0)
     dedup_effective = pvs.get("dedup_effective", False)
@@ -1319,7 +1316,7 @@ def _derive_run_truth_note(
     # Priority 4: pvs-based fallback
     if pvs is None:
         return "unknown_run: insufficient data"
-    signal = pvs.get("signal_quality", "unknown")
+    signal = pvs.get("_signal_quality_classification", "unknown")
     accepted = pvs.get("accepted", 0)
 
     if signal == "high_density":
@@ -1442,7 +1439,7 @@ def _derive_best_first_move(
             return f"action: {na[:80]}"
 
     # 5. pvs signal guidance
-    signal = pvs.get("signal_quality", "unknown") if pvs else "unknown"
+    signal = pvs.get("_signal_quality_classification", "unknown") if pvs else "unknown"
     if signal == "depleted":
         return "new approach: current query space exhausted"
     elif signal == "high_density":
@@ -1530,7 +1527,7 @@ def _derive_why_this_run_matters(
     # pvs-based fallback — F161F §A: guard against None pvs
     if pvs is None:
         return "no actionable signal — sprint produced no useful leads"
-    signal = pvs.get("signal_quality", "unknown")
+    signal = pvs.get("_signal_quality_classification", "unknown")
     accepted = pvs.get("accepted", 0)
     if signal == "high_density" and accepted > 0:
         return f"{accepted} quality findings confirmed at high density"
@@ -1589,7 +1586,7 @@ def _build_operator_brief(
 
     Žádný nový business engine. Žádné nové persistence.
     """
-    signal = pvs.get("signal_quality", "unknown")
+    signal = pvs.get("_signal_quality_classification", "unknown")
     accepted = pvs.get("accepted", 0)
     ioc_density = pvs.get("ioc_density", 0.0)
     dedup = pvs.get("reject_breakdown")
@@ -1879,7 +1876,7 @@ def _derive_trust_note(
         return f"korelace: {so_what}"
 
     # Signal quality from pvs — baseline confidence
-    signal = pvs.get("signal_quality", "unknown")
+    signal = pvs.get("_signal_quality_classification", "unknown")
     if signal == "high_density":
         return "vysoká spolehlivost — hustý signál, málo šumu"
     elif signal == "depleted":
@@ -1912,7 +1909,7 @@ def _derive_confidence_band(
         return "HIGH"
 
     # so_what present + high_density signal = HIGH
-    if so_what and len(so_what) > 5 and pvs.get("signal_quality") == "high_density":
+    if so_what and len(so_what) > 5 and pvs.get("_signal_quality_classification") == "high_density":
         return "HIGH"
 
     # so_what present alone = MEDIUM
@@ -1920,16 +1917,16 @@ def _derive_confidence_band(
         return "MEDIUM"
 
     # High density signal = MEDIUM (good data, no correlation)
-    if pvs.get("signal_quality") == "high_density":
+    if pvs.get("_signal_quality_classification") == "high_density":
         return "MEDIUM"
 
     # Depleted = LOW (minimální data)
-    if pvs.get("signal_quality") == "depleted":
+    if pvs.get("_signal_quality_classification") == "depleted":
         return "LOW"
 
     # F171B §4: unknown signal = LOW confidence — store unavailable or sprint didn't run
     # Previously fell through to MEDIUM default — misleading when we have no real data
-    if pvs.get("signal_quality") == "unknown":
+    if pvs.get("_signal_quality_classification") == "unknown":
         return "LOW"
 
     # Medium/other = MEDIUM
@@ -2172,7 +2169,7 @@ def _build_sprint_summary(pvs: dict[str, Any], seeds_count: int) -> dict[str, An
     Returns:
         sprint_summary dict
     """
-    signal = pvs.get("signal_quality", "unknown")
+    signal = pvs.get("_signal_quality_classification", "unknown")
     accepted = pvs.get("accepted", 0)
     total_rejected = pvs.get("total_rejected", 0)
     dedup_effective = pvs.get("dedup_effective", False)

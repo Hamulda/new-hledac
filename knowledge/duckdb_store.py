@@ -3447,6 +3447,10 @@ class DuckDBShadowStore:
             if results and any(r.get("lmdb_success") for r in results):
                 self._semantic_buffer_findings(findings)
 
+            # Count accepted (lmdb_success) findings for _accepted_count
+            accepted_total = sum(1 for r in results if r.get("lmdb_success"))
+            self._accepted_count += accepted_total
+
             return [
                 ActivationResult(
                     finding_id=str(r.get("finding_id", "")),
@@ -3455,7 +3459,7 @@ class DuckDBShadowStore:
                     lmdb_key=f"finding:{r.get('finding_id', '')}",
                     desync=bool(r.get("lmdb_success") and r.get("duckdb_success") is False),
                     error=r.get("error"),
-                    accepted=True,
+                    accepted=bool(r.get("lmdb_success")),
                 )
                 for r in results
             ]
@@ -3852,10 +3856,10 @@ class DuckDBShadowStore:
             )
 
         # URL-first path: short-circuit to store (no entropy check needed)
+        # _accepted_count is incremented by async_record_canonical_findings_batch — NOT here
         if url_fingerprint:
             self._store_persistent_dedup(fingerprint, finding.finding_id)
             self._add_to_hot_cache(fingerprint, finding.finding_id)
-            self._accepted_count += 1
             return FindingQualityDecision(
                 accepted=True,
                 reason=None,
@@ -3865,11 +3869,11 @@ class DuckDBShadowStore:
             )
 
         # Short strings (< 8 chars) skip entropy filter
+        # _accepted_count is incremented by async_record_canonical_findings_batch — NOT here
         if len(fingerprint) < _QUALITY_MIN_ENTROPY_LEN:
             # Accept: store in LMDB + hot cache
             self._store_persistent_dedup(fingerprint, finding.finding_id)
             self._add_to_hot_cache(fingerprint, finding.finding_id)
-            self._accepted_count += 1
             return FindingQualityDecision(
                 accepted=True,
                 reason="short_string_skip",
@@ -3890,9 +3894,11 @@ class DuckDBShadowStore:
             )
 
         # Accept: store in LMDB + hot cache
+        # NOTE: _accepted_count is NOT incremented here — it is incremented
+        # by async_record_canonical_findings_batch when the WAL write succeeds.
+        # This avoids double-counting between quality gate and storage layer.
         self._store_persistent_dedup(fingerprint, finding.finding_id)
         self._add_to_hot_cache(fingerprint, finding.finding_id)
-        self._accepted_count += 1
         return FindingQualityDecision(
             accepted=True,
             reason=None,
@@ -3921,9 +3927,11 @@ class DuckDBShadowStore:
         try:
             decision = self._assess_finding_quality(finding)
         except Exception:
+            # Fail-open: quality gate failed, but store anyway
+            # _accepted_count is NOT incremented here — async_record_canonical_finding
+            # handles it on success, and we don't double-count on the fail-open path
             self._quality_fail_open_count += 1
             result = await self.async_record_canonical_finding(finding)
-            self._accepted_count += 1
             return result
 
         if not decision.accepted:
@@ -3931,11 +3939,9 @@ class DuckDBShadowStore:
 
         # Phase 2: legacy storage path (WAL-first)
         result = await self.async_record_canonical_finding(finding)
-        # Augment with accepted=True for consistency with quality decision contract
-        if isinstance(result, dict):
-            result["accepted"] = True
-        else:
-            result.accepted = True  # type: ignore[attr-defined]
+        # Increment _accepted_count if LMDB write succeeded
+        if result.lmdb_success:
+            self._accepted_count += 1
         return result
 
     async def async_ingest_findings_batch(
@@ -3968,8 +3974,11 @@ class DuckDBShadowStore:
                 decision = self._assess_finding_quality(f)
             except Exception:
                 self._quality_fail_open_count += 1
-                results[i] = await self.async_record_canonical_finding(f)
-                self._accepted_count += 1
+                result = await self.async_record_canonical_finding(f)
+                # Count if LMDB succeeded — this is the fail-open success path
+                if getattr(result, 'lmdb_success', False) if hasattr(result, 'lmdb_success') else result.get('lmdb_success', False) if isinstance(result, dict) else False:
+                    self._accepted_count += 1
+                results[i] = result
                 continue
 
             if not decision.accepted:
@@ -3980,6 +3989,12 @@ class DuckDBShadowStore:
 
         if accepted_findings:
             storage_results = await self.async_record_canonical_findings_batch(accepted_findings)
+            # Count accepted (lmdb_success) findings from the batch storage results
+            accepted_from_batch = sum(
+                1 for sr in storage_results
+                if (sr.get("lmdb_success") if isinstance(sr, dict) else getattr(sr, "lmdb_success", False))
+            )
+            self._accepted_count += accepted_from_batch
             for idx, sr in zip(accepted_indices, storage_results):
                 results[idx] = sr
 

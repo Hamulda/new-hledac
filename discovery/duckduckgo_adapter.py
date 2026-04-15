@@ -38,7 +38,8 @@ DEFAULT_MAX_RESULTS: int = 10
 HARD_MAX_RESULTS: int = 50
 DEFAULT_TIMEOUT_S: float = 35.0
 # Domain diversity cap: at most this fraction of results from a single host.
-MAX_HOST_SHARE_RATIO: float = 0.4
+# F178E: tightened from 0.4→0.25 — prevents single-host concentration in results
+MAX_HOST_SHARE_RATIO: float = 0.25
 
 # ---------------------------------------------------------------------------
 # DTO contracts
@@ -243,22 +244,43 @@ def _build_signals(
     }
 
 
-def _is_noise_result(title: str, url: str, snippet: str) -> bool:
+# F178E: SEO spam / title-manipulation patterns (shared logic for DDG adapter)
+_re = __import__("re")
+_SEO_SPAM_TITLE_RE = _re.compile(
+    r"(?:\b\w+\b\s*){30,}", _re.IGNORECASE  # 30+ words = keyword stuffing
+)
+# F178E: repeated char title noise
+_REPEATED_CHAR_TITLE_RE = _re.compile(r"^(.)\1{4,}$")  # 5+ same chars
+# F178E: known parked / placeholder domain patterns
+# Matches: domain at start, after dot, or after :// (URL scheme separator)
+_PARKED_DOMAIN_RE = _re.compile(
+    r"(?:^|\.|://)(?:blogspot\.com|wordpress\.com|tumblr\.com|livejournal\.com|"
+    r"blogspot\.ru|000webhost\.com|110mb\.com|site90\.net|"
+    r"blogcindi\.com|bloggen\.ru|blogrund\.com)\b",
+    _re.IGNORECASE,
+)
+
+
+def _is_noise_result(title: str, url: str, snippet: str, query: str = "") -> bool:
     """
     Return True for obvious low-ROI / thin / noise results.
 
-    Noise patterns:
+    Noise patterns (F178E additions in *italic*):
     - Title is exactly the query (DDG self-loop query page)
     - URL is a known ad/partner link or redirect stub
     - Snippet is empty or is just "title • description" template noise
     - Title is pure ASCII-art / repeated chars / emoji-only
+    *- SEO keyword-stuffed title (30+ words)
+    *- Repeated-char title (5+ same char repeated)
+    *- Parked/placeholder domain URL
+    *- Query term density excess in title (query term appears >5× in title)
     """
     t = title.strip()
     s = snippet.strip()
     u = url.lower()
 
     # Self-loop: title ~= query (exact repeat of what you searched)
-    if t and t.lower() == s[: len(t)].lower():
+    if t and s and t.lower() == s[: len(t)].lower():
         return True
 
     # Empty or near-empty content
@@ -290,6 +312,28 @@ def _is_noise_result(title: str, url: str, snippet: str) -> bool:
     # Title is pure repeating chars / symbols (ASCII art noise)
     if len(t) > 10 and len(set(t)) < 3:
         return True
+
+    # F178E: SEO keyword stuffing — 30+ words in title
+    if _SEO_SPAM_TITLE_RE.match(t):
+        return True
+
+    # F178E: repeated-char title — "aaaaaaa..." or "??????..."
+    if len(t) > 5 and _REPEATED_CHAR_TITLE_RE.match(t):
+        return True
+
+    # F178E: parked / placeholder domain
+    if _PARKED_DOMAIN_RE.search(u):
+        return True
+
+    # F178E: query term density — query term repeated >5× in title = spam signal
+    if query:
+        q_lower = query.lower().strip()
+        # F178E FIX: use raw query terms without length filter so 3-char terms like CVE are checked
+        query_terms = [wt.strip(".,;:!?()[]{}") for wt in q_lower.split() if wt]
+        for term in query_terms:
+            # Count occurrences of term in title (case-insensitive)
+            if len(term) >= 3 and t.lower().count(term) > 5:
+                return True
 
     return False
 
@@ -556,7 +600,7 @@ async def async_search_public_web(
                 raw_url = raw.get("url") or ""
                 title = (raw.get("title") or "").strip()
                 snippet = (raw.get("snippet") or "").strip()
-                if _is_noise_result(title, raw_url, snippet):
+                if _is_noise_result(title, raw_url, snippet, trimmed):
                     continue
                 norm = _normalize_url_for_dedup(raw_url)
                 if not norm or norm in seen_urls:
@@ -615,7 +659,7 @@ async def async_search_public_web(
         snippet = (raw.get("body") or raw.get("snippet") or "").strip()
 
         # Skip empty / noise results early
-        if _is_noise_result(title, raw_url, snippet):
+        if _is_noise_result(title, raw_url, snippet, trimmed):
             continue
 
         norm = _normalize_url_for_dedup(raw_url)
