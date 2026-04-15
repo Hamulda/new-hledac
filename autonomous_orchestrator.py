@@ -95,10 +95,12 @@ warnings.warn(
 # Load the legacy module directly
 import importlib.util
 _spec = importlib.util.spec_from_file_location("legacy.autonomous_orchestrator", _legacy_path)
+assert _spec is not None, f"Failed to load spec for {_legacy_path}"
 _legacy_mod = importlib.util.module_from_spec(_spec)
 _legacy_mod.__package__ = "hledac.universal"
 _legacy_mod.__path__ = [os.path.dirname(__file__)]
 sys.modules["legacy.autonomous_orchestrator"] = _legacy_mod
+assert _spec.loader is not None
 _spec.loader.exec_module(_legacy_mod)
 
 # Copy all exported names to this facade module
@@ -131,6 +133,73 @@ _for_export = [
     "CapabilityHealth",
     "SynthesisCompression",
     "SimHash",
+    "MicroPlan",
+    "MICROPLAN_DEADLINE_SEC",
+    "normalize_url",
+    # Additional exports needed by tests
+    "BudgetManager",
+    "CONTRADICTION_WHITELIST",
+    "Checkpoint",
+    "CheckpointManager",
+    "DomainLimiter",
+    "DomainStats",
+    "DomainStatsManager",
+    "FrontierEntry",
+    "HttpCacheEntry",
+    "HttpDiskCache",
+    "MAX_HOST_PENALTIES",
+    "MetadataExtractor",
+    "RecrawlItem",
+    "RecrawlPlanner",
+    "SnapshotStorage",
+    "TimingProfile",
+    "UrlFrontier",
+    "_ACQUISITION_PHASE_1_2_ALLOWED",
+    "_ACQUISITION_PHASE_3_RESCUE_ONLY",
+    "_ACQUISITION_PHASE_4_NONE",
+    "_ARCHIVE_MIRRORS",
+    "_COMMONS_CRAWL_MAX_LINES",
+    "_CROSS_ARCHIVE_DIGEST_MAX",
+    "_CT_DISCOVERY_MAX_SUBDOMAINS",
+    "_CT_DISCOVERY_TIMEOUT_SEC",
+    "_FINAL_SYNTHESIS_MAX_CHARS",
+    "_FINAL_SYNTHESIS_MAX_CLAIMS",
+    "_FINAL_SYNTHESIS_MAX_GAPS",
+    "_FORCE_GC_BEFORE_SYNTHESIS",
+    "_GAP_CHECK_BUDGET",
+    "_MemoryManager",
+    "_NECROMANCER_BUDGET_PER_SPRINT",
+    "_NECROMANCER_MAX_ATTEMPTS",
+    "_ONION_BUDGET_PER_SPRINT",
+    "_ONION_PREFLIGHT_CACHE_TTL_SEC",
+    "_PRF_MAX_EXPANSION_TERMS",
+    "_PRF_STOP_WORDS",
+    "_WAYBACK_CDX_MAX_LINES",
+    "_WAYBACK_QUICK_TIMEOUT_SEC",
+    "_check_tor_available_cached",
+    "_prf_expand",
+    "_validate_archive_content",
+    # Additional exports from coordinators/
+    "AgentCoordinationEngine",
+    "AgentType",
+    "AgentCapability",
+    "TaskRequest",
+    "TaskPriority",
+    "CoordinationStrategy",
+    "ResearchOptimizer",
+    "OptimizationConfig",
+    "OptimizationStrategy",
+    "FetchCoordinator",
+    "apply_fcntl_nocache",
+    "ClaimsCoordinator",
+    "GraphCoordinator",
+    "ArchiveCoordinator",
+    "ReciprocalRankFusion",
+    "QueryExpander",
+    "LanguageDetector",
+    "SimHash",
+    "MetadataExtractor",
+    "MLX_AVAILABLE",
     # Internal managers used by orchestrator/
     "_SecurityManager",
     "_ResearchManager",

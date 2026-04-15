@@ -275,6 +275,11 @@ async def run_sprint(
     # Pre-sprint checks
     run_pre_sprint_checks()
 
+    # Sprint F174A: Canonical bootstrap guarantee — ensure non-empty matcher registry
+    # before any pipeline run. Matches root __main__._run_sprint_mode() guarantee.
+    from hledac.universal.patterns.pattern_matcher import configure_default_bootstrap_patterns_if_empty
+    configure_default_bootstrap_patterns_if_empty()
+
     # UMA baseline
     uma_baseline_gib = sample_uma_status().system_used_gib
 

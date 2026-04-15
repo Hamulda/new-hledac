@@ -14390,7 +14390,7 @@ class TestSprint19GraphRAG:
     def test_no_run_until_complete(self):
         """Verify graph_rag.py contains no run_until_complete."""
         import inspect
-        from hledac.universal.knowledge import graph_rag
+        from hledac.universal.knowledge.persistent_layer import graph_rag
 
         source = inspect.getsource(graph_rag)
 
