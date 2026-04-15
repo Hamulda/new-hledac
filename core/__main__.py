@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import logging
 import time
+import uuid
 from pathlib import Path
 
 import aiohttp
@@ -35,9 +36,12 @@ from hledac.universal.export.sprint_exporter import export_sprint
 
 logger = logging.getLogger(__name__)
 
-# =============================================================================
-# Smoke vs meaningful runtime guard
-# =============================================================================
+
+def _make_sprint_id() -> str:
+    """Generate collision-resistant sprint ID using ns timestamp + short uuid suffix."""
+    ts = time.time_ns() // 1_000_000  # millisecond precision
+    uid = uuid.uuid4().hex[:6]  # 6-char hex suffix
+    return f"8sa_{ts}_{uid}"
 
 
 def _is_meaningful_run(
@@ -275,7 +279,7 @@ async def run_sprint(
     uma_baseline_gib = sample_uma_status().system_used_gib
 
     # Sprint ID
-    sprint_id = f"8sa_{int(time.time())}"
+    sprint_id = _make_sprint_id()
     _phase_times["WARMUP"] = time.monotonic()
 
     # Initialize stores

@@ -167,6 +167,17 @@ class PipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     public_discovery_fallback_state: str | None = None
     # Dominant failure mode across all pages and discovery
     dominant_public_failure_mode: str | None = None
+    # Sprint F173C: zero-hit evidence — bounded surfaces for next gate
+    # zero_hit_accessible_fetch_count: pages that were fetched (fetched=True) with 0 pattern matches
+    # (distinct from discovery_strong_content_weak which includes SKIP-tier pages)
+    zero_hit_accessible_fetch_count: int = 0
+    # zero_hit_quality_reason_counts: breakdown of WHY zero-hit pages failed
+    # keys are the specific quality_reason values from PipelinePageResult
+    zero_hit_quality_reason_counts: dict = {}
+    # zero_hit_title_samples: bounded title+URL sample for zero-hit pages (max 5, no raw text)
+    zero_hit_title_samples: tuple = ()
+    # public_zero_hit_summary: run-level structured summary for gate review
+    public_zero_hit_summary: dict = {}
 
 
 # -----------------------------------------------------------------------------
@@ -1461,6 +1472,50 @@ async def async_run_live_public_pipeline(
         _failure_modes.append(f"waste:{run_waste_pattern_code}")
     dominant_public_failure_mode = _failure_modes[0] if _failure_modes else None
 
+    # Sprint F173C: zero-hit evidence aggregation
+    # zero_hit_accessible_fetch_count: pages that were fetched with 0 matches
+    zero_hit_accessible_fetch_count = sum(
+        1 for p in all_page_results
+        if p.fetched and p.matched_patterns == 0
+    )
+    # zero_hit_quality_reason_counts: why zero-hit pages failed
+    _zero_hit_reasons: dict[str, int] = {}
+    _zero_hit_titles: list[tuple[str, str]] = []  # (title, url) pairs, bounded
+    for p in all_page_results:
+        if p.fetched and p.matched_patterns == 0 and p.quality_reason:
+            _zero_hit_reasons[p.quality_reason] = _zero_hit_reasons.get(p.quality_reason, 0) + 1
+        if p.fetched and p.matched_patterns == 0 and len(_zero_hit_titles) < 5:
+            # Capture title+url for gate evidence (no raw text)
+            p_title = getattr(p, "discovery_reason", "") or ""
+            _zero_hit_titles.append((p_title, p.url))
+    zero_hit_quality_reason_counts = _zero_hit_reasons
+    zero_hit_title_samples = tuple(_zero_hit_titles)
+    # public_zero_hit_summary: structured run-level summary
+    public_zero_hit_summary = {
+        "zero_hit_accessible_fetch_count": zero_hit_accessible_fetch_count,
+        "zero_hit_unique_reasons": list(zero_hit_quality_reason_counts.keys()),
+        "zero_hit_has_substantive_content": any(
+            p.fetched and p.matched_patterns == 0
+            and getattr(p, "structural_quality", "") == "healthy"
+            for p in all_page_results
+        ),
+        "zero_hit_has_signalless": any(
+            p.fetched and p.matched_patterns == 0
+            and getattr(p, "waste_category", "") == "signalless"
+            for p in all_page_results
+        ),
+        "zero_hit_has_false_positive": any(
+            p.fetched and p.matched_patterns == 0
+            and getattr(p, "discovery_false_positive", False)
+            for p in all_page_results
+        ),
+        "zero_hit_has_redirect_non_content": any(
+            p.fetched and p.matched_patterns == 0
+            and p.redirected and p.waste_category in ("structural", "signalless")
+            for p in all_page_results
+        ),
+    }
+
     return PipelineRunResult(
         query=query,
         discovered=total_discovered,
@@ -1499,6 +1554,10 @@ async def async_run_live_public_pipeline(
         public_fetch_accessibility_blocker=public_fetch_accessibility_blocker,
         public_discovery_fallback_state=public_discovery_fallback_state,
         dominant_public_failure_mode=dominant_public_failure_mode,
+        zero_hit_accessible_fetch_count=zero_hit_accessible_fetch_count,
+        zero_hit_quality_reason_counts=zero_hit_quality_reason_counts,
+        zero_hit_title_samples=zero_hit_title_samples,
+        public_zero_hit_summary=public_zero_hit_summary,
     )
 
 
