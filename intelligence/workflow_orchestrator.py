@@ -615,16 +615,22 @@ class WorkflowOrchestrator:
         if module in self._module_registry:
             return self._module_registry[module]
 
-        # Try to get from orchestrator (defensive with try/except to avoid ANY exception)
+        # Try to get from orchestrator (defensive with type guard)
+        # Use callable check instead of bare hasattr/getattr on external objects
         try:
-            get_module = getattr(self.orchestrator, 'get_module', None)
-            if get_module is not None:
-                return get_module(module)
+            if hasattr(self.orchestrator, 'get_module') and callable(getattr(self.orchestrator, 'get_module', None)):
+                get_module = getattr(self.orchestrator, 'get_module', None)
+                if get_module is not None:
+                    result = get_module(module)
+                    if result is not None:
+                        return result
         except Exception:
             pass
         try:
-            if hasattr(self.orchestrator, module):
-                return getattr(self.orchestrator, module)
+            # Direct attribute access with type guard
+            attr = getattr(self.orchestrator, module, None)
+            if attr is not None:
+                return attr
         except Exception:
             pass
 

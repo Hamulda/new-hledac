@@ -401,9 +401,17 @@ class ModelManager:
             yield model
         finally:
             await self.release_model(model_name)
+            # F179C: mx.eval([]) barrier before clear_cache
             if MLX_AVAILABLE and mx is not None:
                 try:
-                    mx.clear_cache()
+                    mx.eval([])
+                except Exception:
+                    pass
+                try:
+                    if hasattr(mx, 'clear_cache'):
+                        mx.clear_cache()
+                    elif hasattr(mx.metal, 'clear_cache'):
+                        mx.metal.clear_cache()
                 except Exception:
                     pass
 
@@ -650,10 +658,17 @@ class ModelManager:
         # Python garbage collection
         gc.collect()
 
-        # MLX cache clear (pro M1)
+        # MLX cache clear (pro M1) — F179C: mx.eval([]) barrier before clear_cache
         if MLX_AVAILABLE and mx is not None:
             try:
-                mx.clear_cache()
+                mx.eval([])  # F179C: settle lazy eval before clearing
+            except Exception:
+                pass
+            try:
+                if hasattr(mx, 'clear_cache'):
+                    mx.clear_cache()
+                elif hasattr(mx.metal, 'clear_cache'):
+                    mx.metal.clear_cache()
                 logger.debug("MLX cache cleared")
             except Exception as e:
                 logger.warning(f"Failed to clear MLX cache: {e}")

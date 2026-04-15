@@ -827,10 +827,11 @@ class Hermes3Engine:
                         ):
                             pass
                     finally:
-                        # Sprint 8UD B.2: Clear MLX Metal cache after inference
+                        # Sprint 8UD B.2 + F179C: mx.eval([]) barrier before clear_cache
                         try:
                             import mlx.core as _mx
                             if _mx.metal.is_available():
+                                _mx.eval([])  # F179C: settle lazy eval
                                 _mx.metal.clear_cache()
                         except Exception:
                             pass  # Non-fatal

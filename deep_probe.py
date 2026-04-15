@@ -52,6 +52,7 @@ class MemoryOptimizedURLSet:
         self.max_memory_mb = max_memory_mb
         self.urls: Set[str] = set()
         self._memory_usage = 0
+        self._closed = False
 
     def add(self, url: str) -> bool:
         """Add URL if not already present."""

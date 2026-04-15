@@ -77,12 +77,14 @@ class LMDBKVStore:
         if not LMDB_AVAILABLE:
             raise ImportError("lmdb package not available")
 
-        # Sprint 3D: canonical path resolution
+        # Sprint F179B: canonical path resolution — use DB_ROOT from paths.py
         if path is None:
             if _USE_CANONICAL and _PATH_ROOT is not None:
                 self._path = _PATH_ROOT / "kvstore.lmdb"
             else:
-                self._path = Path.home() / ".hledac_kvstore.lmdb"
+                # Fallback: RAMDISK-backed DB_ROOT, not home-relative
+                from hledac.universal.paths import DB_ROOT
+                self._path = DB_ROOT / "kvstore.lmdb"
         else:
             self._path = Path(path)
         self._path.mkdir(parents=True, exist_ok=True)

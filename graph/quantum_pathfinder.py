@@ -794,9 +794,17 @@ class QuantumInspiredPathFinder:
                 # Memory cleanup every 10 steps
                 if step % 10 == 0:
                     gc.collect()
-                    if self._mlx_available and _get_mlx() is not None:
-                        mx.eval([])
-                        mx.clear_cache()
+                    # F179C: use lazy loader, wrap in try/except
+                    mx_mod = _get_mlx()
+                    if self._mlx_available and mx_mod is not None:
+                        try:
+                            mx_mod.eval([])
+                        except Exception:
+                            pass
+                        try:
+                            mx_mod.clear_cache()
+                        except Exception:
+                            pass
 
             # Extract paths from final state
             paths = self._extract_paths(state, start_nodes, target_nodes)
@@ -986,9 +994,18 @@ class QuantumInspiredPathFinder:
             gc.collect()
 
             # Clear MLX cache if available
-            if self._mlx_available and _get_mlx() is not None:
-                mx.eval([])
-                mx.clear_cache()
+            # F179C: use lazy loader via _get_mlx(), wrap in try/except
+            if self._mlx_available:
+                mx_mod = _get_mlx()
+                if mx_mod is not None:
+                    try:
+                        mx_mod.eval([])
+                    except Exception:
+                        pass
+                    try:
+                        mx_mod.clear_cache()
+                    except Exception:
+                        pass
             gc.collect()
 
             self.initialized = False

@@ -952,7 +952,7 @@ class PassiveDNSClient:
             )
             return [str(a) for a in ans]
         except Exception as e:
-            log.debug(f"PassiveDNS A {domain}: {e}")
+            logger.debug(f"PassiveDNS A {domain}: {e}")
             return []
 
     async def resolve_aaaa(self, domain: str) -> list[str]:

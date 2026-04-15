@@ -62,12 +62,15 @@ except ImportError:
 
 SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.xlsx'}
 MAX_INTERNAL_PATHS = 100
+# Sprint F179B: canonical cache root via paths.py (M1/RAMDISK-safe)
+from hledac.universal.paths import CACHE_ROOT
+
 MAX_GPS_COORDS = 20
 CACHE_TTL_DAYS = 30
 EXTRACTION_TIMEOUT = 10.0
 
-# Cache DB path
-CACHE_DIR = Path.home() / '.hledac'
+# Cache DB path — under RAMDISK CACHE_ROOT, not home-relative
+CACHE_DIR = CACHE_ROOT
 CACHE_DB_PATH = CACHE_DIR / 'doc_meta_cache.db'
 
 # Regex patterns for internal paths

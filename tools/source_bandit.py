@@ -134,8 +134,9 @@ class SourceBandit:
             if _LMDB_ROOT is not None:
                 lmdb_path = _LMDB_ROOT / 'bandit.lmdb'
             else:
-                # Fallback: legacy path (will be outside declared root in OPSEC-degraded mode)
-                lmdb_path = Path.home() / '.hledac' / 'bandit.lmdb'
+                # Sprint F179B: Fallback to RAMDISK-backed CACHE_ROOT if paths import failed
+                from hledac.universal.paths import CACHE_ROOT
+                lmdb_path = CACHE_ROOT / 'bandit.lmdb'
         lmdb_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Sprint 3D: use open_lmdb() for env-driven discipline + lock recovery

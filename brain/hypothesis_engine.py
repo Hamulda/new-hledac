@@ -637,7 +637,9 @@ class AdversarialVerifier:
         counter_evidence: List[Evidence] = []
 
         # Search existing evidence in hypothesis engine
-        for evidence_id, evidence in self.hypothesis_engine._evidence.items():
+        # Protected access with LRU window bounds
+        evidence_items = list(self.hypothesis_engine._evidence.items())[:self.max_contradiction_window]
+        for evidence_id, evidence in evidence_items:
             # Check if evidence contradicts the claim
             if self._evidence_contradicts_claim(evidence, claim):
                 counter_evidence.append(evidence)
@@ -717,9 +719,11 @@ class AdversarialVerifier:
         else:
             self._source_credibility[source] = assessment
 
-        # Evict oldest entries if over cap
-        while len(self._source_credibility) > self.MAX_SOURCE_ITEMS:
-            self._source_credibility.popitem(last=False)
+        # Evict oldest entries if approaching cap (evict when 90% full)
+        if len(self._source_credibility) > int(self.MAX_SOURCE_ITEMS * 0.9):
+            evict_count = len(self._source_credibility) - int(self.MAX_SOURCE_ITEMS * 0.8)
+            for _ in range(evict_count):
+                self._source_credibility.popitem(last=False)
 
         return assessment
 
@@ -945,6 +949,9 @@ class AdversarialVerifier:
         """Check if evidence contradicts a claim."""
         # Simple keyword-based contradiction detection
         claim_lower = claim.lower()
+        # Guard against None content (fail-soft)
+        if not evidence.content:
+            return False
         evidence_lower = evidence.content.lower()
 
         # Check for negation patterns

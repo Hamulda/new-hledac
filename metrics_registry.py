@@ -360,10 +360,11 @@ class MetricsRegistry:
         if self._closed:
             return
         self._closed = True
+        # flush(force=True) already calls _persist_file.flush() + fsync inside.
+        # No need to flush again — that would double-flush.
         self.flush(force=True)
         if self._persist_file:
             try:
-                self._persist_file.flush()
                 self._persist_file.close()
             except Exception as e:
                 logger.error(f"Error closing metrics: {e}")
