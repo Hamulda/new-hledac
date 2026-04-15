@@ -1279,37 +1279,36 @@ def _derive_run_truth_note(
     pvs: dict[str, Any] | None,
 ) -> str:
     """
-    Sprint F150P §1: run_truth_note — operator-facing sprint characterization.
+    Sprint F176D: run_truth_note — operator-facing sprint characterization.
 
-    One-liner: meaningful_run vs smoke_vs_import vs entrypoint_smoke vs unknown.
+    Tightened for fast operator triage: meaningful vs smoke vs degraded.
 
-    Priority order (F161F §A fix):
-      1. runtime_truth["is_meaningful"] — primary empirical signal (checked first)
-      2. sprint_verdict["verdict"] — most synthesized verdict (fallback)
-      3. canonical_run_summary["signal_verdict"] — high-level sprint verdict
-      4. pvs.signal_quality as last resort
+    Priority order:
+      1. runtime_truth["is_meaningful"] — primary empirical signal
+      2. sprint_verdict["verdict" / "sprint_status"] — synthesized verdict
+      3. pvs.signal_quality — last resort fallback
 
-    Priority order fix (F161F §A): runtime_truth checked before sprint_verdict.
-    F160F invariant: smoke runs (is_meaningful=False) must NOT be labeled meaningful.
-    Fail-soft: falls back to signal_quality-based characterization.
+    Labels are short for operator glance:
+      - meaningful_run, smoke_run, slow_signal_run, mixed_run, degraded_run, unknown_run
     """
-    # Priority 1: runtime_truth is PRIMARY — must be checked before sprint_verdict
-    # F161F §A: runtime_truth.is_meaningful controls smoke/meaningful regardless of sprint_verdict
+    # Priority 1: runtime_truth is PRIMARY
     if runtime_truth:
         is_meaningful = runtime_truth.get("is_meaningful")
         evidence_note = runtime_truth.get("evidence_note") or ""
         if is_meaningful is True:
-            return f"meaningful_run: {evidence_note}" if evidence_note else "meaningful_run"
+            return f"meaningful_run" + (f": {evidence_note}" if evidence_note else "")
         elif is_meaningful is False:
-            return f"smoke_run: {evidence_note}" if evidence_note else "smoke_run"
+            return f"smoke_run" + (f": {evidence_note}" if evidence_note else "")
         elif isinstance(is_meaningful, str):
-            return f"{is_meaningful}: {evidence_note}" if evidence_note else is_meaningful
+            return f"{is_meaningful}" + (f": {evidence_note}" if evidence_note else "")
 
-    # Priority 2: sprint_verdict — most synthesized verdict (checked after runtime_truth)
+    # Priority 2: sprint_verdict — degraded/failed checked before general verdict
     if sprint_verdict:
-        verdict = sprint_verdict.get("verdict") or sprint_verdict.get("sprint_status") or ""
-        if verdict and len(verdict) > 2:
-            return f"sprint_verdict={verdict}"
+        status = sprint_verdict.get("sprint_status") or sprint_verdict.get("verdict") or ""
+        if status in ("degraded", "failed"):
+            return f"degraded_run: {status}"
+        if status and len(status) > 2:
+            return f"run: {status}"
 
     # Priority 3: canonical_run_summary signal_verdict
     if canonical_run_summary:
@@ -1317,7 +1316,7 @@ def _derive_run_truth_note(
         if sig_verdict and len(sig_verdict) > 2:
             return f"signal={sig_verdict}"
 
-    # Priority 4: pvs-based fallback — F161F §A: guard against None pvs
+    # Priority 4: pvs-based fallback
     if pvs is None:
         return "unknown_run: insufficient data"
     signal = pvs.get("signal_quality", "unknown")
@@ -1332,7 +1331,6 @@ def _derive_run_truth_note(
     elif signal == "slow_novelty":
         return "slow_signal_run: signal exists, low rate"
     elif signal == "unknown" and accepted > 0:
-        # Structurally healthy but signal unclear — don't inflate
         return "findings_run: signal unclear, findings exist"
     elif signal == "unknown":
         return "unknown_run: no signal characterization"
@@ -1393,51 +1391,57 @@ def _derive_best_first_move(
     correlation: dict[str, Any] | None,
 ) -> str:
     """
-    Sprint F150P §1: best_first_move — immediate next action (single sentence).
+    Sprint F176D: best_first_move — immediate next action (single sentence).
 
-    Priority order:
-    1. sprint_verdict["recommended_action"] — F150P §2, most synthesized
-    2. High-risk findings → investigate high-risk branch
-    3. runtime_truth is_meaningful=False → pivot immediately
-    4. signal_path next_pivot_recommendation=pivot_immediately
-    5. canonical_run_summary["next_action"] — sprint-level next action
+    Priority order (tightened for operator speed):
+    1. DEGRADED indicator FIRST — operator needs to know if sprint was bad
+       - runtime_truth.is_meaningful=False → smoke signal
+       - sprint_verdict.degraded → degraded state
+    2. High-risk findings — critical findings override all other guidance
+    3. sprint_verdict["recommended_action"] — most synthesized verdict
+    4. signal_path next_pivot_recommendation
+    5. canonical_run_summary["next_action"]
     6. pvs signal quality guidance
     7. correlation operator_shortlist first item
 
     Single sentence, max 80 chars.
-    F161F §A: pvs may be None — guarded at body 6.
     """
-    # 1. sprint_verdict recommended action (F150P §2)
-    if sprint_verdict:
-        rec_action = sprint_verdict.get("recommended_action") or sprint_verdict.get("next_action") or ""
-        if rec_action and len(rec_action) > 2:
-            return f"action: {rec_action[:80]}"
+    # 0. DEGRADED FIRST — operator needs instant awareness of bad sprints
+    if runtime_truth:
+        is_meaningful = runtime_truth.get("is_meaningful")
+        if is_meaningful is False:
+            return "pivot: smoke run, change approach immediately"
 
-    # 2. High-risk first
+    if sprint_verdict:
+        status = sprint_verdict.get("sprint_status") or sprint_verdict.get("verdict") or ""
+        if status in ("degraded", "failed"):
+            return f"degraded sprint ({status}) — investigate root cause"
+
+    # 1. High-risk first (critical findings take operational priority)
     if correlation:
         high_risk = correlation.get("high_risk_branch") or correlation.get("high_risk") or []
         if high_risk and len(high_risk) > 0:
             return "investigate high-risk branch — critical findings present"
 
-    # 3. Non-meaningful run → pivot
-    if runtime_truth:
-        is_meaningful = runtime_truth.get("is_meaningful")
-        if is_meaningful is False:
-            return "pivot: sprint was smoke, change approach immediately"
+    # 2. sprint_verdict recommended action
+    if sprint_verdict:
+        rec_action = sprint_verdict.get("recommended_action") or sprint_verdict.get("next_action") or ""
+        if rec_action and len(rec_action) > 2:
+            return f"action: {rec_action[:80]}"
 
-    # 4. Signal path next pivot
+    # 3. Signal path next pivot
     if signal_path:
         next_pivot = signal_path.get("next_pivot_recommendation", "")
         if next_pivot == "pivot_immediately":
             return "pivot: signal path recommends immediate pivot"
 
-    # 5. canonical_run_summary next_action
+    # 4. canonical_run_summary next_action
     if canonical_run_summary:
         na = canonical_run_summary.get("next_action") or canonical_run_summary.get("recommended_action") or ""
         if na and len(na) > 2:
             return f"action: {na[:80]}"
 
-    # 6. pvs signal guidance — F161F §A: guard against None pvs
+    # 5. pvs signal guidance
     signal = pvs.get("signal_quality", "unknown") if pvs else "unknown"
     if signal == "depleted":
         return "new approach: current query space exhausted"
@@ -1448,7 +1452,7 @@ def _derive_best_first_move(
     elif signal == "slow_novelty":
         return "accelerate: real signal exists, speed up sources"
 
-    # 7. Correlation operator shortlist
+    # 6. Correlation operator shortlist
     if correlation:
         shortlist = correlation.get("operator_shortlist") or []
         if shortlist and isinstance(shortlist, list) and len(shortlist) > 0:

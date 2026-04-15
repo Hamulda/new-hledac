@@ -229,6 +229,10 @@ class UnifiedWebIntelligence:
     def memory_posture(self) -> Dict[str, Any]:
         """Read-only seam: memory pressure state for M1 8GB."""
         try:
+            # Lazy init psutil.Process if not yet initialized
+            if psutil is not None and not self._process_initialized:
+                self._process = psutil.Process()
+                self._process_initialized = True
             rss_mb = self._process.memory_info().rss / 1024 / 1024 if self._process else None
             limit_mb = self._memory_limit_bytes / 1024 / 1024
             return {
@@ -472,10 +476,11 @@ class UnifiedWebIntelligence:
             # Double-check after acquiring lock
             if self._components_initialized:
                 return
-            if self._aging_task is None:
-                self._aging_task = asyncio.create_task(self._age_queued_priorities())
             try:
                 await self._initialize_components()
+                # Start aging task AFTER successful init — don't orphan it on failure
+                if self._aging_task is None:
+                    self._aging_task = asyncio.create_task(self._age_queued_priorities())
                 self._components_initialized = True
             except Exception as e:
                 self._components_init_error = e

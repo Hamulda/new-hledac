@@ -50,6 +50,8 @@ def _is_meaningful_run(
     cycles_started: int,
     accepted_findings: int,
     total_pattern_hits: int,
+    swap_detected: bool = False,
+    uma_state: str = "ok",
 ) -> tuple[bool, str]:
     """
     Distinguish smoke from meaningful active evidence.
@@ -57,9 +59,15 @@ def _is_meaningful_run(
     Returns (is_meaningful, evidence_note).
     Smoke: too short, too few cycles, no signal whatsoever.
     Meaningful: enough runtime or evidence of real work.
+
+    F176A: Hardware-limited smoke detection — swap/memory pressure + zero cycles
+    is a distinct hardware-limited classification, NOT depleted query.
     """
     # Hard smoke: no cycles ran at all
     if cycles_started == 0:
+        # F176A: Explicit hardware-limited distinction
+        if swap_detected or uma_state in ("critical", "emergency"):
+            return False, "hardware_limited_smoke: zero cycles, memory pressure detected"
         return False, "zero cycles started — entry only, no active work"
 
     # Short but found something: counts as minimal meaningful
@@ -103,11 +111,16 @@ def _runtime_truth(
     total_pattern_hits: int,
     public_accepted_findings: int,
     feed_findings: int,
+    # F176A: Hardware pressure surfaces for smoke classification
+    swap_detected: bool = False,
+    uma_state: str = "ok",
 ) -> dict:
     """Build canonical runtime-truth record from scheduler result data."""
     is_meaningful, evidence_note = _is_meaningful_run(
         actual_duration_s, cycles_completed, cycles_started,
-        accepted_findings, total_pattern_hits
+        accepted_findings, total_pattern_hits,
+        swap_detected=swap_detected,
+        uma_state=uma_state,
     )
 
     # Branch mix — dominant signal source
@@ -140,6 +153,9 @@ def _runtime_truth(
         "primary_signal_source": primary,
         "total_pattern_hits": total_pattern_hits,
         "accepted_findings": accepted_findings,
+        # F176A: Hardware pressure surfaces for smoke classification
+        "pre_sprint_swap_detected": swap_detected,
+        "pre_sprint_uma_state": uma_state,
     }
 
 def _get_live_feed_urls() -> list[str]:
@@ -280,8 +296,14 @@ async def run_sprint(
     from hledac.universal.patterns.pattern_matcher import configure_default_bootstrap_patterns_if_empty
     configure_default_bootstrap_patterns_if_empty()
 
+    # F176A: Pre-sprint UMA state capture — hardware pressure before scheduler runs.
+    # This is used to classify hardware-limited smoke vs depleted query.
+    _uma_pre_sprint = sample_uma_status()
+    _swap_detected_pre = _uma_pre_sprint.swap_detected
+    _uma_state_pre = _uma_pre_sprint.state
+
     # UMA baseline
-    uma_baseline_gib = sample_uma_status().system_used_gib
+    uma_baseline_gib = _uma_pre_sprint.system_used_gib
 
     # Sprint ID
     sprint_id = _make_sprint_id()
@@ -484,10 +506,19 @@ async def run_sprint(
             src_mix.append(f"{src}={cnt}")
         src_mix_str = ", ".join(src_mix) if src_mix else "none"
 
-        # Verdict heuristics — F169F: infra/backend/accessibility failure must NOT be
-        # called "DEPLETED". public_error is authoritative; new buckets refine interpretation.
+        # Verdict heuristics — F176A+F169F: hardware-limited smoke is distinct from depleted query.
+        # _is_hardware_limited is computed after this block (at line ~625).
+        # Use inline check for verdict since it precedes the full detection.
+        _inline_hardware_limited = (
+            result.accepted_findings == 0
+            and result.total_pattern_hits == 0
+            and result.cycles_started == 0
+            and (_swap_detected_pre or _uma_state_pre in ("critical", "emergency"))
+        )
         if result.aborted:
             verdict = "⚠️  ABORTED"
+        elif _inline_hardware_limited:
+            verdict = "💾  HARDWARE-LIMITED: swap/memory pressure blocked entry"
         elif _public_backend_degraded:
             verdict = "🌐  DEGRADED: public backend/network error — check TOR/proxy/config"
         elif result.accepted_findings == 0:
@@ -510,7 +541,9 @@ async def run_sprint(
 
         # Next-step hint (heuristic, no new planner)
         next_hint: str
-        if result.accepted_findings == 0 and result.total_pattern_hits == 0:
+        if _inline_hardware_limited:
+            next_hint = "hardware memory pressure — free RAM or restart before next run"
+        elif result.accepted_findings == 0 and result.total_pattern_hits == 0:
             next_hint = "query may be too narrow — broaden terms or switch seed"
         elif dup_rate > 80:
             next_hint = "high dup rate — consider narrowing query scope"
@@ -538,6 +571,9 @@ async def run_sprint(
             total_pattern_hits=result.total_pattern_hits,
             public_accepted_findings=result.public_accepted_findings,
             feed_findings=feed_fnd,
+            # F176A: Hardware pressure surfaces for smoke classification
+            swap_detected=_swap_detected_pre,
+            uma_state=_uma_state_pre,
         )
         is_meaningful = runtime_truth["is_meaningful"]
         evidence_note = runtime_truth["evidence_note"]
@@ -602,11 +638,33 @@ async def run_sprint(
         # CHECKPOINT-0 additive derived fields (computed before report_dict)
         active_iterations = result.cycles_completed
 
+        # F176A: Hardware-limited smoke detection (MUST be before runtime_truth_level)
+        _is_hardware_limited = (
+            not is_meaningful
+            and result.cycles_started == 0
+            and (_swap_detected_pre or _uma_state_pre in ("critical", "emergency"))
+        )
+        # F176A: Pre-active memory starvation
+        _is_pre_active_mem_starved = (
+            not is_meaningful
+            and result.cycles_started == 0
+            and result.entered_active_at_monotonic is not None
+            and (_swap_detected_pre or _uma_state_pre in ("critical", "emergency", "warn"))
+        )
+
+        # F176A+E0-T4: runtime truth level taxonomy
+        # F176A adds: hardware_limited_smoke, pre_active_memory_starvation, survival_active_minimal
         # E0-T4: short_signal — <180s with pattern hits but no findings.
         # 180s floor in _is_meaningful_run is exempt for hits/findings early-returns.
         runtime_truth_level = (
             "active"
             if is_meaningful and result.accepted_findings > 0
+            else "survival_active_minimal"
+            if is_meaningful and _uma_state_pre in ("warn", "critical", "emergency")
+            else "pre_active_memory_starvation"
+            if _is_pre_active_mem_starved
+            else "hardware_limited_smoke"
+            if _is_hardware_limited
             else "short_signal"
             if is_meaningful and result.total_pattern_hits > 0
             else "meaningful_empty"
@@ -631,13 +689,19 @@ async def run_sprint(
         #   signal_reaches_findings      — findings accepted
         #   short_signal                — meaningful, hits>0, no findings
         #   meaningful_empty_run        — F164D: meaningful, no hits, no findings (active window ran)
+        #   hardware_limited_smoke     — F176A: zero cycles + swap/pressure (hardware, not query failure)
+        #   pre_active_memory_starvation — F176A: entered ACTIVE but cycles started=0/completed=0 with memory pressure
+        #   survival_active_minimal     — F176A: bounded ACTIVE work under memory pressure
+        #   signal_reaches_findings     — findings accepted
+        #   short_signal                — meaningful, hits>0, no findings
+        #   meaningful_empty_run        — F164D: meaningful, no hits, no findings (active window ran)
         #   public_backend_degraded     — F169F: public branch backend error (NetworkProxyError, HTTP errors)
         #   feed_source_inaccessible    — F169F: all feed sources returned zero signal, public may have none
         #   cross_branch_source_inaccessible — F169F: cross-branch sources failed, feed/public accessible
         #   true_depleted_query         — F169F: query vocabulary exhaustively checked, no signal anywhere
         #   degraded_public_blocker     — public branch error (legacy, non-backend errors)
         #   windup_export_fail_soft     — windup fired on zero-findings run
-        # Priority: findings > public_backend_degraded > feed_ingress > true_depleted > cross_branch > degraded > short_signal > meaningful_empty > windup > depleted
+        # Priority: findings > survival > hardware_limited > pre_active_mem > public_backend > feed_ingress > true_depleted > cross_branch > degraded > short_signal > meaningful_empty > windup > depleted
         _public_backend_degraded = bool(
             result.public_error
             and (
@@ -662,6 +726,17 @@ async def run_sprint(
         _ckpt_category = (
             "signal_reaches_findings"
             if result.accepted_findings > 0
+            # F176A: Survival minimal active — bounded work under memory pressure
+            # (entered ACTIVE, cycles started, but reduced config active)
+            else "survival_active_minimal"
+            if is_meaningful and _uma_state_pre in ("warn", "critical", "emergency")
+            # F176A: Hardware-limited smoke — zero cycles, hardware pressure
+            # MUST come before depleted (which is query vocabulary failure)
+            else "hardware_limited_smoke"
+            if _is_hardware_limited
+            # F176A: Pre-active memory starvation
+            else "pre_active_memory_starvation"
+            if _is_pre_active_mem_starved
             # F169F: explicit backend degraded first (httpx/network errors)
             else "public_backend_degraded"
             if _public_backend_degraded
@@ -689,10 +764,16 @@ async def run_sprint(
             if result.accepted_findings == 0 and _phase_times.get("WINDUP", 0) > 0 and is_meaningful
             else "depleted"
         )
-        # F169F reason chain — machine-readable, mutually exclusive.
-        # Covers all F169F buckets with explicit reason per bucket.
+        # F176A+F169F reason chain — machine-readable, mutually exclusive.
+        # Covers all F176A+F169F buckets with explicit reason per bucket.
         _checkpoint_zero_reason = (
+            # F176A: Hardware-limited smoke — evidence_note already has hardware_limited_smoke text
             evidence_note
+            if _is_hardware_limited
+            # F176A: Pre-active memory starvation
+            else "pre_active_memory_starvation"
+            if _is_pre_active_mem_starved
+            else evidence_note
             if not is_meaningful
             else "signal_reaches_findings"
             if result.accepted_findings > 0
