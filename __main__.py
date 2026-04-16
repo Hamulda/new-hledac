@@ -132,12 +132,17 @@ ENTRYPOINT_AUTHORITY = {
             "get_runtime_status() — runtime snapshot, no ownership",
             "get_boot_telemetry() — boot telemetry, no ownership",
             "clear_boot_telemetry() — test utility only",
+            "main() --ct-pivot — CT log tool, no sprint ownership (alternate)",
+            "main() --pivot — semantic pivot, no sprint ownership (alternate)",
         ],
     },
     # F177D: role summary — quick lookup table
     "_role_summary": {
         "canonical_sprint_owner": "canonical",
         "main()": "shell",
+        "main() --sprint": "shell (delegates to canonical)",
+        "main() --ct-pivot": "alternate",
+        "main() --pivot": "alternate",
         "_run_sprint_mode()": "alternate",
         "_run_public_passive_once()": "alternate",
         "run_warmup()": "residual",
@@ -775,10 +780,14 @@ def classify_runtime_truth(elapsed_s: float, active_iterations: int) -> str:
     """
     Classify runtime truth level based on duration and ACTIVE work.
 
-    OBSERVED-RUN / DIAGNOSTIC ONLY — non-canonical.
+    DIAGNOSTIC / OBSERVED-RUN ONLY — non-canonical.
 
     This taxonomy lives in root __main__.py as an *observed-run signal* for
-    CLI/banner reporting.  It is NOT the canonical runtime-truth owner.
+    CLI/banner reporting. It is NOT the canonical runtime-truth owner.
+
+    F180A: Split-brain cleanup — this function was previously described in ways
+    that implied it was a canonical owner surface. It is NOT. It is a read-only
+    diagnostic label generator for observed runs and benchmark probes only.
 
     Canonical meaningful/smoke truth is defined in:
         hledac.universal.core.__main__._is_meaningful_run()
@@ -787,6 +796,9 @@ def classify_runtime_truth(elapsed_s: float, active_iterations: int) -> str:
     (smoke | meaningful | meaningful_empty | mixed) derived from cycle-level
     scheduler data — richer and more authoritative than this module-level
     duration heuristic.
+
+    Invariant: classify_runtime_truth() output must NEVER be used as
+    canonical_sprint_owner evidence. It is CLI-only diagnostic.
 
     Mapping (read-only, observational):
       root import_probe             → correlates with canonical smoke (short, no cycles)

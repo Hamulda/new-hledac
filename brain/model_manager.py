@@ -20,14 +20,23 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable, Literal
 from enum import Enum, auto
 
-try:
-    import mlx.core as mx
-    MLX_AVAILABLE = True
-except ImportError:
-    MLX_AVAILABLE = False
-    mx = None  # type: ignore[assignment]
+# Sprint F180D: MLX lazy init via mlx_memory — single authority for MLX
+# DO NOT add top-level `import mlx.core as mx` here.
+MLX_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+
+
+def _get_mlx_safe():
+    """Get mlx.core module via mlx_memory lazy init. Returns mx or None."""
+    global MLX_AVAILABLE
+    if MLX_AVAILABLE:
+        try:
+            from ..utils.mlx_memory import _get_mlx_core
+            return _get_mlx_core()
+        except Exception:
+            return None
+    return None
 
 # Sprint 42: ANE CoreML paths
 MODELS_DIR = Path.home() / ".hledac" / "models"
@@ -318,6 +327,7 @@ class ModelManager:
         try:
             available = self._psutil.virtual_memory().available / 1e9
             if available < threshold_gb:
+                mx = _get_mlx_safe()
                 if MLX_AVAILABLE and mx is not None:
                     mx.clear_cache()
                 logger.warning(f"[MEMORY] Low RAM: {available:.2f}GB, MLX cache cleared")
@@ -402,6 +412,7 @@ class ModelManager:
         finally:
             await self.release_model(model_name)
             # F179C: mx.eval([]) barrier before clear_cache
+            mx = _get_mlx_safe()
             if MLX_AVAILABLE and mx is not None:
                 try:
                     mx.eval([])
@@ -495,8 +506,7 @@ class ModelManager:
                 await self._release_current_async()
 
             # F178D: Memory barrier — force MLX lazy eval to settle before admission check.
-            # After async cleanup, metal cache may still be clearing. mx.eval([]) ensures
-            # the previous model's memory is fully released before we measure for the next load.
+            mx = _get_mlx_safe()
             if MLX_AVAILABLE and mx is not None:
                 try:
                     mx.eval([])
@@ -659,6 +669,7 @@ class ModelManager:
         gc.collect()
 
         # MLX cache clear (pro M1) — F179C: mx.eval([]) barrier before clear_cache
+        mx = _get_mlx_safe()
         if MLX_AVAILABLE and mx is not None:
             try:
                 mx.eval([])  # F179C: settle lazy eval before clearing

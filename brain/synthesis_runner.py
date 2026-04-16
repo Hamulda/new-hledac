@@ -222,8 +222,7 @@ def synthesis_outcome_to_dict(outcome: SynthesisOutcome | None) -> dict:
             "lifecycle_gate_mode": outcome.lifecycle_gate_mode,
             "report_present": outcome.report_produced,
             "degraded": (
-                outcome.stix_status != "available"
-                or outcome.primary_reason not in ("success", "unknown")
+                outcome.primary_reason in ("generation_failed", "parse_failed")
             ),
             "operator_note": outcome.operator_note,
         }

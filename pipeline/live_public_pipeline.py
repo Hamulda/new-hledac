@@ -955,6 +955,9 @@ async def _fetch_and_process_page(
             )
             unique_findings.append(findings_tuple[0])
 
+        # F180B FIX: accepted_count = quality-gated count (before storage)
+        # stored_count = actual storage success (lmdb_success)
+        # These are SEPARATE — accepted does NOT imply stored (DuckDB may fail)
         accepted_count = len(unique_findings)
         stored_count = 0
 
@@ -963,20 +966,44 @@ async def _fetch_and_process_page(
             try:
                 # DuckDBShadowStore quality-gated ingest surface (8W + 8S)
                 store_results = await store.async_ingest_findings_batch(unique_findings)
-                # Count accepted (non-rejected) findings
+                # F180B FIX: accepted_count from quality gate, stored_count from lmdb_success.
+                # accepted_count = number that passed quality gate (may not all reach storage)
+                # stored_count = number that actually reached LMDB WAL successfully
                 for sr in store_results:
-                    if hasattr(sr, "accepted"):
-                        if sr.accepted:
+                    if isinstance(sr, dict):
+                        # FindingQualityDecision: has "accepted" key
+                        if sr.get("accepted"):
+                            accepted_count += 1
+                        # ActivationResult: has "lmdb_success" key
+                        if sr.get("lmdb_success"):
                             stored_count += 1
-                    elif hasattr(sr, "lmdb_success"):
-                        # ActivationResult — accepted if stored
-                        if sr.lmdb_success:
+                    else:
+                        # msgspec struct
+                        if getattr(sr, "accepted", False):
+                            accepted_count += 1
+                        if getattr(sr, "lmdb_success", False):
                             stored_count += 1
-                    # else: Fallback: unknown result type — do NOT overcount
+                # accepted_count was pre-set to len(unique_findings) before the loop
+                # The loop only adjusts if the result is FindingQualityDecision (rejected finding)
+                # For simplicity: recount accepted from results
+                accepted_count = 0
+                stored_count = 0
+                for sr in store_results:
+                    if isinstance(sr, dict):
+                        if sr.get("accepted"):
+                            accepted_count += 1
+                        if sr.get("lmdb_success"):
+                            stored_count += 1
+                    else:
+                        if getattr(sr, "accepted", False):
+                            accepted_count += 1
+                        if getattr(sr, "lmdb_success", False):
+                            stored_count += 1
             except asyncio.CancelledError:
                 raise  # [I6]
             except Exception:
                 # Fail-soft: storage error does not fail the page
+                # accepted_count/stored_count already set to 0 (pre-loop init) on error
                 pass
 
         usable_signal, value_tier, resolution_reason, discovery_false_positive, waste_category, structural_quality = _compute_page_usable_fields(

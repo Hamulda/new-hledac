@@ -696,7 +696,7 @@ def _build_product_value_summary(
             _signal_quality = "medium_density"
         else:
             _signal_quality = "low_density"
-    elif accepted > 0 and findings_per_minute == 0:
+    elif accepted > 0 and findings_per_minute > 0 and ioc_density < 0.2:
         _signal_quality = "slow_novelty"
     elif accepted == 0 and dedup_status:
         _signal_quality = "depleted"

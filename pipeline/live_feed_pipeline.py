@@ -2027,8 +2027,13 @@ async def async_run_live_feed_pipeline(
             continue
 
         # Step 4: Storage
+        # F180B FIX: accepted_findings and stored_findings must be isolated from
+        # each other and preserved across exceptions (fail-soft semantics).
+        # accepted_findings = quality-gated count (from async_ingest_findings_batch results)
+        # stored_findings = actual storage success count (from lmdb_success field)
         accepted_findings = 0
         stored_findings = 0
+        _entry_store_error: str | None = None
 
         if store is not None:
             try:
@@ -2040,22 +2045,33 @@ async def async_run_live_feed_pipeline(
 
                 results = await store.async_ingest_findings_batch(canonicals)
 
-                accepted_findings = sum(
-                    1 for r in results
-                    if (r["accepted"] if isinstance(r, dict) else getattr(r, "accepted", False))
-                )
-                stored_findings = accepted_findings
+                # F180B FIX: Count accepted (quality-gated) and stored (lmdb_success)
+                # separately — accepted does NOT imply stored when DuckDB fails.
+                # accepted: FindingQualityDecision.accepted OR ActivationResult.accepted
+                # stored: lmdb_success (WAL write succeeded)
+                accepted_findings = 0
+                stored_findings = 0
+                for r in results:
+                    if isinstance(r, dict):
+                        accepted_findings += int(r.get("accepted", False))
+                        stored_findings += int(r.get("lmdb_success", False))
+                    else:
+                        accepted_findings += int(getattr(r, "accepted", False))
+                        stored_findings += int(getattr(r, "lmdb_success", False))
 
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                # Fail-soft: storage exception — results already collected above.
-                # accepted_findings/stored_findings already captured from partial results.
-                # Do not reset to 0; preserve whatever was counted before exception.
-                pass
+            except Exception as exc:
+                # F180B FIX: Preserve partial results accumulated so far in this entry.
+                # Do NOT reset accepted_findings/stored_findings to 0 on exception —
+                # partial results from before the exception are still valid.
+                _entry_store_error = f"store_exception:{type(exc).__name__}"
+                # accepted_findings and stored_findings already hold the last valid values
+                # from this entry's processing (or 0 if exception happened before any count)
         else:
             # No store: count-only mode
             accepted_findings = len(findings)
+            stored_findings = len(findings)
 
         total_accepted += accepted_findings
         total_stored += stored_findings
@@ -2064,7 +2080,7 @@ async def async_run_live_feed_pipeline(
             entry_url=entry_url,
             accepted_findings=accepted_findings,
             stored_findings=stored_findings,
-            error=None,
+            error=_entry_store_error,
         ))
 
     # Sprint 8AU + F160A: compute signal stage diagnosis with findings_build_loss tracking

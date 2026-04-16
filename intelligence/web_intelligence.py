@@ -257,19 +257,22 @@ class UnifiedWebIntelligence:
 
     @property
     def completed_operations(self) -> Dict[str, IntelligenceResult]:
-        """Backward-compatible accessor for completed_operations."""
+        """Backward-compatible accessor for completed_operations (read-only copy)."""
         return dict(self._completed_operations)
 
-    def _add_completed_operation(self, operation_id: str, result: IntelligenceResult) -> None:
-        """Add operation to completed_operations with bounded eviction policy.
+    @property
+    def completed_count(self) -> int:
+        """Read-only count of completed operations (bounded)."""
+        return len(self._completed_operations)
 
-        Eviction policy: FIFO — oldest (first-inserted) entries are removed
-        when the limit is exceeded. Uses OrderedDict.move_to_end() on access
-        to preserve LRU-like behavior for lookups while maintaining FIFO eviction.
+    def _add_completed_operation(self, operation_id: str, result: IntelligenceResult) -> None:
+        """Add operation to completed_operations with bounded FIFO eviction.
+
+        Eviction policy: oldest (first-inserted) entries are removed
+        when the limit is exceeded.
         """
         # Evict oldest if at limit
-        if (len(self._completed_operations) >= self._completed_operations_limit
-                and operation_id not in self._completed_operations):
+        if len(self._completed_operations) >= self._completed_operations_limit:
             evicted_id, _ = self._completed_operations.popitem(last=False)
             logger.debug(
                 "intel.webintel: completed_operations eviction (FIFO, limit=%d): "

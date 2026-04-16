@@ -23,6 +23,8 @@ import hashlib
 import logging
 import pickle
 import time
+
+import orjson
 from collections import OrderedDict, defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -182,10 +184,11 @@ class LanceDBIdentityStore:
     # =============================================================================
 
     def _lmdb_put(self, key: str, data: Dict) -> None:
-        """Synchronous LMDB put operation."""
+        """Synchronous LMDB put operation - zero-copy via orjson."""
         try:
             with self._cache_env.begin(write=True) as txn:
-                txn.put(key.encode(), pickle.dumps(data))
+                # Sprint F180E: orjson místo pickle - zero-copy, rychlejší
+                txn.put(key.encode(), orjson.dumps(data))
         except Exception as e:
             logger.debug(f"LMDB put failed: {e}")
 
@@ -520,7 +523,8 @@ class LanceDBIdentityStore:
                 with self._cache_env.begin() as txn:
                     cached = txn.get(text_hash.encode())
                     if cached:
-                        data = pickle.loads(cached)
+                        # Sprint F180E: orjson místo pickle - zero-copy read
+                        data = orjson.loads(cached)
                         # Check TTL if present
                         if 'ttl' in data and 'stored_at' in data:
                             if time.time() - data['stored_at'] > data['ttl']:

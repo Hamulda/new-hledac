@@ -3259,6 +3259,7 @@ class DuckDBShadowStore:
                     lmdb_key=f"finding:{finding.finding_id}",
                     desync=False,
                     error="startup replay timeout",
+                    accepted=False,
                 )
 
         loop = asyncio.get_running_loop()
@@ -3269,14 +3270,15 @@ class DuckDBShadowStore:
                 finding,
             )
             desync = bool(result.get("lmdb_success") and result.get("duckdb_success") is False)
+            lmdb_ok = bool(result.get("lmdb_success"))
             return ActivationResult(
                 finding_id=str(finding.finding_id),
-                lmdb_success=bool(result.get("lmdb_success")),
+                lmdb_success=lmdb_ok,
                 duckdb_success=result.get("duckdb_success"),
                 lmdb_key=f"finding:{finding.finding_id}",
                 desync=desync,
                 error=result.get("error"),
-                accepted=True,
+                accepted=lmdb_ok,
             )
         except Exception as e:
             return ActivationResult(
@@ -3286,6 +3288,7 @@ class DuckDBShadowStore:
                 lmdb_key=f"finding:{finding.finding_id}",
                 desync=False,
                 error=str(e),
+                accepted=False,
             )
 
     def _canonical_finding_to_activation_result(

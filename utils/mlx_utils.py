@@ -1,8 +1,10 @@
 """
 MLX utilities pro memory management a cache clearing.
 
-Sprint 81: Core Stability & Memory Safety
+Sprint F180D: CANONICAL MLX CLEANUP SEAM
 - mlx_managed decorator pro automatické mx.eval() a metal.clear_cache()
+- Deleguje na mlx_memory.py pro veškerou MLX lazy init
+- mlx_memory.py je single authority pro MLX lifecycle
 """
 
 from __future__ import annotations
@@ -17,19 +19,25 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Sprint 81: MLX memory management
+# Sprint F180D: MLX lazy import — delegate to mlx_memory for consistency
+# mlx_memory.py is the single authority for MLX lazy init.
+# Functions here get mlx reference via _get_mlx_safe() from mlx_memory.
 MLX_AVAILABLE = False
-try:
-    import mlx.core as mx
-    MLX_AVAILABLE = True
-except ImportError:
-    mx = None
 
 # Global state pro throttling mx.eval() volání
 _last_eval_time: float = 0.0
 MIN_EVAL_INTERVAL: float = 0.1  # 100 ms throttle
 
 T = TypeVar('T')
+
+
+def _get_mlx_safe():
+    """Get mlx.core module via mlx_memory lazy init. Returns None if unavailable."""
+    try:
+        from .mlx_memory import _get_mlx_core
+        return _get_mlx_core()
+    except Exception:
+        return None
 
 
 async def _maybe_eval_async() -> None:
@@ -40,7 +48,8 @@ async def _maybe_eval_async() -> None:
     """
     global _last_eval_time
 
-    if not MLX_AVAILABLE:
+    mx = _get_mlx_safe()
+    if mx is None:
         return
 
     now = time.time()
@@ -60,7 +69,8 @@ def _maybe_eval_sync() -> None:
     """
     global _last_eval_time
 
-    if not MLX_AVAILABLE:
+    mx = _get_mlx_safe()
+    if mx is None:
         return
 
     now = time.time()
@@ -74,7 +84,8 @@ def _maybe_eval_sync() -> None:
 
 async def _clear_metal_cache_async() -> None:
     """Async verze - vyčistí Metal cache."""
-    if not MLX_AVAILABLE:
+    mx = _get_mlx_safe()
+    if mx is None:
         return
 
     try:
@@ -85,7 +96,8 @@ async def _clear_metal_cache_async() -> None:
 
 def _clear_metal_cache_sync() -> None:
     """Sync verze - vyčistí Metal cache."""
-    if not MLX_AVAILABLE:
+    mx = _get_mlx_safe()
+    if mx is None:
         return
 
     try:
@@ -187,9 +199,10 @@ def get_mlx_memory_stats() -> dict:
     Získat aktuální MLX memory statistiky.
 
     Returns:
-        dict s klíči: active_mb, peak_mb, cache_mb (nebo None pokud недоступно)
+        dict s klíči: active_mb, peak_mb, cache_mb (nebo None pokud nedostupno)
     """
-    if not MLX_AVAILABLE:
+    mx = _get_mlx_safe()
+    if mx is None:
         return {
             'available': False,
             'active_mb': None,
@@ -197,7 +210,7 @@ def get_mlx_memory_stats() -> dict:
             'cache_mb': None,
         }
 
-    stats = {'available': True}
+    stats: dict[str, Any] = {'available': True}
 
     try:
         if hasattr(mx.metal, 'get_active_memory'):
@@ -222,7 +235,8 @@ def get_mlx_memory_stats() -> dict:
 
 def reset_metal_peak() -> None:
     """Reset MLX peak memory counter."""
-    if not MLX_AVAILABLE:
+    mx = _get_mlx_safe()
+    if mx is None:
         return
 
     try:
