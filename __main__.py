@@ -2721,19 +2721,24 @@ async def _run_sprint_mode(
         while lifecycle.current_phase == SprintPhase.ACTIVE:
             await asyncio.sleep(1.0)
 
-            # Check windup condition (T-3min remaining)
-            if lifecycle.remaining_time() <= 180.0:
+            # Check windup condition — use lifecycle authority, not local threshold
+            # F183A fix: lifecycle.should_enter_windup() is the single authority for windup
+            # entry. The hardcoded 180.0 check was redundant and used a different threshold
+            # than what the lifecycle manager was configured with (windup_lead_s=180.0).
+            if lifecycle.should_enter_windup():
                 lifecycle.request_windup()
                 break
 
             # Sprint 8UF B.2: Skip pipeline if UMA emergency stopped frontier
             if _sprint_frontier_stopped:
                 await asyncio.sleep(5)
-                # E1-T1: ACTIVE runaway guard — if frontier stopped but >3min remain,
-                # force windup to prevent the continue-loop from running forever.
-                if lifecycle.remaining_time() > 180.0:
-                    logger.warning("[SPRINT] _sprint_frontier_stopped=True with >3min "
-                                   "remaining — forcing windup to prevent runaway")
+                # E1-T1: ACTIVE runaway guard — if frontier stopped but not already
+                # winding down, force windup to prevent the continue-loop from running
+                # forever with no work being done.
+                # F183A fix: use lifecycle.should_enter_windup() instead of hardcoded 180.0
+                if not lifecycle.should_enter_windup():
+                    logger.warning("[SPRINT] _sprint_frontier_stopped=True, not winding down "
+                                   "— forcing windup to prevent runaway")
                     lifecycle.request_windup()
                 break
 

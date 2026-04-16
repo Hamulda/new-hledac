@@ -113,12 +113,14 @@ def _reset_uma_hysteresis_for_testing() -> None:
 # Sprint 8AB: Lightweight telemetry counters (module-level, no class instantiation)
 # F130A: io_only_enter/exit are now transition-based (only on actual transitions),
 # not state-sampled (every sample in a given state).
+# F183C: Removed last_io_only — dual tracking with _io_only_latch causes divergence.
+# The latch is authoritative; prev_io_only is captured from latch BEFORE update
+# for transition detection (no need to store it in telemetry).
 _telemetry = {
     "transition_count": 0,
     "io_only_enter_count": 0,
     "io_only_exit_count": 0,
     "last_state": "ok",
-    "last_io_only": False,  # F130A: tracks previous io_only for transition detection
 }
 
 
@@ -416,6 +418,9 @@ def sample_uma_status() -> UMAStatus:
 
     # Sprint 8AK: Shared hysteresis latch — thread-safe, prevents state thrashing
     # F166F: swap_detected accelerates io_only entry to WARN threshold (6.0 GiB)
+    # F183C: Capture previous latch value BEFORE update for transition detection.
+    with _io_only_latch_lock:
+        prev_io_only = _io_only_latch
     io_only, _ = _update_io_only_latch_with_lock(system_used_gib, swap_detected=swap_detected)
 
     # Update telemetry — F130A: all counters are transition-based, not state-sampled.
@@ -427,16 +432,13 @@ def sample_uma_status() -> UMAStatus:
         _telemetry["transition_count"] += 1
         _telemetry["last_state"] = state
 
-    # F130A: transition-based enter/exit — only fire on actual latched transitions
-    prev_io_only = _telemetry["last_io_only"]
+    # F130A+F183C: transition-based enter/exit — prev captured from latch BEFORE update
     if io_only and not prev_io_only:
         # False → True: io_only was just activated
         _telemetry["io_only_enter_count"] += 1
     elif not io_only and prev_io_only:
         # True → False: io_only was just deactivated
         _telemetry["io_only_exit_count"] += 1
-
-    _telemetry["last_io_only"] = io_only
 
     return UMAStatus(
         rss_gib=rss_gib,

@@ -148,11 +148,12 @@ class UnifiedWebIntelligence:
         self.operation_queue: List[tuple] = []
         self._queue_counter = 0  # Tiebreaker for deterministic ordering
 
-        # Queue bounds (LANDMINE FIX 1: was unbounded — grew without limit)
+        # Queue bounds (DRIFT FIX 1: bounded + _queued_ops sync + no unbounded growth)
         self._MAX_QUEUE = 500
+        self._MAX_QUEUED_OPS = 500  # mirror bound for _queued_ops dict
         self._queued_ops: Dict[str, Tuple[IntelligenceTarget, List[IntelligenceOperationType], IntelligenceResult]] = {}
 
-        # Priority aging for queued operations (LANDMINE FIX 2: aging task was orphaned on cleanup)
+        # Priority aging for queued operations (DRIFT FIX 2: aging task shutdown symmetry)
         self._aging_threshold_seconds = 30  # age after 30 seconds
         self._aging_interval_seconds = 5    # check every 5 seconds
         self._aging_task: Optional[asyncio.Task] = None
@@ -163,10 +164,11 @@ class UnifiedWebIntelligence:
         self._active_tasks: Set[asyncio.Task] = set()  # owned tasks
         self._queued_op_times: Dict[str, float] = {}  # operation_id -> enqueue timestamp
 
-        # Memory budget enforcement (LANDMINE FIX 3: psutil.Process() created at init even if never used)
+        # Memory budget enforcement (DRIFT FIX 3: psutil.Process lazy + NoSuchProcess cache poison)
         self._memory_limit_bytes = 512 * 1024 * 1024  # 512 MB
         self._process: Optional["psutil.Process"] = None  # lazy, created on first memory check
         self._process_initialized: bool = False
+        self._process_dead: bool = False  # True once process is known-dead (avoids repeated syscall)
 
         # Lazy init coordination (LANDMINE FIX 4: race condition on _components_initialized)
         self._init_lock = asyncio.Lock()
@@ -230,19 +232,30 @@ class UnifiedWebIntelligence:
         """Read-only seam: memory pressure state for M1 8GB."""
         try:
             # Lazy init psutil.Process if not yet initialized
-            if psutil is not None and not self._process_initialized:
-                self._process = psutil.Process()
-                self._process_initialized = True
-            rss_mb = self._process.memory_info().rss / 1024 / 1024 if self._process else None
+            if psutil is not None and not self._process_initialized and not self._process_dead:
+                try:
+                    self._process = psutil.Process()
+                    self._process_initialized = True
+                except psutil.NoSuchProcess:
+                    self._process_dead = True
+                    return {'rss_mb': None, 'limit_mb': self._memory_limit_bytes / 1024 / 1024, 'error': 'process_dead'}
+            rss_mb = self._process.memory_info().rss / 1024 / 1024 if (self._process and not self._process_dead) else None
             limit_mb = self._memory_limit_bytes / 1024 / 1024
-            return {
+            result = {
                 'rss_mb': round(rss_mb, 1) if rss_mb else None,
                 'limit_mb': round(limit_mb, 1),
                 'pressure_pct': round(rss_mb / limit_mb * 100, 1) if rss_mb else None,
                 'psutil_available': psutil is not None,
+                'process_dead': self._process_dead,
             }
+            if self._process_dead:
+                result['error'] = 'process_dead'
+            return result
         except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-            return {'rss_mb': None, 'limit_mb': self._memory_limit_bytes / 1024 / 1024, 'error': 'unavailable'}
+            if not self._process_dead:
+                self._process_dead = True
+            return {'rss_mb': None, 'limit_mb': self._memory_limit_bytes / 1024 / 1024,
+                    'error': 'unavailable' if not self._process_dead else 'process_dead'}
 
     @property
     def active_posture(self) -> Dict[str, Any]:
@@ -358,13 +371,18 @@ class UnifiedWebIntelligence:
         # Map priority string to numeric priority (lower = higher priority)
         priority_map = {"low": 3, "medium": 2, "high": 1, "critical": 0}
 
-        # Memory budget enforcement — lazy psutil.Process(), catch permission errors
+        # Memory budget enforcement — lazy psutil.Process() with dead-process cache
         try:
-            if psutil is not None and not self._process_initialized:
-                self._process = psutil.Process()
-                self._process_initialized = True
-            current_rss = self._process.memory_info().rss if self._process else 0
+            if psutil is not None and not self._process_initialized and not self._process_dead:
+                try:
+                    self._process = psutil.Process()
+                    self._process_initialized = True
+                except psutil.NoSuchProcess:
+                    self._process_dead = True
+                    current_rss = 0
+            current_rss = self._process.memory_info().rss if (self._process and not self._process_dead) else 0
         except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            self._process_dead = True
             current_rss = 0  # treat as unknown memory state = don't block
         memory_exceeded = current_rss > self._memory_limit_bytes
 
@@ -372,6 +390,13 @@ class UnifiedWebIntelligence:
         if len(self.operation_queue) >= self._MAX_QUEUE:
             raise RuntimeError(
                 f"web_intelligence queue FULL ({self._MAX_QUEUE}), "
+                f"cannot accept operation {operation_id}"
+            )
+
+        # HARD BOUND: reject if _queued_ops mirror is at limit (prevents unbounded dict growth)
+        if len(self._queued_ops) >= self._MAX_QUEUED_OPS:
+            raise RuntimeError(
+                f"web_intelligence _queued_ops FULL ({self._MAX_QUEUED_OPS}), "
                 f"cannot accept operation {operation_id}"
             )
 
@@ -452,11 +477,14 @@ class UnifiedWebIntelligence:
             return
         _, _, operation_id = heapq.heappop(self.operation_queue)
         if operation_id not in self._queued_ops:
+            # Prune orphan from heap — already popped but not in _queued_ops
             return
         target, op_types, result = self._queued_ops.pop(operation_id)
-        # Bound: _queued_ops stays in sync with operation_queue — stale entries pruned on next dequeue
-        if len(self._queued_ops) > self._MAX_QUEUE * 2:
-            stale = [k for k in self._queued_ops if k not in [oid for _, _, oid in self.operation_queue]]
+        # Proactive stale eviction: keep _queued_ops bounded at all times
+        # Only run when dict is getting large to avoid O(n) on every dequeue
+        if len(self._queued_ops) > self._MAX_QUEUED_OPS // 2:
+            queued_ids = {oid for _, _, oid in self.operation_queue}
+            stale = [k for k in self._queued_ops if k not in queued_ids]
             for k in stale:
                 self._queued_ops.pop(k, None)
                 self._queued_op_times.pop(k, None)

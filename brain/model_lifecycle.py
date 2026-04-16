@@ -124,9 +124,17 @@ def is_emergency_unload_requested() -> bool:
 
 
 def clear_emergency_unload_request() -> None:
-    """Clear emergency unload flag after it has been consumed."""
-    global _emergency_unload_requested
+    """
+    Clear emergency unload flag after it has been consumed.
+
+    F183C FIX: Also reset _EMERGENCY_WAIT_ATTEMPTS counter.
+    Without this reset, the counter keeps incrementing across emergency cycles,
+    causing premature force-clear on M1 8GB after just 5 attempts total
+    (not 5 attempts per emergency cycle).
+    """
+    global _emergency_unload_requested, _EMERGENCY_WAIT_ATTEMPTS
     _emergency_unload_requested = False
+    _EMERGENCY_WAIT_ATTEMPTS = 0
 
 
 def is_safe_to_clear_emergency(engine) -> bool:

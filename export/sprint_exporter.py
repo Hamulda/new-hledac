@@ -48,6 +48,7 @@ Sprint F150P: Finish-layer truth fields — canonical surfaces from scheduler/co
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import pathlib
@@ -195,7 +196,7 @@ async def export_sprint(
     # Fallback: SPRINT_STORE_ROOT.parent/"reports" if report_path is None (write failed)
     # Sprint F150L: also pass branch_value + sprint_trend for enriched seeds
     branch_value = _get_branch_value(eh)
-    sprint_trend = _get_sprint_trend(store, last_n=3)
+    sprint_trend = await _get_sprint_trend(store, last_n=3)
     seeds_path = _generate_next_sprint_seeds(top_nodes, _sprint_id, report_path, pvs, branch_value, sprint_trend)
 
     # Sprint F150K: build sprint_summary for human use
@@ -207,7 +208,7 @@ async def export_sprint(
     sprint_summary = _build_sprint_summary(pvs, seeds_count) if pvs else None
 
     # Sprint F150L: operator brief — derived from all available seams
-    source_leaderboard = _get_source_leaderboard(store, days=7)
+    source_leaderboard = await _get_source_leaderboard(store, days=7)
     # Sprint F150M: correlation from handoff + store fallback (fail-soft)
     correlation = _get_correlation_from_handoff(eh)
 
@@ -1000,31 +1001,79 @@ def _derive_trend_seeds(sprint_trend: list[dict]) -> list[dict[str, Any]]:
     return seeds[:2]  # Hard cap: max 2 trend seeds
 
 
-def _get_sprint_trend(store: Any, last_n: int = 5) -> list[dict]:
+async def _get_sprint_trend(store: Any, last_n: int = 5) -> list[dict]:
     """
-    Sprint F150L: Fail-soft store seam pro sprint trend.
-    Používá existující duckdb_store.get_sprint_trend().
+    Sprint F183D §2: FAIL-SOFT async read seam — sprint trend.
+
+    READ SEAM PRIORITY (truth order):
+      1. async_query_sprint_trend(last_n) — PRIMARY: async DuckDB read
+         REMOVAL CONDITION: store migration to fully-typed async pipeline
+      2. get_sprint_trend(last_n) — COMPAT: sync wrapper fallback (deprecated)
+         REMOVAL CONDITION: all callers use async path
+
+    Both paths return same shape: list[dict] with sprint_id, new_findings, ioc_nodes.
+
+    The sync wrapper is retained as COMPAT fallback for callers that have not
+    yet migrated to async context (e.g., sync report printing paths).
+
+    NOTE: This function is intentionally FAIL-SOFT — returns [] on any error.
+    Sprint trend is a nice-to-have in export output, never a blocker.
     """
     if store is None:
         return []
     try:
+        if hasattr(store, "async_query_sprint_trend"):
+            # PRIMARY: async read seam — preferred for async export context
+            return await store.async_query_sprint_trend(last_n=last_n) or []
+    except Exception:
+        pass
+    # COMPAT FALLBACK: sync wrapper (deprecated — use async path above)
+    try:
         if hasattr(store, "get_sprint_trend"):
-            return store.get_sprint_trend(last_n=last_n) or []
+            # Run sync wrapper in executor to avoid blocking event loop
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None, lambda: store.get_sprint_trend(last_n=last_n) or []
+            )
     except Exception:
         pass
     return []
 
 
-def _get_source_leaderboard(store: Any, days: int = 7) -> list[dict]:
+async def _get_source_leaderboard(store: Any, days: int = 7) -> list[dict]:
     """
-    Sprint F150L: Fail-soft store seam pro source leaderboard.
-    Používá existující duckdb_store.get_source_leaderboard().
+    Sprint F183D §2: FAIL-SOFT async read seam — source leaderboard.
+
+    READ SEAM PRIORITY (truth order):
+      1. async_query_source_leaderboard(days) — PRIMARY: async DuckDB read
+         REMOVAL CONDITION: store migration to fully-typed async pipeline
+      2. get_source_leaderboard(days) — COMPAT: sync wrapper fallback (deprecated)
+         REMOVAL CONDITION: all callers use async path
+
+    Both paths return same shape: list[dict] with source_type, total_findings.
+
+    The sync wrapper is retained as COMPAT fallback for callers that have not
+    yet migrated to async context (e.g., sync report printing paths).
+
+    NOTE: This function is intentionally FAIL-SOFT — returns [] on any error.
+    Source leaderboard is a nice-to-have in export output, never a blocker.
     """
     if store is None:
         return []
     try:
+        if hasattr(store, "async_query_source_leaderboard"):
+            # PRIMARY: async read seam — preferred for async export context
+            return await store.async_query_source_leaderboard(days=days) or []
+    except Exception:
+        pass
+    # COMPAT FALLBACK: sync wrapper (deprecated — use async path above)
+    try:
         if hasattr(store, "get_source_leaderboard"):
-            return store.get_source_leaderboard(days=days) or []
+            # Run sync wrapper in executor to avoid blocking event loop
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None, lambda: store.get_source_leaderboard(days=days) or []
+            )
     except Exception:
         pass
     return []

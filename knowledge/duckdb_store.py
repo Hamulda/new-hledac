@@ -2542,10 +2542,21 @@ class DuckDBShadowStore:
     # Sprint 8RC: sync convenience wrappers (called from SprintScheduler)
     # ------------------------------------------------------------------
 
+    # Sprint F183D §2: These sync wrappers are DEPRECATED.
+    # export_sprint() now calls async_query_sprint_trend() / async_query_source_leaderboard()
+    # directly (primary path). These wrappers remain as COMPAT fallback for:
+    #   - tests/probe_8rc/ (intentional sync test consumers)
+    #   - Any sync-only callers not yet migrated to async context
+    # REMOVAL CONDITION: all callers migrated to async read seams
+
     def get_sprint_trend(self, last_n: int = 10) -> list[dict]:
         """
+        DEPRECATED (Sprint F183D) — use async_query_sprint_trend() instead.
+
         Convenience sync wrapper — returns last N sprints ordered by ts DESC.
         For use in sync contexts (e.g., report printing).
+
+        REMOVAL CONDITION: all callers migrated to async read seams.
         """
         if not self._initialized or self._closed:
             return []
@@ -2557,8 +2568,12 @@ class DuckDBShadowStore:
 
     def get_source_leaderboard(self, days: int = 7) -> list[dict]:
         """
+        DEPRECATED (Sprint F183D) — use async_query_source_leaderboard() instead.
+
         Convenience sync wrapper — returns top sources by hit rate.
         For use in sync contexts (e.g., report printing).
+
+        REMOVAL CONDITION: all callers migrated to async read seams.
         """
         if not self._initialized or self._closed:
             return []

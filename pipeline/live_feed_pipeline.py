@@ -1336,10 +1336,64 @@ _MIN_ARTICLE_FALLBACK_CHARS: int = 250
 _MAX_ARTICLE_FALLBACK_TIMEOUT: float = 8.0
 _MAX_ARTICLE_FALLBACK_KB: int = 150
 
+# F183E: Wayback CDX seam constants
+_WAYBACK_CDX_URL = "https://web.archive.org/cdx/search/cdx"
+_WAYBACK_CDX_MAX_AGE_DAYS = 90  # prefer captures within 90 days
+_WAYBACK_CDX_TIMEOUT = 4.0
+
+
+async def _check_wayback_cdx(entry_url: str, session: Any) -> str | None:
+    """
+    F183E: Check Wayback Machine CDX API for recent capture of entry_url.
+
+    Returns archive URL if recent capture exists (within _WAYBACK_CDX_MAX_AGE_DAYS),
+    otherwise None. Does NOT raise — returns None on any failure.
+
+    CDX API returns: [[url, timestamp, original, mimetype, status, ...], ...]
+    """
+    try:
+        import aiohttp as _aiohttp
+    except Exception:
+        return None
+
+    try:
+        cdx_url = f"{_WAYBACK_CDX_URL}?url={entry_url}&output=json&limit=1&filter=statuscode:200&from={_WAYBACK_CDX_MAX_AGE_DAYS}d"
+        async with asyncio.timeout(_WAYBACK_CDX_TIMEOUT):
+            try:
+                async with session.get(cdx_url, timeout=_aiohttp.ClientTimeout(total=_WAYBACK_CDX_TIMEOUT)) as resp:
+                    if resp.status != 200:
+                        return None
+                    raw = await resp.read()
+            except Exception:
+                return None
+    except Exception:
+        return None
+
+    try:
+        import json as _json
+        entries = _json.loads(raw)
+        if not entries or len(entries) < 2:
+            return None
+        # entries[0] is header, entries[1] is first result [url, timestamp, original, ...]
+        capture_ts = entries[1][1]
+        if not capture_ts:
+            return None
+        # Construct Wayback URL with timestamp
+        archive_url = f"https://web.archive.org/web/{capture_ts}/{entry_url}"
+        return archive_url
+    except Exception:
+        return None
+
+
 
 async def _fetch_article_text(entry_url: str) -> tuple[str, bool]:
     """
     Fetch article body via direct aiohttp GET and strip HTML.
+
+    F183E EXPANSION: Wayback CDX seam — before live fetch, check if archive
+    capture exists and is recent (within 90 days). If so, fetch from archive
+    instead of live URL. This improves source yield when live sources are
+    inaccessible or degraded.
 
     Returns (article_text, success).
     NEVER raises — all exceptions are caught, success=False on any failure.
@@ -1377,10 +1431,14 @@ async def _fetch_article_text(entry_url: str) -> tuple[str, bool]:
     except Exception:
         return ("", False)
 
+    # F183E: Wayback CDX seam — check for recent archive capture first
+    wayback_url = await _check_wayback_cdx(entry_url, session)
+    fetch_url = wayback_url if wayback_url else entry_url
+
     try:
         async with asyncio.timeout(_MAX_ARTICLE_FALLBACK_TIMEOUT):
             try:
-                async with session.get(entry_url, timeout=_aiohttp.ClientTimeout(total=_MAX_ARTICLE_FALLBACK_TIMEOUT)) as resp:
+                async with session.get(fetch_url, timeout=_aiohttp.ClientTimeout(total=_MAX_ARTICLE_FALLBACK_TIMEOUT)) as resp:
                     if resp.status != 200:
                         return ("", False)
                     raw = await resp.read()
@@ -1592,12 +1650,13 @@ async def _entry_to_pattern_findings(
 
     if not hits:
         # F182D: matched_patterns=0 is the canonical post-scan truth.
-        # post_fallback_hits_count is stale here (pre-scan value).
+        # F183E fix: use post_fallback_hits_count (computed from fallback scan),
+        # not matched_patterns (=0 from this empty final scan).
         return (
             [], patterns_configured, matched_patterns, assembled_text_len,
             scan_text, enrichment_phase, article_fallback_used, article_fallback_attempted,
             quality_signal, fallback_decision, assembly_tier,
-            pre_fallback_hits_count, matched_patterns, 0,
+            pre_fallback_hits_count, post_fallback_hits_count, 0,
         )
 
     # Per-entry dedup by (label, pattern, value)

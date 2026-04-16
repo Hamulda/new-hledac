@@ -21,57 +21,74 @@ logger = logging.getLogger(__name__)
 
 
 class CTLogClient:
-    """Certificate Transparency log pivot přes crt.sh JSON API."""
+    """Certificate Transparency log pivot přes crt.sh JSON API.
+
+    NON-HOT-PATH surface — owns its session lifecycle when used standalone.
+    """
 
     _CACHE_TTL = 86400  # 24h
-    _RATE_LIMIT_S = 5.0
+    _RATE_LIMIT_S = 5.0  # per-source rate limit (crt.sh: 1 req / 5s)
 
     def __init__(self, cache_dir: Path) -> None:
         self._cache_dir = cache_dir
         self._last_request: float = 0.0
+        self._lock = asyncio.Lock()  # serialize concurrent pivots to same source
 
     async def pivot_domain(
         self, domain: str, session: "aiohttp.ClientSession"
     ) -> dict:
-        """Hlavní entry point — vrátí CT log findings pro doménu."""
+        """Hlavní entry point — vrátí CT log findings pro doménu.
+
+        Serializes concurrent calls for the same domain via asyncio.Lock to prevent
+        redundant crt.sh requests. Rate-limit guard is per-instance, not per-domain.
+        """
         import aiohttp
         import xxhash
 
         cache_path = self._cache_dir / f"{xxhash.xxh64(domain.encode()).hexdigest()}.json"
 
-        # Cache check
+        # Cache check (read-only, no lock needed)
         if cache_path.exists():
             age = time.time() - cache_path.stat().st_mtime
             if age < self._CACHE_TTL:
                 import orjson
                 return orjson.loads(cache_path.read_bytes())
 
-        # Rate limit
-        elapsed = time.time() - self._last_request
-        if elapsed < self._RATE_LIMIT_S:
-            await asyncio.sleep(self._RATE_LIMIT_S - elapsed)
+        # Serialize concurrent pivots to prevent redundant rate-limited requests
+        async with self._lock:
+            # Double-check cache after acquiring lock (another caller may have populated it)
+            if cache_path.exists():
+                age = time.time() - cache_path.stat().st_mtime
+                if age < self._CACHE_TTL:
+                    import orjson
+                    return orjson.loads(cache_path.read_bytes())
 
-        url = f"https://crt.sh/?q=%.{domain}&output=json"
-        try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                resp.raise_for_status()
-                raw = await resp.json(content_type=None)
-        except Exception as e:
-            logger.warning(f"crt.sh {domain}: {e}")
-            return {
-                "domain": domain,
-                "san_names": [],
-                "cert_count": 0,
-                "issuers": [],
-                "first_cert": 0.0,
-                "last_cert": 0.0,
-            }
-        finally:
-            self._last_request = time.time()
+            # Rate limit
+            elapsed = time.time() - self._last_request
+            if elapsed < self._RATE_LIMIT_S:
+                await asyncio.sleep(self._RATE_LIMIT_S - elapsed)
+
+            url = f"https://crt.sh/?q=%.{domain}&output=json"
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                    resp.raise_for_status()
+                    raw = await resp.json(content_type=None)
+            except Exception as e:
+                logger.warning(f"crt.sh {domain}: {e}")
+                return {
+                    "domain": domain,
+                    "san_names": [],
+                    "cert_count": 0,
+                    "issuers": [],
+                    "first_cert": 0.0,
+                    "last_cert": 0.0,
+                }
+            finally:
+                self._last_request = time.time()
 
         result = self._parse_crt_response(domain, raw)
 
-        # Cache write
+        # Cache write (outside lock — no throttle needed)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         import orjson
         cache_path.write_bytes(orjson.dumps(result))

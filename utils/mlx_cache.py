@@ -303,25 +303,33 @@ def init_mlx_buffers() -> bool:
 
 
 def mlx_cleanup_sync() -> None:
-    """Sync cleanup – vždy v thread executoru."""
+    """
+    Sync cleanup – vždy v thread executoru.
+
+    F183C: Canonical cleanup order (srovnáno s model_manager + model_lifecycle):
+      1. gc.collect() — uvolní Python refs na MLX objekty PRVNÍ
+      2. mx.eval([])  — barrier: vyprázdní GPU queue PŘED clear_cache
+      3. clear_cache() — uvolní Metal cache
+
+    Dřívější pořadí (clear_cache → gc.collect) bylo špatně: Python objekty držely
+    MLX tensory ještě při clear_cache, což mohlo na M1 8GB způsobit brief over-budget.
+    """
     if not MLX_AVAILABLE:
         return
     try:
-        # Vyhodnotí pending operace a synchronizuje GPU
-        _get_mx().eval([])
-        # Vynutí dodatečnou synchronizaci malým tensorem (osvědčený pattern)
-        dummy = _get_mx().zeros((1, 1))
-        _get_mx().eval(dummy)
-        del dummy
+        # Krok 1: Python GC PRVNÍ — uvolní refs na MLX objekty
+        gc.collect()
 
-        # Hlavní API pro uvolnění cache – s fallbackem
+        # Krok 2: mx.eval([]) barrier — vyprázdní GPU queue
+        _get_mx().eval([])
+
+        # Krok 3: clear_cache — uvolní Metal cache
         if hasattr(_get_mx(), 'clear_cache'):
             _get_mx().clear_cache()
         elif hasattr(_get_mx().metal, 'clear_cache'):
             _get_mx().metal.clear_cache()
     except Exception as e:
         logger.debug(f"MLX cleanup non-critical: {e}")
-    gc.collect()
 
 
 def mlx_cleanup_aggressive() -> None:

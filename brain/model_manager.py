@@ -287,9 +287,8 @@ class ModelManager:
         """
         Deterministický fail-fast gate před těžkým model loadem.
 
-        Kontroluje system_used_gib přes evaluate_uma_state().
-        Pokud je stav CRITICAL nebo EMERGENCY, okamžitě raise.
-        NEČEKÁ na lazy evaluation — běží PŘED factory() voláním.
+        F183C FIX: Používá status.state PŘÍMO z sample_uma_status(),
+        ne znovu volá evaluate_uma_state() — předchází redundantnímu přepočtu.
 
         Raises:
             RuntimeError: Pokud je memory pressure příliš vysoký.
@@ -297,7 +296,6 @@ class ModelManager:
         try:
             from hledac.universal.core.resource_governor import (
                 sample_uma_status,
-                evaluate_uma_state,
                 UMA_STATE_CRITICAL,
                 UMA_STATE_EMERGENCY,
             )
@@ -307,14 +305,15 @@ class ModelManager:
 
         try:
             status = sample_uma_status()
-            state = evaluate_uma_state(status.system_used_gib)
-            if state == UMA_STATE_EMERGENCY:
+            # F183C: Use status.state directly — sample_uma_status() already
+            # computed it via evaluate_uma_state(); avoid redundant recomputation.
+            if status.state == UMA_STATE_EMERGENCY:
                 raise RuntimeError(
                     f"[MEMORY ADMISSION] EMERGENCY state ({status.system_used_gib:.2f} GiB) — "
                     f"model load BLOCKED to prevent OOM. "
                     f"Free up memory before retrying."
                 )
-            if state == UMA_STATE_CRITICAL:
+            if status.state == UMA_STATE_CRITICAL:
                 raise RuntimeError(
                     f"[MEMORY ADMISSION] CRITICAL state ({status.system_used_gib:.2f} GiB) — "
                     f"model load BLOCKED to prevent OOM. "
@@ -327,7 +326,9 @@ class ModelManager:
             pass
 
     # FIX 8: RAM pressure guard (SOFT - clears cache only, doesn't block)
-    def _check_memory_pressure(self, threshold_gb: float = 0.8) -> bool:
+    # F183C: threshold aligned with resource_governor WARN boundary (~1.9 GiB available).
+    # Previous 0.8 GiB was too aggressive — cleaned cache too late on M1 8GB.
+    def _check_memory_pressure(self, threshold_gb: float = 1.5) -> bool:
         """Check free RAM, clear MLX cache if below threshold (soft fail)."""
         if not self._psutil_available:
             return False
@@ -336,6 +337,7 @@ class ModelManager:
             if available < threshold_gb:
                 mx = _get_mlx_safe()
                 if MLX_AVAILABLE and mx is not None:
+                    mx.eval([])  # F183C: barrier before clear (matching canonical order)
                     mx.clear_cache()
                 logger.warning(f"[MEMORY] Low RAM: {available:.2f}GB, MLX cache cleared")
                 return True

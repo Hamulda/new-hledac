@@ -171,15 +171,19 @@ class TorTransport(Transport):
             try:
                 pid = int(pid_path.read_text().strip())
                 os.kill(pid, signal.SIGTERM)
-                # Wait max 5s
-                for _ in range(10):
+                # Wait max 10s (was 5s — Tor circuits can take time to close)
+                for _ in range(20):
                     await asyncio.sleep(0.5)
                     try:
                         os.kill(pid, 0)  # check if alive
                     except ProcessLookupError:
                         break
                 else:
-                    os.kill(pid, signal.SIGKILL)
+                    # Force kill only after graceful timeout exhausted
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass  # already dead
             except Exception as e:
                 logger.warning(f"Tor stop: {e}")
             finally:

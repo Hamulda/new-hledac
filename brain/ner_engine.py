@@ -31,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from functools import partial
@@ -1419,6 +1420,173 @@ def build_entity_summary(
     }
 
 
+# ============================================================================
+# Sprint F183F: FeedbackPack — unified compact schema for findings→hypothesis loop
+# ============================================================================
+
+@dataclass
+class FeedbackPack:
+    """
+    Unified compact feedback artifact for findings→entity→hypothesis→semantic loop.
+
+    Combines entity summary + hypothesis pack + semantic pivots into a single
+    bounded, actionable schema consumable by scheduler/windup.
+
+    Field roles (STRICT separation):
+    - entity_summary: Output of build_entity_summary() — top_entities, corroborated,
+      co_occurrence_pivots, entity_takeaway, type_breakdown
+    - hypothesis_pack_as_dict: HypothesisPack serialized as dict (hypotheses,
+      suggested_queries, ioc_follow_ups, source_hints, provenance)
+    - semantic_pivots: List of semantic_pivot results — text/score/source_type
+    - provenance: "heuristic" or "mixed" (never "model" alone)
+
+    Priority order for shortlist: IOC pivots > entity_pair > relationship > entity
+    """
+
+    entity_summary: dict = field(default_factory=dict)
+    hypothesis_pack_as_dict: dict = field(default_factory=dict)
+    semantic_pivots: list = field(default_factory=list)
+    provenance: str = "heuristic"
+
+    def is_empty(self) -> bool:
+        """Check if pack has any actionable content."""
+        return (
+            not self.entity_summary.get("top_entities")
+            and not self.hypothesis_pack_as_dict.get("suggested_queries")
+            and not self.hypothesis_pack_as_dict.get("ioc_follow_ups")
+            and not self.semantic_pivots
+        )
+
+    def actionable_shortlist(self, max_items: int = 5) -> list:
+        """
+        Return compact shortlist for scheduler consumption.
+
+        Prioritizes: IOC pivots > entity_pair > relationship > entity > semantic.
+        Returns max_items items, never blocks, never loads models.
+        """
+        shortlist = []
+        seen_queries = set()
+
+        # Priority order for pivot_type
+        pivot_order = {
+            "ioc": 0, "ioc_lookup": 0, "entity_pair": 1,
+            "relationship": 2, "ioc_entity": 3, "entity": 4,
+            "source": 6, "organization": 7, "temporal": 8, "general": 9,
+        }
+
+        def _add(item):
+            query = item.get("query", "")
+            if query and query not in seen_queries:
+                seen_queries.add(query)
+                item["priority"] = item.get("priority", 0.5)
+                shortlist.append(item)
+
+        # IOC follow-ups (highest priority)
+        for pivot in self.hypothesis_pack_as_dict.get("ioc_follow_ups", []):
+            if len(shortlist) >= max_items:
+                break
+            _add({
+                "action_type": "ioc_pivot",
+                "query": pivot.get("query", ""),
+                "from_ioc": pivot.get("from", ""),
+                "to_field": pivot.get("to", ""),
+                "rationale": pivot.get("rationale", "IOC pivot"),
+                "priority": pivot.get("priority", 0.9),
+                "pivot_type": "ioc",
+            })
+
+        # Entity-pair queries
+        for q in self.hypothesis_pack_as_dict.get("suggested_queries", []):
+            if len(shortlist) >= max_items:
+                break
+            pt = q.get("pivot_type", "general")
+            if pt in ("entity_pair", "relationship", "entity"):
+                _add({
+                    "action_type": q.get("action_type", "query"),
+                    "query": q.get("query", ""),
+                    "rationale": q.get("rationale", ""),
+                    "priority": q.get("priority", 0.5),
+                    "pivot_type": pt,
+                })
+
+        # Semantic pivots (lowest priority)
+        for piv in self.semantic_pivots:
+            if len(shortlist) >= max_items:
+                break
+            _add({
+                "action_type": "semantic_pivot",
+                "query": piv.get("text", "")[:200],
+                "rationale": f"semantic similarity {piv.get('score', 0):.2f}",
+                "priority": piv.get("score", 0.3),
+                "pivot_type": "semantic",
+            })
+
+        # Sort by priority descending
+        shortlist.sort(key=lambda x: x.get("priority", 0), reverse=True)
+        return shortlist[:max_items]
+
+
+def feedback_compact(
+    findings: list,
+    context: dict | None = None,
+) -> FeedbackPack:
+    """
+    Build FeedbackPack from findings — unified entry point for feedback loop.
+
+    Combines:
+    1. build_entity_summary(findings) → entity_summary
+    2. HypothesisEngine().build_hypothesis_pack(findings, context) → hypothesis_pack_as_dict
+    3. semantic_pivots left empty (filled by caller if semantic store available)
+
+    Args:
+        findings: List of finding dicts with 'text', optional 'source', 'url'
+        context: Optional context for hypothesis generation
+
+    Returns:
+        FeedbackPack with all fields bounded and populated
+    """
+    if not findings:
+        return FeedbackPack(
+            entity_summary={},
+            hypothesis_pack_as_dict={},
+            semantic_pivots=[],
+            provenance="heuristic",
+        )
+
+    # Step 1: Entity summary (already bounded in ner_engine)
+    entity_summary = build_entity_summary(findings, max_entities=20)
+
+    # Step 2: Hypothesis pack (heuristic path, _evidence not needed)
+    # Extract texts from findings (hypothesis_engine expects List[str])
+    finding_texts = [f.get("text", "") if isinstance(f, dict) else str(f) for f in findings]
+
+    from hledac.universal.brain.hypothesis_engine import HypothesisEngine
+    engine = HypothesisEngine.__new__(HypothesisEngine)
+    engine._hypotheses = {}
+
+    # Build pack with context from entity_summary
+    enriched_context = context.copy() if context else {}
+    if not enriched_context.get("known_entities"):
+        top_vals = [e["value"] for e in entity_summary.get("top_entities", [])[:20]]
+        enriched_context["known_entities"] = set(top_vals)
+
+    pack = engine.build_hypothesis_pack(finding_texts, enriched_context)
+    hypothesis_pack_as_dict = {
+        "hypotheses": pack.hypotheses,
+        "suggested_queries": pack.suggested_queries,
+        "ioc_follow_ups": pack.ioc_follow_ups,
+        "source_hints": pack.source_hints,
+        "provenance": pack.provenance,
+    }
+
+    return FeedbackPack(
+        entity_summary=entity_summary,
+        hypothesis_pack_as_dict=hypothesis_pack_as_dict,
+        semantic_pivots=[],  # Filled by caller if semantic store available
+        provenance="mixed" if pack.provenance == "model-assisted" else "heuristic",
+    )
+
+
 __all__ = [
     "extract_iocs_from_text",
     "_IOC_PATTERNS",
@@ -1433,4 +1601,7 @@ __all__ = [
     "build_entity_cooccurrence_map",
     # F150J condensed entity summary
     "build_entity_summary",
+    # F183F feedback loop
+    "FeedbackPack",
+    "feedback_compact",
 ]
