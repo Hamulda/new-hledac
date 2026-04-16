@@ -112,13 +112,15 @@ def run_sprint_import_test() -> bool:
     log.info("Testuji importy (canonical runtime path)...")
 
     # Canonical runtime modules — these form the production path
+    # NOTE: memory_watchdog is internal runtime component, not canonical smoke-test surface
+    # NOTE: stealth_crawler is intelligence layer, not canonical sprint path
     modules = [
         "hledac.universal",
         "hledac.universal.core.__main__",          # CANONICAL sprint owner
         "hledac.universal.runtime.sprint_lifecycle",
         "hledac.universal.runtime.sprint_scheduler",  # CANONICAL orchestrator
-        "hledac.universal.runtime.memory_watchdog",
-        "hledac.universal.intelligence.stealth_crawler",
+        "hledac.universal.runtime.shadow_inputs",    # DIAGNOSTIC scaffold (read-only)
+        "hledac.universal.runtime.shadow_pre_decision",  # DIAGNOSTIC scaffold (read-only)
     ]
 
     errors = []

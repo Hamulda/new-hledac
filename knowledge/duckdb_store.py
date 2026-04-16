@@ -1305,9 +1305,20 @@ class DuckDBShadowStore:
             return False
 
     def _sync_query_findings(self, limit: int) -> List[Dict[str, Any]]:
-        """Sync query — MUST be called on the worker thread."""
+        """Sync query — MUST be called on the worker thread. Uses persistent _file_conn."""
         try:
-            if self._db_path:
+            if self._db_path and self._file_conn is not None:
+                self._prewarm_file_conn()
+                result = self._file_conn.execute(
+                    """
+                    SELECT id, query, source_type, confidence, ts, provenance_json
+                    FROM shadow_findings
+                    ORDER BY ts DESC
+                    LIMIT ?
+                    """,
+                    [limit],
+                ).fetchall()
+            elif self._db_path:
                 duckdb = _get_duckdb()
                 conn = duckdb.connect(str(self._db_path))
                 result = conn.execute(
@@ -1414,9 +1425,21 @@ class DuckDBShadowStore:
             return False
 
     def _sync_query_sprint_trend(self, last_n: int) -> list[dict]:
-        """Sync query — MUST be called on the worker thread."""
+        """Sync query — MUST be called on the worker thread. Uses persistent _file_conn."""
         try:
-            if self._db_path:
+            if self._db_path and self._file_conn is not None:
+                self._prewarm_file_conn()
+                result = self._file_conn.execute(
+                    """
+                    SELECT sprint_id, ts, new_findings, ioc_nodes,
+                           findings_per_min, synthesis_success, uma_peak_gib
+                    FROM sprint_delta
+                    ORDER BY ts DESC
+                    LIMIT ?
+                    """,
+                    [last_n],
+                ).fetchall()
+            elif self._db_path:
                 duckdb = _get_duckdb()
                 conn = duckdb.connect(str(self._db_path))
                 result = conn.execute(
@@ -1455,9 +1478,24 @@ class DuckDBShadowStore:
             return []
 
     def _sync_query_source_leaderboard(self, since_ts: float) -> list[dict]:
-        """Sync query — MUST be called on the worker thread."""
+        """Sync query — MUST be called on the worker thread. Uses persistent _file_conn."""
         try:
-            if self._db_path:
+            if self._db_path and self._file_conn is not None:
+                self._prewarm_file_conn()
+                result = self._file_conn.execute(
+                    """
+                    SELECT source_type,
+                           SUM(findings_count) as total_findings,
+                           AVG(hit_rate) as avg_hit_rate,
+                           COUNT(*) as sprint_appearances
+                    FROM source_hit_log
+                    WHERE ts > ?
+                    GROUP BY source_type
+                    ORDER BY total_findings DESC
+                    """,
+                    [since_ts],
+                ).fetchall()
+            elif self._db_path:
                 duckdb = _get_duckdb()
                 conn = duckdb.connect(str(self._db_path))
                 result = conn.execute(

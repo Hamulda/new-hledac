@@ -16,7 +16,7 @@ from typing import Final
 import msgspec
 
 from hledac.universal.network.session_runtime import async_get_aiohttp_session
-from hledac.universal.patterns.pattern_matcher import match_text, configure_patterns, get_default_bootstrap_patterns
+from hledac.universal.patterns.pattern_matcher import match_text
 
 # ---------------------------------------------------------------------------
 # Public API — single entry point
@@ -607,8 +607,9 @@ def _sync_process_html(html: str) -> tuple[str, list]:
     Runs in CPU_EXECUTOR thread pool — never blocks the async event loop.
     Fail-safe: malformed HTML returns empty text, never raises.
     """
-    # Bootstrap patterns on first use (idempotent, thread-safe)
-    configure_patterns(get_default_bootstrap_patterns())
+    # Note: PatternMatcher is bootstrapped once at startup via
+    # configure_default_bootstrap_patterns_if_empty() in pattern_matcher.py.
+    # Re-configuring on every call wastes CPU — removed per F184B.
 
     # markdownify with plaintext fallback
     try:

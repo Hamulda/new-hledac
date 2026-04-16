@@ -49,7 +49,7 @@ import hashlib
 import logging
 import re
 import time
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -60,6 +60,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# F184F: MAX_CACHE_SIZE — hard upper bound na in-memory response cache
+# Při překročení: LRU eviction (OrderedDict oldest-first removal to MAX_CACHE_SIZE // 2)
+MAX_CACHE_SIZE = 1000
 
 # Optional imports for enhanced functionality
 try:
@@ -290,8 +294,8 @@ class BlockchainForensics:
         self.cache_ttl = cache_ttl_seconds
         self.max_concurrent = max_concurrent_requests
 
-        # In-memory cache
-        self._cache: Dict[str, APIResponse] = {}
+        # In-memory cache — F184F: OrderedDict pro LRU eviction, MAX_CACHE_SIZE bounded
+        self._cache: OrderedDict[str, APIResponse] = OrderedDict()
         self._cache_lock = asyncio.Lock()
 
         # HTTP client (initialized lazily)
@@ -325,11 +329,13 @@ class BlockchainForensics:
         *args,
         **kwargs
     ) -> Any:
-        """Make a cached API request."""
+        """Make a cached API request. F184F: LRU eviction when cache exceeds MAX_CACHE_SIZE."""
         async with self._cache_lock:
             if cache_key in self._cache:
                 cached = self._cache[cache_key]
                 if datetime.now() < cached.expires_at:
+                    # F184F: LRU — move to end (most recently used)
+                    self._cache.move_to_end(cache_key)
                     logger.debug(f"Cache hit: {cache_key}")
                     return cached.data
                 else:
@@ -338,13 +344,22 @@ class BlockchainForensics:
         # Fetch fresh data
         data = await fetch_func(*args, **kwargs)
 
-        # Cache the result
+        # Cache the result with size guard
         async with self._cache_lock:
+            # F184F: LRU eviction — trim oldest half when at capacity
+            if len(self._cache) >= MAX_CACHE_SIZE:
+                evict_count = MAX_CACHE_SIZE // 2
+                for _ in range(evict_count):
+                    self._cache.popitem(last=False)
+                logger.debug(f"[F184F] Cache evicted {evict_count} entries (size limit {MAX_CACHE_SIZE})")
+
             self._cache[cache_key] = APIResponse(
                 data=data,
                 timestamp=datetime.now(),
                 expires_at=datetime.now() + timedelta(seconds=self.cache_ttl),
             )
+            # F184F: LRU — mark as most recently used
+            self._cache.move_to_end(cache_key)
 
         return data
 

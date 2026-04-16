@@ -33,8 +33,14 @@ PROMOTION ELIGIBILITY: NO
   - Žádné production call sites
   - Reranker je pure placeholder — "Zde by se načetly váhy z disku" (komentář v kódu)
   - _fetch_for_prefetch vrací {'success': False, 'reason': 'not_implemented'}
-  - Bandit arms unbounded = memory leak na M1 8GB při dlouhém běhu
+  - Bandit arms BOUNDED na MAX_BANDIT_ARMS=512 — F184F fix (původně unbounded)
   - Adaptivní limity Stage A (1.5ms budget) jsou příliš agresivní pro M1 MLX overhead
+
+CONTAINMENT HARDENING (F184F):
+  - MAX_BANDIT_ARMS = 512 — hard upper bound na bandit arm count
+  - při překročení: nejstarší arm (FIFO) odstraněn, nový přidán
+  - _id_to_url list BOUNDED na MAX_URL_MAP (původně rostl bez limitu)
+  - žádné unbounded memory growth na M1 8GB
 
 SECURITY: Žádná.
 STEALTH: Prefetch generuje síťový traffic — žádná stealth vrstva.
@@ -67,6 +73,11 @@ RERANKER_DIM = 1 + 4 + 1 + BANDIT_DIM                 # rank_norm(1) + type_emb(
 
 # Priority constant for prefetch (lower than research)
 PRIORITY_PREFETCH = 9
+
+# F184F: MAX_BANDIT_ARMS — hard upper bound na contextual bandit arms
+# Původně unbounded: 10k unique domains → unbounded dict na M1 8GB
+# Fix: při překročení limitu — nejstarší arm odstraněn (FIFO eviction)
+MAX_BANDIT_ARMS = 512
 
 
 class PrefetchOracle:
@@ -369,9 +380,17 @@ class PrefetchOracle:
         """
         Spočítá UCB skóre pro daný kontext.
         Pokud rameno ještě neexistuje, inicializuje ho s A_inv = (1/λ)I, b=0.
+
+        F184F: bounded arm creation — při překročení MAX_BANDIT_ARMS
+        je nejstarší arm (FIFO) odstraněn před vytvořením nového.
         """
         x64 = x.astype(np.float64, copy=False)
         if arm_id not in self.bandit_arms:
+            # F184F: bounded arm creation
+            if len(self.bandit_arms) >= MAX_BANDIT_ARMS:
+                oldest_arm = next(iter(self.bandit_arms))
+                del self.bandit_arms[oldest_arm]
+                logger.debug(f"[F184F] bandit_arms evicting oldest arm: {oldest_arm} (MAX={MAX_BANDIT_ARMS})")
             d = len(x64)
             self.bandit_arms[arm_id] = {
                 'A': np.eye(d, dtype=np.float64) * self.lambda_prior,
@@ -388,9 +407,19 @@ class PrefetchOracle:
         return mean + self.alpha * np.sqrt(max(var, 0))
 
     def _update_bandit(self, arm_id: str, x: np.ndarray, reward: float):
-        """LinUCB update pomocí Sherman–Morrison (levnější)."""
+        """
+        LinUCB update pomocí Sherman–Morrison (levnější).
+
+        F184F: bounded arm creation — konzistentní s _compute_ucb.
+        Pokud arm_id neexistuje a jsme na limitu, evict oldest first.
+        """
         x64 = x.astype(np.float64, copy=False)
         if arm_id not in self.bandit_arms:
+            # F184F: bounded arm creation
+            if len(self.bandit_arms) >= MAX_BANDIT_ARMS:
+                oldest_arm = next(iter(self.bandit_arms))
+                del self.bandit_arms[oldest_arm]
+                logger.debug(f"[F184F] bandit_arms evicting oldest arm: {oldest_arm} (MAX={MAX_BANDIT_ARMS})")
             d = len(x64)
             self.bandit_arms[arm_id] = {
                 'A': np.eye(d, dtype=np.float64) * self.lambda_prior,
@@ -457,6 +486,17 @@ class PrefetchOracle:
 
     # ========= Mapování node_id ↔ url =========
     def register_node_url(self, node_id: int, url: str):
+        """
+        Registruje node_id → url mapping.
+
+        F184F: _id_to_url list BOUNDED na MAX_URL_MAP.
+        Pokud node_id přesáhne limit, registrace je no-op (fail-safe).
+        """
+        # F184F: hard bound na celkový počet registrovaných URL
+        if len(self._url_to_id) >= self._max_url_map:
+            logger.debug(f"[F184F] register_node_url: at max ({self._max_url_map}), skipping {url}")
+            return
+        # Resize _id_to_url as needed
         while len(self._id_to_url) <= node_id:
             self._id_to_url.append(None)
         self._id_to_url[node_id] = url

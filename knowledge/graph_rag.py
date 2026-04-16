@@ -32,6 +32,7 @@ Extended from evidence_network_analyzer.py comments:
 import asyncio
 import concurrent.futures
 import logging
+import re
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -1577,7 +1578,6 @@ class GraphRAGOrchestrator:
             entities.add(node.content.lower().strip())
 
         # Simple pattern: capitalized words (potential proper nouns)
-        import re
         capitalized = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', content)
         for entity in capitalized:
             entities.add(entity.lower().strip())
@@ -1797,7 +1797,7 @@ class GraphRAGOrchestrator:
 
             # Simple claim extraction: look for (entity, relation, value) patterns
             # Pattern: "X is Y", "X has Y", "X located_in Y", etc.
-            import re
+            # Note: 're' module already imported at file level
 
             # Common relation patterns
             relation_patterns = [
@@ -2271,7 +2271,7 @@ class GraphRAGOrchestrator:
         Returns:
             Tuple of (subject, predicate, object) or None
         """
-        import re
+        # Note: 're' module already imported at file level
 
         content_lower = content.lower().strip()
 

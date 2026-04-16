@@ -157,6 +157,19 @@ class _LifecycleAdapter:
                 return str(v.name if hasattr(v, "name") else v)
         return "UNKNOWN"
 
+    # ── mark_warmup_done ─────────────────────────────────────────────────
+    # F184A: Canonical public API for WARMUP→ACTIVE transition.
+    # F184A: Replaces direct adapter._lc.mark_warmup_done() bypass in run().
+
+    def mark_warmup_done(self) -> None:
+        """runtime: mark_warmup_done() — transitions WARMUP→ACTIVE."""
+        lc = self._lc
+        if hasattr(lc, "mark_warmup_done"):
+            lc.mark_warmup_done()
+        elif hasattr(lc, "transition_to"):
+            from hledac.universal.runtime.sprint_lifecycle import SprintPhase
+            lc.transition_to(SprintPhase.ACTIVE)
+
     # ── recommended_tool_mode ────────────────────────────────────────────
 
     def recommended_tool_mode(self, now_monotonic: Optional[float] = None) -> str:
@@ -760,8 +773,8 @@ class SprintScheduler:
         phase_str = str(phase)
         if phase_str == "SprintPhase.WARMUP" or phase_str.endswith(".WARMUP"):
             try:
-                # Sprint F350D: Canonical public API via adapter — no private _lc bypass
-                adapter._lc.mark_warmup_done()
+                # F184A: Canonical public API via adapter.mark_warmup_done() — no private _lc bypass
+                adapter.mark_warmup_done()
             except Exception:
                 pass  # Let scheduler handle - will likely be stuck but won't crash
 

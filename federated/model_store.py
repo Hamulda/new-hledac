@@ -9,8 +9,15 @@ ALE samotný federated learning workflow v tomto projektu NENÍ IMPLEMENTOVÁN.
 STATUS: DORMANT — není aktivní federated learning koordinace
 M1 8GB MEMORY CEILING: MAX_PAYLOAD_BYTES = 256KB per model write
   - 100MB LMDB map_size
-  - 2x ThreadPoolExecutor workers
+  - 2x ThreadPoolExecutor workers (LAZY INIT — F184F fix)
   - Model váhy se serializují přes numpy hex → float16 → float32 roundtrip
+  - LMDB env OTEVŘEN LAZY — F184F fix (původně v __init__)
+
+CONTAINMENT HARDENING (F184F):
+  - LMDB env: lazy open — otevřen při prvním put/get, ne při __init__
+  - ThreadPoolExecutor: lazy init — vytvořen při prvním async operaci
+  - close() je IDEMPOTENT — _closed flag zamezuje dvojímu zavření
+
 ALLOWED PURPOSE: LMDB persistence layer pro model checkpointing (donor only)
 PROMOTION ELIGIBILITY: NO — žádný FL coordinator neexistuje, rl/marl_coordinator.py je DORMANT
 
@@ -59,7 +66,13 @@ def _try_decrypt(data: bytes, bucket_key: bytes, associated_data: bytes) -> byte
 
 
 class ModelStore:
-    """LMDB-backed store pro modely a klíče."""
+    """
+    LMDB-backed store pro modely a klíče.
+
+    F184F: LMDB env a ThreadPoolExecutor jsou LAZY INICIALIZOVÁNY.
+    Žádné otevření DB při importu — pouze při prvním skutečném put/get.
+    close() je IDEMPOTENT — lze volat vícekrát bez chyby.
+    """
 
     def __init__(self, path: Optional[str] = None):
         from hledac.universal.paths import DB_ROOT
@@ -68,10 +81,27 @@ class ModelStore:
         else:
             self.path = Path(path).expanduser()
         self.path.mkdir(parents=True, exist_ok=True)
-        # Sprint 2B: use env-driven map_size via paths helper
-        from hledac.universal.paths import open_lmdb
-        self.env = open_lmdb(self.path, map_size=1024 * 1024 * 100)  # 100MB
-        self._executor = ThreadPoolExecutor(max_workers=2)
+        # F184F: lazy init flags — env a executor se otevřou při prvním použití
+        self._env = None
+        self._executor = None
+        self._closed = False  # F184F: idempotent close guard
+
+    def _ensure_env(self):
+        """Lazy LMDB open — voláno při prvním skutečném přístupu k datům."""
+        if self._closed:
+            raise RuntimeError("ModelStore: already closed")
+        if self._env is None:
+            from hledac.universal.paths import open_lmdb
+            self._env = open_lmdb(self.path, map_size=1024 * 1024 * 100)  # 100MB
+        return self._env
+
+    def _ensure_executor(self):
+        """Lazy ThreadPoolExecutor init — voláno při prvním async operaci."""
+        if self._closed:
+            raise RuntimeError("ModelStore: already closed")
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=2)
+        return self._executor
 
     def put_model(self, round_num: int, weights: Dict[str, np.ndarray]):
         """Uloží modelové váhy."""
@@ -87,13 +117,15 @@ class ModelStore:
         serialized = orjson.dumps(payload)
         if len(serialized) > MAX_PAYLOAD_BYTES:
             raise ValueError(f"Payload too large: {len(serialized)} > {MAX_PAYLOAD_BYTES}")
-        with self.env.begin(write=True) as txn:
+        # F184F: lazy env open
+        with self._ensure_env().begin(write=True) as txn:
             txn.put(key, serialized)
 
     def get_model(self, round_num: int) -> Optional[Dict[str, np.ndarray]]:
         """Načte modelové váhy."""
         key = f"model:{round_num}".encode()
-        with self.env.begin() as txn:
+        # F184F: lazy env open
+        with self._ensure_env().begin() as txn:
             data = txn.get(key)
         if not data:
             return None
@@ -108,13 +140,15 @@ class ModelStore:
     def put_trusted_key(self, node_id: str, public_key: bytes):
         """Uloží důvěryhodný veřejný klíč."""
         key = f"trusted_key:{node_id}".encode()
-        with self.env.begin(write=True) as txn:
+        # F184F: lazy env open
+        with self._ensure_env().begin(write=True) as txn:
             txn.put(key, public_key)
 
     def get_trusted_key(self, node_id: str) -> Optional[bytes]:
         """Načte důvěryhodný veřejný klíč."""
         key = f"trusted_key:{node_id}".encode()
-        with self.env.begin() as txn:
+        # F184F: lazy env open
+        with self._ensure_env().begin() as txn:
             return txn.get(key)
 
     # Async wrappers - additive API from model_store_v2.bak
@@ -143,13 +177,13 @@ class ModelStore:
         if encrypted and bucket_key:
             plaintext = _try_encrypt(plaintext, bucket_key, key.encode())
 
-        # Store via executor
+        # Store via executor — F184F: lazy executor init
         def _put():
-            with self.env.begin(write=True) as txn:
+            with self._ensure_env().begin(write=True) as txn:
                 txn.put(key.encode(), plaintext)
 
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(self._executor, _put)
+        await loop.run_in_executor(self._ensure_executor(), _put)
 
     async def async_load_model(self, key: str, encrypted: bool = False,
                                bucket_key: Optional[bytes] = None) -> Optional[Dict[str, np.ndarray]]:
@@ -165,11 +199,11 @@ class ModelStore:
             Model weights dict or None if not found
         """
         def _get():
-            with self.env.begin() as txn:
+            with self._ensure_env().begin() as txn:
                 return txn.get(key.encode())
 
         loop = asyncio.get_running_loop()
-        data = await loop.run_in_executor(self._executor, _get)
+        data = await loop.run_in_executor(self._ensure_executor(), _get)
 
         if data is None:
             return None
@@ -187,6 +221,21 @@ class ModelStore:
         return result
 
     def close(self):
-        """Zavře databázi."""
-        self._executor.shutdown(wait=False)
-        self.env.close()
+        """
+        Zavře databázi.
+
+        F184F: IDEMPOTENT — lze volat vícekrát bez chyby.
+        _closed flag zamezuje dvojímu zavření env i executor.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        if self._executor is not None:
+            self._executor.shutdown(wait=False)
+            self._executor = None
+        if self._env is not None:
+            try:
+                self._env.close()
+            except Exception:
+                pass
+            self._env = None

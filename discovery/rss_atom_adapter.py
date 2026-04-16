@@ -164,7 +164,7 @@ class MergedFeedSource(msgspec.Struct, frozen=True, gc=False):
 # ---------------------------------------------------------------------------
 
 _SOURCE: str = "rss_atom"
-_MAX_ENTRIES_HARD: int = 100
+_MAX_ENTRIES_HARD: int = 200  # F184B: 100→200: high-signal OSINT feeds need more headroom
 _XML_ENTITY_RE: re.Pattern[str] = re.compile(
     r"<!ENTITY|<!DOCTYPE", re.IGNORECASE
 )
@@ -1086,7 +1086,7 @@ def _map_fetch_result_to_source_accessibility(result: "FetchResult") -> str | No
 
 async def async_fetch_feed_entries(
     feed_url: str,
-    max_entries: int = 25,  # F150H: 20→25: more signal per fetch without extra network cost
+    max_entries: int = 50,  # F184B: 25→50: OSINT feeds have 50-500 entries; capture more signal per fetch
     timeout_s: float = 35.0,
     max_bytes: int = 2_000_000,
 ) -> FeedBatchResult:

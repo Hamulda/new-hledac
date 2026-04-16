@@ -2089,7 +2089,7 @@ def preview_dispatch_parity(
 # =============================================================================
 
 if TYPE_CHECKING:
-    from typing import Any
+    from typing import Any, Dict
     from .shadow_parity import ParityArtifact
     from .shadow_inputs import ProviderRuntimeFactsBundle
     from ..tool_registry import Tool

@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 _TABLE_NAME = "findings_v1"
 _EMBED_DIM = 384
 _MAX_TEXT_LEN = 512  # bge-small max 512 tokens
+_MAX_PENDING = 10_000  # Bounded pending buffer (M1 8GB safety)
 
 
 class SemanticStore:
@@ -124,9 +125,15 @@ class SemanticStore:
         Buffer a finding for batch embed — ŽÁDNÉ I/O.
 
         Truncates text to _MAX_TEXT_LEN chars (bge-small max 512 tokens).
+        Bounded: MAX_PENDING cap prevents unbounded growth.
         """
         if not text.strip():
             return
+        # Enforce bounded pending buffer (M1 8GB safety)
+        if len(self._pending_texts) >= _MAX_PENDING:
+            logger.debug("SemanticStore: pending buffer full, dropping oldest")
+            self._pending_texts.pop(0)
+            self._pending_meta.pop(0)
         self._pending_texts.append(text[:_MAX_TEXT_LEN])
         self._pending_meta.append(
             {

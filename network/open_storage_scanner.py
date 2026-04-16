@@ -1,9 +1,13 @@
 """Open Storage Scanner – discovers exposed S3, Firebase, Elasticsearch, Mongo buckets."""
-import asyncio
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, TYPE_CHECKING
+
+from hledac.universal.network.session_runtime import async_get_aiohttp_session
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    import aiohttp
 
 # Try to import aiohttp with fail-safe
 try:
@@ -18,7 +22,8 @@ class _OpenStorageScanner:
     """Scans for exposed cloud storage buckets."""
 
     MAX_GUESSES_PER_DOMAIN = 15
-    TIMEOUT_SECONDS = 5
+    # F184E: use session_runtime constant for connect timeout
+    _CONNECT_TIMEOUT_S: float = 10.0
 
     def _generate_guesses(self, domain: str) -> List[str]:
         """Generate a list of potential bucket URLs (only external services)."""
@@ -56,22 +61,25 @@ class _OpenStorageScanner:
         results = []
         guesses = self._generate_guesses(domain)
 
-        async with aiohttp.ClientSession() as session:
-            for url in guesses:
-                try:
-                    async with session.head(url, timeout=aiohttp.ClientTimeout(total=self.TIMEOUT_SECONDS)) as resp:
-                        if resp.status == 200:
-                            # Check content-type or headers to confirm it's a bucket listing
-                            content_type = resp.headers.get('Content-Type', '')
-                            if 'xml' in content_type or 'json' in content_type or 'html' in content_type:
-                                results.append({
-                                    'url': url,
-                                    'status': resp.status,
-                                    'type': self._classify_bucket(url),
-                                    'headers': dict(resp.headers)
-                                })
-                except Exception:
-                    continue
+        session = await async_get_aiohttp_session()
+        for url in guesses:
+            try:
+                async with session.head(
+                    url,
+                    timeout=aiohttp.ClientTimeout(connect=self._CONNECT_TIMEOUT_S, sock_read=5.0),
+                ) as resp:
+                    if resp.status == 200:
+                        # Check content-type or headers to confirm it's a bucket listing
+                        content_type = resp.headers.get('Content-Type', '')
+                        if 'xml' in content_type or 'json' in content_type or 'html' in content_type:
+                            results.append({
+                                'url': url,
+                                'status': resp.status,
+                                'type': self._classify_bucket(url),
+                                'headers': dict(resp.headers)
+                            })
+            except Exception:
+                continue
         return results
 
     def _classify_bucket(self, url: str) -> str:
