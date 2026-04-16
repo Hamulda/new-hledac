@@ -6,6 +6,8 @@ import sqlite3
 from pathlib import Path
 from typing import List, Optional, Set
 
+from hledac.universal.network.session_runtime import async_get_aiohttp_session
+
 logger = logging.getLogger(__name__)
 
 # Canonical timeout constants for CT scan — use with asyncio.timeout()
@@ -16,6 +18,7 @@ try:
     import aiohttp
     AIOHTTP_AVAILABLE = True
 except ImportError:
+    aiohttp = None
     AIOHTTP_AVAILABLE = False
     logger.warning("[CT] aiohttp not installed, external CT scanning disabled")
 
@@ -98,8 +101,9 @@ class _CTLogScanner:
             if async_session is not None:
                 data = await _fetch_with_session(async_session)
             else:
-                async with _aiohttp.ClientSession() as session:
-                    data = await _fetch_with_session(session)
+                # F185D: use shared session instead of per-call session creation
+                shared_session = await async_get_aiohttp_session()
+                data = await _fetch_with_session(shared_session)
 
             # Parse subdomains
             subdomains: Set[str] = set()

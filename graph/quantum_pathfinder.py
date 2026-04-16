@@ -827,9 +827,21 @@ class QuantumInspiredPathFinder:
         finally:
             # Always cleanup after pathfinding
             gc.collect()
-            if self._mlx_available and _get_mlx() is not None:
-                mx.eval([])
-                mx.clear_cache()
+            # F185C: use _get_mlx() lazy loader instead of bare mx reference
+            if self._mlx_available:
+                mx_mod = _get_mlx()
+                if mx_mod is not None:
+                    try:
+                        mx_mod.eval([])
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(mx_mod.metal, 'clear_cache'):
+                            mx_mod.metal.clear_cache()
+                        elif hasattr(mx_mod, 'clear_cache'):
+                            mx_mod.clear_cache()
+                    except Exception:
+                        pass
             gc.collect()
 
     def _extract_paths(

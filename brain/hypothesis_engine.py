@@ -2025,6 +2025,17 @@ class HypothesisPack:
 
         return shortlist
 
+    @property
+    def operator_shortlist(self) -> List[Dict[str, Any]]:
+        """
+        Bounded operator shortlist (max 3 items) for scheduler consumption.
+
+        Alias for actionable_shortlist(max_items=3) — exists because
+        sprint_scheduler.py accesses this as a field via getattr().
+        The 3-item cap matches CorrelationResult.operator_shortlist cap.
+        """
+        return self.actionable_shortlist(max_items=3)
+
 
 class HypothesisEngine:
     """

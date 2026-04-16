@@ -75,10 +75,12 @@ def clear_mlx_cache() -> bool:
         logger.debug(f"mx.eval([]) failed: {e}")
 
     try:
+        # F185C: metal.clear_cache is the canonical MLX API; check it FIRST
         metal = getattr(mx_core, "metal", None)
         if metal is not None and hasattr(metal, "clear_cache"):
             metal.clear_cache()
         elif hasattr(mx_core, "clear_cache"):
+            # Fallback to top-level clear_cache (for older MLX versions)
             mx_core.clear_cache()
         return True
     except Exception as e:

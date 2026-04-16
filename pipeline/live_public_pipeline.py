@@ -1436,25 +1436,27 @@ async def async_run_live_public_pipeline(
     # Read fallback_triggered from discovery_result
     fallback_triggered: str | None = getattr(discovery_result, "fallback_triggered", None)
 
-    # public_discovery_fallback_state: None | primary_failed_fallback_succeeded | primary_failed_fallback_failed | no_fallback_needed
-    if fallback_triggered == "primary_backend_failed_fallback_succeeded":
-        public_discovery_fallback_state = "primary_failed_fallback_succeeded"
-    elif fallback_triggered == "primary_backend_failed_fallback_failed":
-        public_discovery_fallback_state = "primary_failed_fallback_failed"
-    elif discovery_error is None:
-        public_discovery_fallback_state = "no_fallback_needed"
-    else:
-        public_discovery_fallback_state = None
+    # F185A DF-3 FIX: replace hardcoded if/elif chain with explicit dictionary.
+    # Key: duckduckgo_adapter.py fallback_triggered string → public pipeline enum string.
+    # This eliminates the silent-fail risk when new fallback_triggered variants are added.
+    _FALLBACK_STATE_MAP: dict[str, str] = {
+        "primary_backend_failed_fallback_succeeded": "primary_failed_fallback_succeeded",
+        "primary_backend_failed_fallback_failed": "primary_failed_fallback_failed",
+    }
+    public_discovery_fallback_state = _FALLBACK_STATE_MAP.get(fallback_triggered) or (
+        "no_fallback_needed" if discovery_error is None else None
+    )
 
-    # public_discovery_blocker: None | uma_emergency_abort | backend_error_no_fallback | backend_error_fallback_failed
+    # F185A DF-3 FIX: same dictionary approach for public_discovery_blocker
+    _BLOCKER_BY_BACKEND_ERROR: dict[str, str] = {
+        "primary_backend_failed_fallback_failed": "backend_error_fallback_failed",
+    }
     if uma_state == "UMA_STATE_EMERGENCY":
         public_discovery_blocker = "uma_emergency_abort"
     elif discovery_error is not None and fallback_triggered is None:
         public_discovery_blocker = "backend_error_no_fallback"
-    elif discovery_error is not None and fallback_triggered == "primary_backend_failed_fallback_failed":
-        public_discovery_blocker = "backend_error_fallback_failed"
     else:
-        public_discovery_blocker = None
+        public_discovery_blocker = _BLOCKER_BY_BACKEND_ERROR.get(fallback_triggered)
 
     # public_fetch_accessibility_blocker: True when any page had connectivity/TLS/timeout failure
     # failure_stage IN {connection, tls, http} OR network_error_kind signals accessibility issue

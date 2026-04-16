@@ -1152,34 +1152,22 @@ class DuckDBShadowStore:
         """Sync insert — MUST be called on the worker thread."""
         try:
             if self._db_path:
-                # Use persistent _file_conn for file mode
-                if self._file_conn is not None:
-                    self._file_conn.execute("BEGIN TRANSACTION")
-                    try:
-                        self._file_conn.execute(
-                            """
-                            INSERT INTO shadow_findings (id, query, source_type, confidence, ts, provenance_json)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                            """,
-                            [finding_id, query, source_type, confidence, ts, provenance_json],
-                        )
-                        self._file_conn.execute("COMMIT")
-                    except Exception:
-                        self._file_conn.execute("ROLLBACK")
-                        return False
-                else:
-                    # Fallback: per-call connection
-                    duckdb = _get_duckdb()
-                    conn = duckdb.connect(str(self._db_path))
-                    conn.execute(
+                # MODE A: Use persistent _file_conn (always initialized before any write)
+                self._file_conn.execute("BEGIN TRANSACTION")
+                try:
+                    self._file_conn.execute(
                         """
                         INSERT INTO shadow_findings (id, query, source_type, confidence, ts, provenance_json)
                         VALUES (?, ?, ?, ?, ?, ?)
                         """,
                         [finding_id, query, source_type, confidence, ts, provenance_json],
                     )
-                    conn.close()
+                    self._file_conn.execute("COMMIT")
+                except Exception:
+                    self._file_conn.execute("ROLLBACK")
+                    return False
             else:
+                # MODE B: :memory: — use persistent single connection
                 self._persistent_conn.execute(
                     """
                     INSERT INTO shadow_findings (id, query, source_type, confidence, ts, provenance_json)
@@ -1204,18 +1192,17 @@ class DuckDBShadowStore:
             return 0
 
         try:
-            if self._db_path and self._file_conn is not None:
-                # Prewarm on first use
-                self._prewarm_file_conn()
-                # Build rows list — dict-based, ts/provenance_json optional
-                rows = [
-                    [
-                        r["id"], r["query"], r["source_type"], r["confidence"],
-                        r.get("ts"), r.get("provenance_json"),
-                    ]
-                    for r in findings
+            # Build rows list — dict-based, ts/provenance_json optional
+            rows = [
+                [
+                    r["id"], r["query"], r["source_type"], r["confidence"],
+                    r.get("ts"), r.get("provenance_json"),
                 ]
-                # Explicit transaction with executemany
+                for r in findings
+            ]
+            if self._db_path:
+                # MODE A: Use persistent _file_conn (always initialized before writes)
+                self._prewarm_file_conn()
                 self._file_conn.execute("BEGIN TRANSACTION")
                 try:
                     self._file_conn.executemany(
@@ -1231,14 +1218,7 @@ class DuckDBShadowStore:
                     self._file_conn.execute("ROLLBACK")
                     return 0
             else:
-                # :memory: mode — use persistent_conn
-                rows = [
-                    [
-                        r["id"], r["query"], r["source_type"], r["confidence"],
-                        r.get("ts"), r.get("provenance_json"),
-                    ]
-                    for r in findings
-                ]
+                # MODE B: :memory: — use persistent single connection
                 self._persistent_conn.execute("BEGIN TRANSACTION")
                 try:
                     self._persistent_conn.executemany(
@@ -1270,29 +1250,17 @@ class DuckDBShadowStore:
             ended_iso = _dt.datetime.fromtimestamp(ended_at).isoformat() if ended_at is not None else None
 
             if self._db_path:
-                # Sprint 8A: Use persistent _file_conn instead of per-call connect
-                if self._file_conn is not None:
-                    self._prewarm_file_conn()
-                    self._file_conn.execute(
-                        """
-                        INSERT INTO shadow_runs (run_id, started_at, ended_at, total_fds, rss_mb)
-                        VALUES (?, CAST(? AS TIMESTAMP), CAST(? AS TIMESTAMP), ?, ?)
-                        """,
-                        [run_id, started_iso, ended_iso, total_fds, rss_mb],
-                    )
-                else:
-                    # Fallback: per-call connection (should not happen in normal use)
-                    duckdb = _get_duckdb()
-                    conn = duckdb.connect(str(self._db_path))
-                    conn.execute(
-                        """
-                        INSERT INTO shadow_runs (run_id, started_at, ended_at, total_fds, rss_mb)
-                        VALUES (?, CAST(? AS TIMESTAMP), CAST(? AS TIMESTAMP), ?, ?)
-                        """,
-                        [run_id, started_iso, ended_iso, total_fds, rss_mb],
-                    )
-                    conn.close()
+                # MODE A: Use persistent _file_conn (always initialized before writes)
+                self._prewarm_file_conn()
+                self._file_conn.execute(
+                    """
+                    INSERT INTO shadow_runs (run_id, started_at, ended_at, total_fds, rss_mb)
+                    VALUES (?, CAST(? AS TIMESTAMP), CAST(? AS TIMESTAMP), ?, ?)
+                    """,
+                    [run_id, started_iso, ended_iso, total_fds, rss_mb],
+                )
             else:
+                # MODE B: :memory: — use persistent single connection
                 self._persistent_conn.execute(
                     """
                     INSERT INTO shadow_runs (run_id, started_at, ended_at, total_fds, rss_mb)
@@ -1307,7 +1275,8 @@ class DuckDBShadowStore:
     def _sync_query_findings(self, limit: int) -> List[Dict[str, Any]]:
         """Sync query — MUST be called on the worker thread. Uses persistent _file_conn."""
         try:
-            if self._db_path and self._file_conn is not None:
+            if self._db_path:
+                # MODE A: Use persistent _file_conn (always initialized before queries)
                 self._prewarm_file_conn()
                 result = self._file_conn.execute(
                     """
@@ -1318,20 +1287,8 @@ class DuckDBShadowStore:
                     """,
                     [limit],
                 ).fetchall()
-            elif self._db_path:
-                duckdb = _get_duckdb()
-                conn = duckdb.connect(str(self._db_path))
-                result = conn.execute(
-                    """
-                    SELECT id, query, source_type, confidence, ts, provenance_json
-                    FROM shadow_findings
-                    ORDER BY ts DESC
-                    LIMIT ?
-                    """,
-                    [limit],
-                ).fetchall()
-                conn.close()
             else:
+                # MODE B: :memory: — use persistent single connection
                 result = self._persistent_conn.execute(
                     """
                     SELECT id, query, source_type, confidence, ts, provenance_json
@@ -1361,7 +1318,8 @@ class DuckDBShadowStore:
     def _sync_insert_sprint_delta(self, row: dict) -> bool:
         """Sync insert — MUST be called on the worker thread."""
         try:
-            if self._db_path and self._file_conn is not None:
+            if self._db_path:
+                # MODE A: Use persistent _file_conn (always initialized before writes)
                 self._prewarm_file_conn()
                 self._file_conn.execute(
                     """
@@ -1379,6 +1337,7 @@ class DuckDBShadowStore:
                     ],
                 )
             else:
+                # MODE B: :memory: — use persistent single connection
                 self._persistent_conn.execute(
                     """
                     INSERT INTO sprint_delta VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -1409,13 +1368,15 @@ class DuckDBShadowStore:
     ) -> bool:
         """Sync insert source hit — MUST be called on the worker thread."""
         try:
-            if self._db_path and self._file_conn is not None:
+            if self._db_path:
+                # MODE A: Use persistent _file_conn (always initialized before writes)
                 self._prewarm_file_conn()
                 self._file_conn.execute(
                     "INSERT INTO source_hit_log VALUES (?,?,?,?,?,?)",
                     [sprint_id, ts, source_type, findings_count, ioc_count, hit_rate],
                 )
             else:
+                # MODE B: :memory: — use persistent single connection
                 self._persistent_conn.execute(
                     "INSERT INTO source_hit_log VALUES (?,?,?,?,?,?)",
                     [sprint_id, ts, source_type, findings_count, ioc_count, hit_rate],
@@ -1427,7 +1388,8 @@ class DuckDBShadowStore:
     def _sync_query_sprint_trend(self, last_n: int) -> list[dict]:
         """Sync query — MUST be called on the worker thread. Uses persistent _file_conn."""
         try:
-            if self._db_path and self._file_conn is not None:
+            if self._db_path:
+                # MODE A: Use persistent _file_conn (always initialized before queries)
                 self._prewarm_file_conn()
                 result = self._file_conn.execute(
                     """
@@ -1439,21 +1401,8 @@ class DuckDBShadowStore:
                     """,
                     [last_n],
                 ).fetchall()
-            elif self._db_path:
-                duckdb = _get_duckdb()
-                conn = duckdb.connect(str(self._db_path))
-                result = conn.execute(
-                    """
-                    SELECT sprint_id, ts, new_findings, ioc_nodes,
-                           findings_per_min, synthesis_success, uma_peak_gib
-                    FROM sprint_delta
-                    ORDER BY ts DESC
-                    LIMIT ?
-                    """,
-                    [last_n],
-                ).fetchall()
-                conn.close()
             else:
+                # MODE B: :memory: — use persistent single connection
                 result = self._persistent_conn.execute(
                     """
                     SELECT sprint_id, ts, new_findings, ioc_nodes,
@@ -1480,7 +1429,8 @@ class DuckDBShadowStore:
     def _sync_query_source_leaderboard(self, since_ts: float) -> list[dict]:
         """Sync query — MUST be called on the worker thread. Uses persistent _file_conn."""
         try:
-            if self._db_path and self._file_conn is not None:
+            if self._db_path:
+                # MODE A: Use persistent _file_conn (always initialized before queries)
                 self._prewarm_file_conn()
                 result = self._file_conn.execute(
                     """
@@ -1495,24 +1445,8 @@ class DuckDBShadowStore:
                     """,
                     [since_ts],
                 ).fetchall()
-            elif self._db_path:
-                duckdb = _get_duckdb()
-                conn = duckdb.connect(str(self._db_path))
-                result = conn.execute(
-                    """
-                    SELECT source_type,
-                           SUM(findings_count) as total_findings,
-                           AVG(hit_rate) as avg_hit_rate,
-                           COUNT(*) as sprint_appearances
-                    FROM source_hit_log
-                    WHERE ts > ?
-                    GROUP BY source_type
-                    ORDER BY total_findings DESC
-                    """,
-                    [since_ts],
-                ).fetchall()
-                conn.close()
             else:
+                # MODE B: :memory: — use persistent single connection
                 result = self._persistent_conn.execute(
                     """
                     SELECT source_type,
@@ -1547,9 +1481,9 @@ class DuckDBShadowStore:
         cutoff = _time.time() - 5 * 86400
         try:
             if self._db_path:
-                duckdb = _get_duckdb()
-                conn = duckdb.connect(str(self._db_path))
-                result = conn.execute(
+                # MODE A: Use persistent _file_conn (always initialized before queries)
+                self._prewarm_file_conn()
+                result = self._file_conn.execute(
                     """
                     SELECT source_type, AVG(hit_rate) as avg_hit_rate
                     FROM source_hit_log
@@ -1558,8 +1492,8 @@ class DuckDBShadowStore:
                     """,
                     [cutoff],
                 ).fetchall()
-                conn.close()
             else:
+                # MODE B: :memory: — use persistent single connection
                 result = self._persistent_conn.execute(
                     """
                     SELECT source_type, AVG(hit_rate) as avg_hit_rate

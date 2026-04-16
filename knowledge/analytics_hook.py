@@ -92,6 +92,8 @@ def _is_shadow_enabled() -> bool:
 # ---------------------------------------------------------------------------
 
 _MAX_QUEUE_SIZE: int = 200
+_SHADOW_BATCH_SIZE: int = 500  # Aligned with duckdb_store async_record_shadow_findings_batch max_batch_size
+_SHADOW_FLUSH_INTERVAL: float = 1.0  # Flush interval in seconds (named constant)
 _SHADOW_INGEST_FAILURES: int = 0
 _QUEUE_FULL_WARNED: bool = False
 
@@ -205,20 +207,19 @@ class _ShadowRecorder:
 
         batch: List[Dict[str, Any]] = []
         last_flush = time.monotonic()
-        flush_interval = 1.0  # flush every second max
 
         while not self._closed:
             try:
                 # Wait for next item with timeout
                 item = await asyncio.wait_for(
                     self._queue.get(),
-                    timeout=flush_interval
+                    timeout=_SHADOW_FLUSH_INTERVAL
                 )
                 batch.append(item)
 
                 # Flush when batch full or timeout
-                if len(batch) >= 500 or \
-                   (batch and (time.monotonic() - last_flush) >= flush_interval):
+                if len(batch) >= _SHADOW_BATCH_SIZE or \
+                   (batch and (time.monotonic() - last_flush) >= _SHADOW_FLUSH_INTERVAL):
                     await self._flush_batch(batch)
                     batch = []
                     last_flush = time.monotonic()
@@ -252,7 +253,7 @@ class _ShadowRecorder:
         try:
             inserted = await self._store.async_record_shadow_findings_batch(
                 batch,
-                max_batch_size=500
+                max_batch_size=_SHADOW_BATCH_SIZE
             )
             if inserted < len(batch):
                 logger.warning(

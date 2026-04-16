@@ -279,6 +279,13 @@ class FeedPipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     had_substantive_content_but_no_hits: bool = False  # True if entries_with_text > 0 but findings == 0
     # Sprint F160A: hits that arrived but were filtered by per-entry dedup
     findings_lost_to_dedup: int = 0
+    # F185A DF-2: pre/post fallback hit count totals at run level
+    pre_fallback_hits_total: int = 0
+    post_fallback_hits_total: int = 0
+    # F185A DF-6: structured zero-hit evidence surface (mirrors live_public_pipeline.py)
+    zero_hit_feed_fetch_count: int = 0       # entries fetched with 0 matched patterns
+    zero_hit_feed_fetch_reasons: dict = {}   # quality_reason_tag -> count
+    zero_hit_feed_fetch_samples: tuple = ()  # (title, url) pairs, max 5
 
 
 # ---------------------------------------------------------------------------
@@ -1386,7 +1393,7 @@ async def _check_wayback_cdx(entry_url: str, session: Any) -> str | None:
 
 
 
-async def _fetch_article_text(entry_url: str) -> tuple[str, bool]:
+async def _fetch_article_text(entry_url: str) -> tuple[str, bool, int]:
     """
     Fetch article body via direct aiohttp GET and strip HTML.
 
@@ -1395,7 +1402,10 @@ async def _fetch_article_text(entry_url: str) -> tuple[str, bool]:
     instead of live URL. This improves source yield when live sources are
     inaccessible or degraded.
 
-    Returns (article_text, success).
+    Returns (article_text, success, replacement_count).
+      - article_text: stripped text content, or "" on failure
+      - success: True if article was fetched and has non-empty stripped text
+      - replacement_count: U+FFFD replacement char count from _try_decode
     NEVER raises — all exceptions are caught, success=False on any failure.
     CancelledError is NOT caught (propagated).
 
@@ -1412,24 +1422,24 @@ async def _fetch_article_text(entry_url: str) -> tuple[str, bool]:
         from urllib.parse import urlparse
         parsed = urlparse(entry_url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            return ("", False)
+            return ("", False, 0)
     except Exception:
-        return ("", False)
+        return ("", False, 0)
 
     try:
         from hledac.universal.network.session_runtime import async_get_aiohttp_session
     except Exception:
-        return ("", False)
+        return ("", False, 0)
 
     try:
         session = await async_get_aiohttp_session()
     except Exception:
-        return ("", False)
+        return ("", False, 0)
 
     try:
         import aiohttp as _aiohttp
     except Exception:
-        return ("", False)
+        return ("", False, 0)
 
     # F183E: Wayback CDX seam — check for recent archive capture first
     wayback_url = await _check_wayback_cdx(entry_url, session)
@@ -1440,34 +1450,47 @@ async def _fetch_article_text(entry_url: str) -> tuple[str, bool]:
             try:
                 async with session.get(fetch_url, timeout=_aiohttp.ClientTimeout(total=_MAX_ARTICLE_FALLBACK_TIMEOUT)) as resp:
                     if resp.status != 200:
-                        return ("", False)
+                        return ("", False, 0)
                     raw = await resp.read()
             except asyncio.CancelledError:
                 raise
             except Exception:
-                return ("", False)
+                return ("", False, 0)
     except asyncio.CancelledError:
         raise
     except Exception:
-        return ("", False)
+        return ("", False, 0)
 
     # Decode with fallback, cap at MAX_ARTICLE_FALLBACK_KB
+    # F185A DF-8 FIX: use _try_decode from public_fetcher instead of raw decode().
+    # _try_decode returns (text, replaced_bool, replacement_count) and tries
+    # UTF-8 → Windows-1252 → Latin-1 before replace, giving charset truth
+    # that raw decode() discards entirely.
+    # Combined decode+strip into one block so all returns are consistent 3-tuples.
+    # Initialize before try so CancelledError propagation doesn't cause UnboundLocalError.
+    article_decode_replacement_count: int = 0
     try:
         raw = raw[: _MAX_ARTICLE_FALLBACK_KB * 1024]
         try:
-            text = raw.decode("utf-8", errors="replace")
+            from hledac.universal.fetching.public_fetcher import _try_decode
         except Exception:
-            try:
-                text = raw.decode("latin-1", errors="replace")
-            except Exception:
-                return ("", False)
+            # Defensive: if import fails, fall back to simple decode
+            text = raw.decode("utf-8", errors="replace")
+            article_text = _strip_html_tags_from_text(text)
+            if not article_text:
+                return ("", False, 0)
+            return (article_text.strip(), True, 0)
+        text, decode_replaced, article_decode_replacement_count = _try_decode(raw)
+        if not text.strip():
+            return ("", False, article_decode_replacement_count)
+        article_text = _strip_html_tags_from_text(text)
+        if not article_text:
+            return ("", False, article_decode_replacement_count)
+        return (article_text.strip(), True, article_decode_replacement_count)
+    except asyncio.CancelledError:
+        raise
     except Exception:
-        return ("", False)
-
-    article_text = _strip_html_tags_from_text(text)
-    if not article_text:
-        return ("", False)
-    return (article_text.strip(), True)
+        return ("", False, article_decode_replacement_count)
 
 
 async def _entry_to_pattern_findings(
@@ -1486,6 +1509,7 @@ async def _entry_to_pattern_findings(
     EntryQualitySignal,
     FallbackDecision,
     str,
+    int,
     int,
     int,
     int,
@@ -1581,11 +1605,12 @@ async def _entry_to_pattern_findings(
         )
     )
 
+    article_decode_replacement_count = 0
     if not skip_post_fallback_scan and fallback_decision.should_fetch:
         article_text = ""
         article_success = False
         try:
-            article_text, article_success = await _fetch_article_text(entry_url)
+            article_text, article_success, article_decode_replacement_count = await _fetch_article_text(entry_url)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1657,6 +1682,7 @@ async def _entry_to_pattern_findings(
             scan_text, enrichment_phase, article_fallback_used, article_fallback_attempted,
             quality_signal, fallback_decision, assembly_tier,
             pre_fallback_hits_count, post_fallback_hits_count, 0,
+            article_decode_replacement_count,
         )
 
     # Per-entry dedup by (label, pattern, value)
@@ -1680,6 +1706,7 @@ async def _entry_to_pattern_findings(
         scan_text, enrichment_phase, article_fallback_used, article_fallback_attempted,
         quality_signal, fallback_decision, assembly_tier,
         pre_fallback_hits_count, matched_patterns, findings_lost_to_dedup,
+        article_decode_replacement_count,
     )
 
 
@@ -1935,6 +1962,13 @@ async def async_run_live_feed_pipeline(
     _adapter_selection_reason_acc: str = ""
     _adapter_signal_count: int = 0  # W3: count entries with adapter signals for proper averaging
     _temporal_vocabulary_mismatch: bool = False  # W4: temporal vocabulary gap signal
+    # F185A DF-2: pre/post fallback hit counts aggregated at run level
+    _pre_fallback_hits_total: int = 0
+    _post_fallback_hits_total: int = 0
+    # F185A DF-6: structured zero-hit evidence (mirrors live_public_pipeline.py zero-hit surface)
+    _zero_hit_feed_fetch_count: int = 0
+    _zero_hit_reasons_acc: dict[str, int] = {}
+    _zero_hit_title_samples_acc: list[tuple[str, str]] = []
 
     for entry in entries:
         entry_url = getattr(entry, "entry_url", "") or f"urn:feed:entry:{getattr(entry, 'title', '')[:64]}"
@@ -1956,7 +1990,8 @@ async def async_run_live_feed_pipeline(
             (findings, patterns_cfg, matched, assembled_len, clean_text,
              enrichment_phase, article_fallback_used, article_fallback_attempted,
              quality_signal, fallback_decision, assembly_tier,
-             pre_fallback_hits, post_fallback_hits, findings_lost_to_dedup) = await _entry_to_pattern_findings(
+             pre_fallback_hits, post_fallback_hits, findings_lost_to_dedup,
+             article_decode_replacement_count) = await _entry_to_pattern_findings(
                 feed_url, entry, query_context
             )
         except asyncio.CancelledError:
@@ -2051,6 +2086,22 @@ async def async_run_live_feed_pipeline(
 
             # F160A: findings lost to per-entry dedup (hits arrived but filtered)
             _findings_lost_to_dedup_total += findings_lost_to_dedup
+
+            # F185A DF-2: accumulate pre/post fallback hit counts at run level
+            _pre_fallback_hits_total += pre_fallback_hits
+            _post_fallback_hits_total += post_fallback_hits
+
+            # F185A DF-6: structured zero-hit evidence — entries with matched == 0
+            # (mirrors live_public_pipeline.py zero-hit surface at lines 1487-1529)
+            if matched == 0:
+                _zero_hit_feed_fetch_count += 1
+                # quality_reason_tag from EntryQualitySignal — why content had no hits
+                _reason_key = quality_signal.quality_reason_tag or "unknown"
+                _zero_hit_reasons_acc[_reason_key] = _zero_hit_reasons_acc.get(_reason_key, 0) + 1
+                # Bounded title sample (max 5, no raw text)
+                if len(_zero_hit_title_samples_acc) < 5:
+                    _title = getattr(entry, "title", "") or ""
+                    _zero_hit_title_samples_acc.append((_title, entry_url))
 
             # W3 FIX: Accumulate adapter signals (+=) instead of last-write overwrite (=).
             # _float_attr is safe with MagicMock — returns 0.0 for missing attrs.
@@ -2276,6 +2327,13 @@ async def async_run_live_feed_pipeline(
         had_substantive_content_but_no_hits=bool(
             entries_with_text > 0 and entries_with_hits == 0 and total_accepted == 0
         ),
+        # F185A DF-2: pre/post fallback hit counts aggregated at run level
+        pre_fallback_hits_total=_pre_fallback_hits_total,
+        post_fallback_hits_total=_post_fallback_hits_total,
+        # F185A DF-6: structured zero-hit evidence surface
+        zero_hit_feed_fetch_count=_zero_hit_feed_fetch_count,
+        zero_hit_feed_fetch_reasons=dict(_zero_hit_reasons_acc),
+        zero_hit_feed_fetch_samples=tuple(_zero_hit_title_samples_acc),
     )
 
 

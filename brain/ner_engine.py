@@ -1328,9 +1328,9 @@ def build_entity_summary(
     Condensed entity summary from findings — second-level condensation.
 
     Produkuje malý, praktický output vhodný pro scheduler / export / core wiring:
-    - top_entities:       ranked list (top 20 by count*confidence)
-    - corroborated:       entities seen in multiple sources
-    - co_occurrence_pivots: useful cross-entity pivots (domain↔org, domain↔ip)
+    - top_entities:       ranked list (top 20 by count*confidence) — CAP: max_entities param
+    - corroborated:       entities seen in multiple sources — CAP: max 10 items
+    - co_occurrence_pivots: useful cross-entity pivots (domain↔org, domain↔ip) — CAP: max 5
     - dominant_type:      most frequent entity type across all findings
     - entity_takeaway:    one-line so-what string
     - type_breakdown:     count per type
@@ -1343,9 +1343,9 @@ def build_entity_summary(
     Returns:
         Condensed entity summary dict:
             {
-                "top_entities": list[dict],
-                "corroborated": list[dict],
-                "co_occurrence_pivots": list[dict],
+                "top_entities": list[dict],           # CAP: max_entities (default 20)
+                "corroborated": list[dict],           # CAP: max 10 items
+                "co_occurrence_pivots": list[dict],   # CAP: max 5 items
                 "dominant_type": str | None,
                 "entity_takeaway": str,
                 "type_breakdown": dict[str, int],
@@ -1529,6 +1529,7 @@ class FeedbackPack:
 def feedback_compact(
     findings: list,
     context: dict | None = None,
+    semantic_pivots: list | None = None,
 ) -> FeedbackPack:
     """
     Build FeedbackPack from findings — unified entry point for feedback loop.
@@ -1536,11 +1537,13 @@ def feedback_compact(
     Combines:
     1. build_entity_summary(findings) → entity_summary
     2. HypothesisEngine().build_hypothesis_pack(findings, context) → hypothesis_pack_as_dict
-    3. semantic_pivots left empty (filled by caller if semantic store available)
+    3. semantic_pivots from caller (optional, filled by SemanticStore if available)
 
     Args:
         findings: List of finding dicts with 'text', optional 'source', 'url'
         context: Optional context for hypothesis generation
+        semantic_pivots: Optional list of semantic pivot results from SemanticStore.semantic_pivot()
+                         Each pivot should have: text, score, source_type, finding_id, ts, ioc_types
 
     Returns:
         FeedbackPack with all fields bounded and populated
@@ -1549,7 +1552,7 @@ def feedback_compact(
         return FeedbackPack(
             entity_summary={},
             hypothesis_pack_as_dict={},
-            semantic_pivots=[],
+            semantic_pivots=semantic_pivots or [],
             provenance="heuristic",
         )
 
@@ -1561,7 +1564,8 @@ def feedback_compact(
     finding_texts = [f.get("text", "") if isinstance(f, dict) else str(f) for f in findings]
 
     from hledac.universal.brain.hypothesis_engine import HypothesisEngine
-    engine = HypothesisEngine.__new__(HypothesisEngine)
+    # Sprint F185F: Proper instantiation (not bare __new__)
+    engine = HypothesisEngine()
     engine._hypotheses = {}
 
     # Build pack with context from entity_summary
@@ -1579,10 +1583,13 @@ def feedback_compact(
         "provenance": pack.provenance,
     }
 
+    # Step 3: Use provided semantic pivots (caller fills from SemanticStore)
+    final_pivots = semantic_pivots if semantic_pivots is not None else []
+
     return FeedbackPack(
         entity_summary=entity_summary,
         hypothesis_pack_as_dict=hypothesis_pack_as_dict,
-        semantic_pivots=[],  # Filled by caller if semantic store available
+        semantic_pivots=final_pivots,
         provenance="mixed" if pack.provenance == "model-assisted" else "heuristic",
     )
 

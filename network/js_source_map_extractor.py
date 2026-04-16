@@ -20,8 +20,9 @@ class _JSSourceMapExtractor:
 
     MAX_MAP_SIZE = 1024 * 1024  # 1MB
     MAX_PATHS = 50
-    # F184E: use session_runtime constants for consistency
+    # F185D: use session_runtime canonical constants
     _CONNECT_TIMEOUT_S: float = 10.0
+    _READ_TIMEOUT_S: float = 10.0
 
     async def extract_from_bundle(self, bundle_url: str) -> List[str]:
         """Download source map and return extracted source paths."""
@@ -39,7 +40,7 @@ class _JSSourceMapExtractor:
                 map_url,
                 timeout=aiohttp.ClientTimeout(
                     connect=self._CONNECT_TIMEOUT_S,
-                    sock_read=10.0,
+                    sock_read=self._READ_TIMEOUT_S,
                 ),
             ) as resp:
                 if resp.status != 200:

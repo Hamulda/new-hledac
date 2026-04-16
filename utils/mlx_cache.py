@@ -324,10 +324,12 @@ def mlx_cleanup_sync() -> None:
         _get_mx().eval([])
 
         # Krok 3: clear_cache — uvolní Metal cache
-        if hasattr(_get_mx(), 'clear_cache'):
-            _get_mx().clear_cache()
-        elif hasattr(_get_mx().metal, 'clear_cache'):
-            _get_mx().metal.clear_cache()
+        # F185C: metal.clear_cache is canonical MLX API; check it FIRST, reuse mx ref
+        mx = _get_mx()
+        if hasattr(mx.metal, 'clear_cache'):
+            mx.metal.clear_cache()
+        elif hasattr(mx, 'clear_cache'):
+            mx.clear_cache()
     except Exception as e:
         logger.debug(f"MLX cleanup non-critical: {e}")
 
@@ -337,32 +339,35 @@ def mlx_cleanup_aggressive() -> None:
     if not MLX_AVAILABLE:
         return
     try:
+        # F185C: cache mx ref once, check metal.* API FIRST (canonical MLX API)
+        mx = _get_mx()
+
         # Uložit starý limit
-        if hasattr(_get_mx(), 'get_cache_limit'):
-            old_limit = _get_mx().get_cache_limit()
-        elif hasattr(_get_mx().metal, 'get_cache_limit'):
-            old_limit = _get_mx().metal.get_cache_limit()
+        if hasattr(mx.metal, 'get_cache_limit'):
+            old_limit = mx.metal.get_cache_limit()
+        elif hasattr(mx, 'get_cache_limit'):
+            old_limit = mx.get_cache_limit()
         else:
             old_limit = None
 
         # Nastavit nízký limit
-        if hasattr(_get_mx(), 'set_cache_limit'):
-            _get_mx().set_cache_limit(64 * 1024 * 1024)  # 64MB
-        elif hasattr(_get_mx().metal, 'set_cache_limit'):
-            _get_mx().metal.set_cache_limit(64 * 1024 * 1024)
+        if hasattr(mx.metal, 'set_cache_limit'):
+            mx.metal.set_cache_limit(64 * 1024 * 1024)  # 64MB
+        elif hasattr(mx, 'set_cache_limit'):
+            mx.set_cache_limit(64 * 1024 * 1024)
 
-        # Clear cache
-        if hasattr(_get_mx(), 'clear_cache'):
-            _get_mx().clear_cache()
-        elif hasattr(_get_mx().metal, 'clear_cache'):
-            _get_mx().metal.clear_cache()
+        # Clear cache — canonical order: metal first
+        if hasattr(mx.metal, 'clear_cache'):
+            mx.metal.clear_cache()
+        elif hasattr(mx, 'clear_cache'):
+            mx.clear_cache()
 
         # Obnovit starý limit
         if old_limit is not None:
-            if hasattr(_get_mx(), 'set_cache_limit'):
-                _get_mx().set_cache_limit(old_limit)
-            elif hasattr(_get_mx().metal, 'set_cache_limit'):
-                _get_mx().metal.set_cache_limit(old_limit)
+            if hasattr(mx.metal, 'set_cache_limit'):
+                mx.metal.set_cache_limit(old_limit)
+            elif hasattr(mx, 'set_cache_limit'):
+                mx.set_cache_limit(old_limit)
     except Exception:
         mlx_cleanup_sync()  # fallback
 

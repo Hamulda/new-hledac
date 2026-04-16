@@ -15,7 +15,8 @@ STATUS: EXPERIMENTAL / SIMULATED
 M1 8GB MEMORY CEILING:
   - data_store: OrderedDict, max 10_000 položek, TTL 3600s — BOUNDED ✓
   - routing_table: Dict[bucket_index → list of peers], k=20 peers per bucket
-  - _pending_rpcs: Dict[rpc_id → Future], cleanup po timeout (3s)
+  - _pending_rpcs: Dict[rpc_id → Future], bounded on MAX_PENDING_RPCS (5000), TTL 60s
+  - F185E: MAX_PENDING_RPCS hard cap + TTL eviction prevents unbounded growth
   - MAX_ITEM_BYTES = 256KB hard cap na store — BOUNDED ✓
   - Žádné MLX/alokace mimo síťové operace
 
@@ -57,6 +58,11 @@ from hledac.universal.core.resource_governor import ResourceGovernor, Priority
 logger = logging.getLogger(__name__)
 
 MAX_ITEM_BYTES = 256 * 1024  # 256KB hard cap
+
+# F185E: MAX_PENDING_RPCS — hard upper bound na pending RPC count
+# TTL 60s — RPCs older than this are evicted on next cleanup
+MAX_PENDING_RPCS = 5000
+MAX_PENDING_RPC_TTL_S = 60.0
 
 # Sprint 8VE A.2: Bootstrap peers for DHT crawl (IPv4-only)
 BOOTSTRAP_PEERS = [
@@ -240,6 +246,8 @@ class KademliaNode:
         self._transport = None
 
         self._pending_rpcs: Dict[str, asyncio.Future] = {}
+        # F185E: track creation time for TTL-based eviction
+        self._pending_rpcs_created: Dict[str, float] = {}
 
     def set_transport(self, transport):
         self._transport = transport
@@ -312,6 +320,37 @@ class KademliaNode:
         self.data_store.move_to_end(key)
         return value
 
+    # ---- F185E: pending RPC TTL eviction ----
+
+    def _cleanup_pending_rpcs(self):
+        """
+        F185E: TTL + size-based cleanup for _pending_rpcs.
+
+        Evicts:
+        1. Completed or cancelled futures
+        2. Entries older than MAX_PENDING_RPC_TTL_S
+        3. If still over MAX_PENDING_RPCS, evicts oldest by creation time (FIFO)
+        """
+        now = time.time()
+        # Remove done/cancelled and expired
+        expired_rpc_ids = [
+            rid for rid, fut in list(self._pending_rpcs.items())
+            if fut.done() or fut.cancelled()
+            or (rid in self._pending_rpcs_created and now - self._pending_rpcs_created[rid] > MAX_PENDING_RPC_TTL_S)
+        ]
+        for rid in expired_rpc_ids:
+            self._pending_rpcs.pop(rid, None)
+            self._pending_rpcs_created.pop(rid, None)
+
+        # If still over limit, evict oldest by creation time (FIFO)
+        if len(self._pending_rpcs) > MAX_PENDING_RPCS:
+            excess = len(self._pending_rpcs) - MAX_PENDING_RPCS
+            # Sort by creation time (oldest first)
+            sorted_ids = sorted(self._pending_rpcs_created, key=lambda rid: self._pending_rpcs_created[rid])
+            for rid in sorted_ids[:excess]:
+                self._pending_rpcs.pop(rid, None)
+                self._pending_rpcs_created.pop(rid, None)
+
     async def store(self, key: str, value: Any):
         self._local_put(key, value)
 
@@ -321,6 +360,7 @@ class KademliaNode:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def find_value(self, key: str) -> Optional[Any]:
+        self._cleanup_pending_rpcs()
         local = self._local_get(key)
         if local is not None:
             return local
@@ -342,6 +382,7 @@ class KademliaNode:
                 rpc_ids.append(rpc_id)
                 fut = asyncio.get_running_loop().create_future()
                 self._pending_rpcs[rpc_id] = fut
+                self._pending_rpcs_created[rpc_id] = time.time()
                 send_tasks.append(asyncio.create_task(self._send_find_value(pid, key, rpc_id)))
 
             if not rpc_ids:
@@ -360,6 +401,7 @@ class KademliaNode:
             # remove all rpcs
             for rid in rpc_ids:
                 self._pending_rpcs.pop(rid, None)
+                self._pending_rpcs_created.pop(rid, None)
 
             for fut in done:
                 if fut.cancelled():
@@ -388,6 +430,7 @@ class KademliaNode:
         rpc_id = str(uuid.uuid4())
         fut = asyncio.get_running_loop().create_future()
         self._pending_rpcs[rpc_id] = fut
+        self._pending_rpcs_created[rpc_id] = time.time()
         await self._transport.send_message(peer_id, "dht_ping", {"rpc_id": rpc_id}, "")
         try:
             ok = await asyncio.wait_for(fut, timeout=2.0)
@@ -397,6 +440,7 @@ class KademliaNode:
             return False
         finally:
             self._pending_rpcs.pop(rpc_id, None)
+            self._pending_rpcs_created.pop(rpc_id, None)
 
     async def _send_store(self, peer_id: str, key: str, value: Any):
         if not self._transport:
@@ -438,6 +482,7 @@ class KademliaNode:
         fut = self._pending_rpcs.get(rpc_id)
         if fut and not fut.done():
             fut.set_result(True)
+            self._pending_rpcs_created.pop(rpc_id, None)
 
     async def _handle_store(self, data: Dict[str, Any]):
         sender = data.get("sender")
@@ -477,10 +522,13 @@ class KademliaNode:
         fut = self._pending_rpcs.get(rpc_id)
         if fut and not fut.done():
             fut.set_result(payload)
+            self._pending_rpcs_created.pop(rpc_id, None)
 
     async def _refresh_loop(self):
         while self._running:
             await asyncio.sleep(300)
+            # F185E: periodic pending RPC cleanup
+            self._cleanup_pending_rpcs()
             bucket_idx = random.randint(0, 255)
             bucket = list(self.routing_table.get(bucket_idx, []))
             for peer in bucket:

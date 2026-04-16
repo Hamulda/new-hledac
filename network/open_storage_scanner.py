@@ -22,8 +22,9 @@ class _OpenStorageScanner:
     """Scans for exposed cloud storage buckets."""
 
     MAX_GUESSES_PER_DOMAIN = 15
-    # F184E: use session_runtime constant for connect timeout
-    _CONNECT_TIMEOUT_S: float = 10.0
+    # F185D: use session_runtime canonical constants
+    _CONNECT_TIMEOUT_S: float = 10.0  # canonical HTML connect
+    _READ_TIMEOUT_S: float = 5.0      # HEAD request — short read
 
     def _generate_guesses(self, domain: str) -> List[str]:
         """Generate a list of potential bucket URLs (only external services)."""
@@ -66,7 +67,7 @@ class _OpenStorageScanner:
             try:
                 async with session.head(
                     url,
-                    timeout=aiohttp.ClientTimeout(connect=self._CONNECT_TIMEOUT_S, sock_read=5.0),
+                    timeout=aiohttp.ClientTimeout(connect=self._CONNECT_TIMEOUT_S, sock_read=self._READ_TIMEOUT_S),
                 ) as resp:
                     if resp.status == 200:
                         # Check content-type or headers to confirm it's a bucket listing

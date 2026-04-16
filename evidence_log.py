@@ -672,20 +672,23 @@ class EvidenceLog:
         self._log.append(event)
         self._total_count += 1
 
-        # If deque overflowed (was full before append), rebuild indexes
+        # If deque overflowed (was full before append), rebuild indexes.
+        # _rebuild_indexes() iterates the FULL _log, so inline index updates
+        # below would duplicate entries. Only rebuild, no inline updates.
         if was_full:
             self._dropped_count += 1
             try:
                 self._rebuild_indexes()
             except Exception:
                 pass  # Fail-safe: never crash orchestration
+            # Index updates for this event are handled by _rebuild_indexes()
+            # (it iterates all events including this one at position len-1)
+            return
 
+        # Normal path: update indexes for the single new event.
+        # No rebuild needed — deque has room and was not full.
         index = len(self._log) - 1
-
-        # Aktualizuj indexy
         self._index_by_type[event.event_type].append(index)
-
-        # Indexuj podle source_ids
         for source_id in event.source_ids:
             if source_id not in self._index_by_source:
                 self._index_by_source[source_id] = []
