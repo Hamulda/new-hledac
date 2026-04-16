@@ -983,22 +983,6 @@ async def _fetch_and_process_page(
                             accepted_count += 1
                         if getattr(sr, "lmdb_success", False):
                             stored_count += 1
-                # accepted_count was pre-set to len(unique_findings) before the loop
-                # The loop only adjusts if the result is FindingQualityDecision (rejected finding)
-                # For simplicity: recount accepted from results
-                accepted_count = 0
-                stored_count = 0
-                for sr in store_results:
-                    if isinstance(sr, dict):
-                        if sr.get("accepted"):
-                            accepted_count += 1
-                        if sr.get("lmdb_success"):
-                            stored_count += 1
-                    else:
-                        if getattr(sr, "accepted", False):
-                            accepted_count += 1
-                        if getattr(sr, "lmdb_success", False):
-                            stored_count += 1
             except asyncio.CancelledError:
                 raise  # [I6]
             except Exception:

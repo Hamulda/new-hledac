@@ -1,11 +1,28 @@
 #!/usr/bin/env python3
 """
-TICKET-002: Rychlý smoke test — 60s sprint s memory trackem.
+SMOKE RUNNER — DIAGNOSTIC ONLY, NOT CANONICAL SPRINT PATH
+==========================================================
 
-Spustit ručně před PR pro ověření, že:
-1. Sprint doběhne bez exception
-2. RAM zůstane pod limitem
-3. Findings se vrátí
+.. role::
+    DIAGNOSTIC_TOOL: Tento modul je DIAGNOSTICKÝ nástroj, NENÍ production sprint owner.
+
+.. canonical_owner::
+    core.__main__:run_sprint() — SOLE canonical sprint owner.
+
+.. authority_statement::
+    Tento modul NEPRODUKUJE canonical sprint truth. Používá canonical path
+    (core.__main__._run_sprint_mode) pro diagnostics/smoke testing.
+
+.. what_this_is::
+    Rychlý smoke test — 60s sprint s memory trackem.
+    Spustit ručně před PR pro ověření, že:
+    1. Sprint doběhne bez exception
+    2. RAM zůstane pod limitem
+    3. Findings se vrátí
+
+.. what_this_is_not::
+    NENÍ production entrypoint. NENÍ canonical sprint owner.
+    Pro production sprint použij: python -m hledac.universal.core --sprint
 
 Použití:
     python smoke_runner.py
@@ -39,21 +56,18 @@ async def main() -> int:
     ram_before = proc_before.memory_info().rss / 1024**2
     log.info(f"RAM před startem: {ram_before:.0f} MB")
 
-    # Import sprint entry point
+    # CANONICAL PATH: Import sprint entry point from canonical owner
+    # DIAGNOSTIC ONLY: This smoke runner uses canonical path, does NOT own sprint truth
     try:
-        from __main__ import _run_sprint_mode
+        from hledac.universal.core.__main__ import _run_sprint_mode
     except ImportError:
-        log.error("Nelze importovat _run_sprint_mode z __main__")
-        log.info("Zkusím alternativní import...")
+        log.error("Nelze importovat _run_sprint_mode z core.__main__ (canonical owner)")
+        log.info("Zkusím __main__ fallback pro intra-repo testing...")
         try:
-            # Alternativní: přímý import modulu
-            import hledac.universal.__main__ as main_mod
-            if not hasattr(main_mod, "_run_sprint_mode"):
-                log.error("__main__ nemá _run_sprint_mode funkci")
-                return 1
-            _run_sprint_mode = main_mod._run_sprint_mode
-        except Exception as e:
-            log.error(f"Import selhal: {e}")
+            # Intra-repo fallback: allow __main__ for testing within repo
+            from __main__ import _run_sprint_mode
+        except ImportError:
+            log.error("Nelze importovat _run_sprint_mode — canonical path unavailable")
             return 1
 
     start = time.monotonic()
@@ -89,13 +103,20 @@ async def main() -> int:
 
 
 def run_sprint_import_test() -> bool:
-    """Rychlý import test před spuštěním sprintu."""
-    log.info("Testuji importy...")
+    """
+    DIAGNOSTIC: Rychlý import test před spuštěním sprintu.
 
+    Verifies canonical runtime modules are importable.
+    This is a COMPATIBILITY check, not authority verification.
+    """
+    log.info("Testuji importy (canonical runtime path)...")
+
+    # Canonical runtime modules — these form the production path
     modules = [
         "hledac.universal",
+        "hledac.universal.core.__main__",          # CANONICAL sprint owner
         "hledac.universal.runtime.sprint_lifecycle",
-        "hledac.universal.runtime.sprint_scheduler",
+        "hledac.universal.runtime.sprint_scheduler",  # CANONICAL orchestrator
         "hledac.universal.runtime.memory_watchdog",
         "hledac.universal.intelligence.stealth_crawler",
     ]
@@ -114,7 +135,7 @@ def run_sprint_import_test() -> bool:
             log.error(f"  {e}")
         return False
 
-    log.info(f"✅ Všechny {len(modules)} modulů OK")
+    log.info(f"✅ Všechny {len(modules)} modulů OK (canonical path verified)")
     return True
 
 

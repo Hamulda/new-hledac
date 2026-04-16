@@ -37,8 +37,7 @@ try:
 except ImportError:
     from hive_coordination import ConnectedCoordinationSystem, CoordinationTask
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# No module-level logging configuration - use lazy logger
 logger = logging.getLogger(__name__)
 
 class SmartSpawnedRole(Enum):

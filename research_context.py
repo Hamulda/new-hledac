@@ -1,14 +1,25 @@
 """
-ResearchContext - Datový model pro autonomní výzkum
-===================================================
+ResearchContext — CANONICAL CONTEXT CARRIER
+===========================================
 
-ROLE: Canonical CONTEXT CARRIER — primary data structure for communication
-between HermesCommander and agents during autonomous research.
+ROLE: Canonical context carrier for orchestrator <-> agent communication.
+This module defines the primary data structure for communication between
+HermesCommander and agents during autonomous research.
 
-This module defines:
-- ResearchContext: main context model (query, iteration, budgets, entities, hypotheses)
-- BudgetState: research budget tracking (iterations, time, tokens, api_calls)
-- Entity/Hypothesis/ErrorRecord: domain models
+CONTEXT vs LEDGER vs FACTS:
+---------------------------
+TIER 1 — EVIDENCE LEDGER (EvidenceLog):
+    append-only events recording what happened
+
+TIER 2 — SPRINT FACTS (DuckDBShadowStore):
+    sprint_delta, sprint_scorecard, source_hit_log
+
+TIER 3 — GRAPH (injected):
+    IOCGraph (Kuzu), SemanticStore (LanceDB)
+
+ResearchContext is the CARRIER between tiers:
+    ResearchContext (carrier) --handoff metadata--> EvidenceLog (ledger)
+    EvidenceLog.append() --analytics_hook--> DuckDBShadowStore (facts)
 
 AUTHORITY BOUNDARY:
 - ResearchContext carries state but does NOT sample, govern, or budget resources.

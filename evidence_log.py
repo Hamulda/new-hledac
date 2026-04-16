@@ -1,10 +1,43 @@
 """
-EvidenceLog - Append-only log pro autonomní výzkum
-===================================================
+EvidenceLog — CANONICAL EVIDENCE LEDGER
+=======================================
 
-Tento modul implementuje append-only log pro ukládání důkazů
-během autonomního výzkumu. Podporuje verifikaci pomocí hashů,
-JSONL export pro replay mode a dotazování.
+ROLE: Append-only evidence ledger for the autonomous research system.
+This module implements the EVIDENCE LEDGER boundary — it records what
+happened during research but does NOT govern sprint truth or own facts.
+
+FACTS / LEDGER / DERIVED MAP:
+-----------------------------
+TIER 1 — EVIDENCE LEDGER (EvidenceLog):
+    append-only events: tool_call, observation, synthesis, error, decision, evidence_packet
+    Hash-chained events with tamper detection
+    Ring buffer in RAM (max 100 events) + SQLite/JSONL persistence
+
+TIER 2 — SPRINT FACTS (DuckDBShadowStore):
+    sprint_delta, sprint_scorecard, source_hit_log (canonical sprint metrics)
+    shadow_findings, shadow_runs (finding-level forwarded from EvidenceLog)
+
+TIER 3 — GRAPH/STORE (injected):
+    IOCGraph (Kuzu), SemanticStore (LanceDB), DuckPGQGraph (analytics donor)
+
+LEDGER → FACTS boundary (Sprint F11C):
+    ResearchContext (carrier) --handoff metadata--> EvidenceLog (ledger writer)
+    EvidenceLog.append() --analytics_hook--> DuckDBShadowStore (sprint facts)
+
+The handoff flows through:
+  1. ResearchContext.context_metadata carries ContextHandoffMetadata descriptor
+  2. EvidenceLog.create_event(correlation=) receives RunCorrelation dict
+  3. Shadow analytics_hook receives correlation via payload["_correlation"]
+
+LEDGER BOUNDARY RULES:
+    [1] EvidenceLog remains ledger WRITER — no orchestrator authority
+    [2] ResearchContext remains context CARRIER — no writer authority
+    [3] Correlation is the ONLY cross-boundary handoff mechanism
+    [4] context_metadata is carrier-internal (EvidenceLog never reads it directly)
+    [5] No new session manager or persistence redesign
+
+⚠️  This module does NOT own sprint facts or derived views.
+    It is the EVIDENCE LEDGER — the immutable record of what happened.
 
 M1 8GB Optimalizace:
 - Ring buffer v RAM (max 100 událostí)

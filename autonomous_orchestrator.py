@@ -1,46 +1,48 @@
 """
-autonomous_orchestrator — RE-EXPORT FACADE (8VC)
-=============================================
+autonomous_orchestrator — ROOT RE-EXPORT FACADE (Sprint F181A)
+===========================================================
 
-.. deprecated::
-    This module has been migrated to ``legacy/autonomous_orchestrator.py``.
-    This file is kept for backward compatibility only.
+.. role::
+    ROOT_REEXPORT_FACADE: This module is a re-export facade at the root level.
+    It is NOT canonical owner of any production truth.
 
-CONTAINMENT METADATA (Sprint F13)
-=================================
-runtime_status: ACTIVE_BACKWARD_COMPAT
-    Facade slouží jako import surface pro __init__.py, orchestrator/, smoke_runner.py a testy.
-    NENÍ v production pipeline (__main__.py → SprintScheduler).
+.. canonical_owner::
+    - Legacy implementation: legacy/autonomous_orchestrator.py (~31k lines)
+    - Production sprint: core.__main__:run_sprint()
+    - Production orchestrator: runtime.sprint_scheduler:SprintScheduler
 
-authority_status: NON_CANONICAL_FACADE
-    Tento modul NENÍ canonical owner. Veškerá implementace žije v legacy/.
-    False-authority risk: modul vypadá jako primary orchestrator, ale není.
+.. what_this_is::
+    Root re-export facade that aggregates the legacy autonomous_orchestrator
+    implementation for backward compatibility. All real functionality lives
+    in legacy/autonomous_orchestrator.py.
 
-replacement_owner:
-    - legacy.autonomous_orchestrator (implementace, 31k+ lines)
-    - runtime.sprint_scheduler (production orchestrace, 30min sprint cycle)
+.. what_this_is_not::
+    - NOT production entrypoint
+    - NOT canonical sprint owner
+    - NOT canonical orchestrator
+    - NOT implementation authority
 
-migration_blocker:
-    - __init__.py re-export chain (řádky 53-71): 15+ names
+.. authority_chain::
+    autonomous_orchestrator.py (THIS FACADE, NON_CANONICAL)
+        → legacy/autonomous_orchestrator.py (IMPLEMENTATION TRUTH)
+    vs. production chain:
+    core/__main__.py::run_sprint() → runtime/sprint_scheduler.py::SprintScheduler
+
+.. false_authority_risk::
+    This module looks like a primary orchestrator but is NOT.
+    The canonical production path goes through core.__main__ and runtime.sprint_scheduler.
+
+.. migration_blocker::
+    - __init__.py re-export chain: 15+ names
     - orchestrator/__init__.py: re-export FullyAutonomousOrchestrator
-    - smoke_runner.py: import FullyAutonomousOrchestrator
-    - Testy: probe_3c, probe_3b, probe_5a a další přímo importují zde
+    - smoke_runner.py: imports FullyAutonomousOrchestrator
+    - Tests: probe_3c, probe_3b, probe_5a and others import directly here
 
-removal_precondition:
-    1. Všichni consumeri přesměrováni na legacy.autonomous_orchestrator nebo přímé importy
-    2. __init__.py updated: import z legacy/ místo .
-    3. orchestrator/__init__.py updated
-    4. smoke_runner.py updated
-    5. Všechny testy prošly bez facade
+.. runtime_status::
+    ACTIVE_BACKWARD_COMPAT — functional, but deprecated.
+    Use legacy/autonomous_orchestrator.py directly or production path instead.
 
-runtime_impact_if_removed:
-    VYSOKÝ — okamžitý break:
-    - __init__.py: "from .autonomous_orchestrator import ..." selže
-    - orchestrator/: "from ..autonomous_orchestrator import FullyAutonomousOrchestrator" selže
-    - smoke_runner.py: import selže
-    - Všechny probe testy (probe_3c, probe_3b, probe_5a, ...) fail
-
-donor_capability_list:
+.. donor_capability_list::
     Hlavní třídy/funkce (COMPAT EXPORTS):
     - FullyAutonomousOrchestrator
     - autonomous_research / create_autonomous_orchestrator

@@ -1,4 +1,51 @@
 """
+Universal Package — COMPAT_EXPORT Surface (Sprint F181A)
+=======================================================
+
+.. role::
+    COMPAT_EXPORT: This package is a compatibility export surface, NOT a
+    production entrypoint. It aggregates symbols from multiple layers for
+    backward compatibility.
+
+.. canonical_owner::
+    - Production sprint: core.__main__:run_sprint() — SOLE canonical sprint owner
+    - Production orchestrator: runtime.sprint_scheduler:SprintScheduler
+    - Legacy implementation: legacy/autonomous_orchestrator.py (~31k lines)
+
+.. what_this_is::
+    Compatibility export aggregator. Re-exports symbols from:
+    - legacy/autonomous_orchestrator.py (via autonomous_orchestrator facade)
+    - config, types, research_context, evidence_log, capabilities
+    - layers, coordinators, utils, enhanced_research, orchestrator_integration
+    - budget_manager
+
+.. what_this_is_not::
+    - NOT production entrypoint — use python -m hledac.universal.core --sprint
+    - NOT canonical sprint owner — use core.__main__.run_sprint()
+    - NOT canonical orchestrator — use runtime.sprint_scheduler
+    - NOT recommended import path for new code
+
+.. authority_chain::
+    This package
+        → autonomous_orchestrator.py (NON_CANONICAL_FACADE)
+            → legacy/autonomous_orchestrator.py (IMPLEMENTATION TRUTH)
+    vs.
+    Production path (canonical):
+    core/__main__.py::run_sprint()
+        → runtime/sprint_scheduler.py::SprintScheduler.run()
+
+.. migration_guidance::
+    For new code:
+    - Sprint entry: python -m hledac.universal.core --sprint
+    - Direct imports: from hledac.universal.runtime.sprint_scheduler import SprintScheduler
+    - Legacy facade: from hledac.universal.legacy.autonomous_orchestrator import FullyAutonomousOrchestrator
+
+.. deprecated_example::
+    OLD (still works but deprecated):
+        from hledac.universal import create_autonomous_orchestrator
+    NEW (canonical path):
+        from hledac.universal.core.__main__ import run_sprint
+
 Universal Orchestrator Package v5.0 - Autonomous
 ===============================================
 
@@ -34,12 +81,12 @@ Autonomous Tools:
 
 Example:
     from hledac.universal import create_autonomous_orchestrator, DiscoveryDepth
-    
+
     orchestrator = await create_autonomous_orchestrator(
         mode=ResearchMode.AUTONOMOUS,
         m1_optimized=True
     )
-    
+
     result = await orchestrator.research(
         "quantum computing",
         depth=DiscoveryDepth.EXTREME

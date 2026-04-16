@@ -1,41 +1,35 @@
 """
-Shadow Analytics Hook — Sprint 8AX
-==================================
+Shadow Analytics Hook — CANONICAL FINDING → FACTS PIPELINE
+==========================================================
 
-Non-blocking, fail-open shadow ingest of findings into DuckDB.
+ROLE: Non-blocking pipeline stage that forwards finding metadata from the
+EvidenceLog (ledger) to DuckDBShadowStore (sprint facts).
 
-HOOK LOCATION
--------------
-Called from EvidenceLog.append() after a finding event is already in the log.
-The hook is entirely opt-in via GHOST_DUCKDB_SHADOW=1.
+This module is NOT a writer authority — it is a write-path adapter.
+The canonical sprint facts authority is DuckDBShadowStore (Tier 1 sprint facts).
+This hook is the forwarding seam (analytics path only) from EvidenceLog.
 
-DESIGN
-------
-- duckdb is NOT imported on boot — deferred to first use inside _ShadowRecorder
-- Feature flag is cached at module level after first check
-- Bounded asyncio.Queue(maxsize=200) — put_nowait only, drop on full
-- Shadow failures are logged as WARNING, never propagate
-- aclose() attempts final flush with 2s timeout, then gives up cleanly
+LEDGER → FACTS boundary:
+    EvidenceLog.append()  →  analytics_hook.shadow_record_finding()  →  DuckDBShadowStore.async_record_shadow_findings_batch()
 
-PRODUCTION PATH
----------------
-GHOST_DUCKDB_SHADOW=1 + RAMDISK_ACTIVE=False:
-  → DB_ROOT / "analytics.duckdb" (file-backed, durable)
+The EvidenceLog remains the canonical EVIDENCE LEDGER.
+DuckDBShadowStore holds CANONICAL SPRINT FACTS (sprint_delta, scorecard, hit_log).
+analytics_hook bridges the two without owning either.
 
-:memory: FALLBACK
-----------------
-Used only when:
-  1. DB_ROOT is unavailable (degraded), OR
-  2. Explicitly requested in tests
-Session-only persistence expected — not treated as a bug.
+⚠️  "Shadow" in the hook name refers to the analytics/shadow path, not to DuckDBShadowStore being a shadow.
+    DuckDBShadowStore is the canonical sprint facts store, not a shadow.
 
-SCHEMA (mirrors duckdb_store.py)
---------------------------------
-shadow_findings: id, run_id, query, url, title, source,
-                 source_type, relevance_score, confidence, ts
+FACTS HIERARCHY (3 tiers):
+--------------------------
+TIER 1 — SPRINT FACTS (DuckDBShadowStore):
+    sprint_delta, sprint_scorecard, source_hit_log
+TIER 2 — SHADOW FINDINGS (DuckDBShadowStore):
+    shadow_findings, shadow_runs
+TIER 3 — GRAPH (injected):
+    IOCGraph (Kuzu), SemanticStore (LanceDB)
 
-ADAPTER SHAPE
--------------
+ADAPTER SHAPE (fingerprint of evidence_packet payload for DuckDB):
+------------------------------------------------------------------
 {
     "id": finding_id,
     "run_id": run_id,
@@ -46,13 +40,25 @@ ADAPTER SHAPE
     "source_type": source_type,
     "relevance_score": relevance_score or None,
     "confidence": confidence or 0.0,
+    "branch_id": branch_id or None,     # from _correlation
+    "provider_id": provider_id or None,   # from _correlation
+    "action_id": action_id or None,      # from _correlation
 }
 
-DEFERRED ITEMS
---------------
-- Entity ingest (future sprint)
-- Kuzu sync bridge (future sprint)
-- LanceDB/vector ingest (future sprint)
+DESIGN:
+-------
+- duckdb is NOT imported on boot — deferred to first use inside _ShadowRecorder
+- Feature flag is cached at module level after first check
+- Bounded asyncio.Queue(maxsize=200) — put_nowait only, drop on full
+- Shadow failures are logged as WARNING, never propagate
+- aclose() attempts final flush with 2s timeout, then gives up cleanly
+
+:memory: FALLBACK
+----------------
+Used only when:
+  1. DB_ROOT is unavailable (degraded), OR
+  2. Explicitly requested in tests
+Session-only persistence expected — not treated as a bug.
 """
 
 from __future__ import annotations

@@ -30,8 +30,7 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# No module-level logging configuration - use lazy logger
 logger = logging.getLogger(__name__)
 
 class CoordinationLayer(Enum):

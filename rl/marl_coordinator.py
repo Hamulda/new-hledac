@@ -1,5 +1,35 @@
 """
 MARLCoordinator – spravuje agenty, replay buffer, trénink a interakci se schedulerem.
+
+PROMOTION GATE — DORMANT / HEAVY / NOT PROMOTED
+================================================
+QMIX multi-agent reinforcement learning koordinátor.
+
+STATUS: DORMANT
+  - training_enabled = False (hardcoded, řádek 40)
+  - start_training() async method existuje, ale NENÍ VOLÁNA z žádného canonical surface
+  - replay buffer limit 1000 items před training_enabled
+  - žádné skutečné call sites mimo testy
+
+M1 8GB MEMORY CEILING:
+  - QMIXAgent (mlx.nn.Module) + QMixer + target_mixer: ~50-200MB per agent
+  - Replay buffer: n_agents * state_dim * batch_size (konfigurovatelné)
+  - NUMPY interop: np.array pro reward computation (float64, mimo MLX)
+  - training loop: asyncio.Task, 60s interval, 64-batch updates
+  - Epsilon decay: 0.9995 per step, min 0.05
+
+ALLOWED PURPOSE: Research/experiment only — QMIX algoritmus je paper-impl
+  bez reálného RL reward signálu v OSINT kontextu.
+  _compute_reward() je dummy: new_entities*2 + confidence*1.5 - time_penalty
+
+PROMOTION ELIGIBILITY: NO
+  - Žádné production call sites (grep -r "marl_coordinator" --include="*.py" | grep -v test)
+  - training_enabled hardcoded False = training nikdy nezačne
+  - ETHEREINCI žádného reálného reward feedback loop
+  - M1 8GB: parallel QMIX training by SWAPOVALO
+
+SECURITY: Žádná. Tento kód nepracuje se senzitivními daty.
+STEALTH: Žádná. RL training traffic by byl plně auditovatelný.
 """
 
 import asyncio

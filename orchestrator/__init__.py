@@ -1,23 +1,33 @@
 """
-Orchestrator Module - Modular organization for autonomous orchestrator components
-===============================================================================
+Orchestrator Module — SECONDARY THIN FACADE (Sprint F181A)
+=========================================================
 
-CONTAINMENT METADATA (Sprint F13)
-=================================
-role: SECONDARY_THIN_FACADE
-    Tento modul je THIN SECONDARY RE-EXPORT layer. Není canonical owner implementace.
-    Chová se jako organizční vrstva pro backward compatibility.
+.. role::
+    SECONDARY_THIN_FACADE: Thin re-export layer, NOT canonical owner.
+    This module organizes backward-compat exports from the facade chain.
 
-chain_of_authority:
+.. canonical_owner::
+    legacy/autonomous_orchestrator.py — holds all real implementation (~31k lines)
+
+.. authority_chain::
     orchestrator/__init__.py (SECONDARY FACADE)
         → autonomous_orchestrator.py (ROOT RE-EXPORT FACADE, NON_CANONICAL_FACADE)
-            → legacy/autonomous_orchestrator.py (IMPLEMENTATION TRUTH, 13k+ lines)
+            → legacy/autonomous_orchestrator.py (IMPLEMENTATION TRUTH)
 
-NOT a refactor - behavior remains unchanged.
+.. what_this_is_not::
+    - NOT production entrypoint
+    - NOT canonical sprint owner
+    - NOT implementation authority
+    - NOT recommended import path for new code
 
-Wording note: "implementation remains in autonomous_orchestrator.py" je zavádějící.
-autonomous_orchestrator.py sám je re-export facade, ne implementation owner.
-Canonical implementation: legacy/autonomous_orchestrator.py
+.. migration_blockers::
+    - smoke_runner.py imports from here
+    - test probes import FullyAutonomousOrchestrator from here
+    - orchestrator/research_manager.py and security_manager.py are also re-exports
+
+.. action_required::
+    New code should import directly from legacy/autonomous_orchestrator.py
+    or from specific submodules (runtime/, brain/, etc.) as appropriate.
 """
 
 # Re-export the main orchestrator class for backward compatibility
@@ -34,8 +44,6 @@ __all__ = [
     "_SecurityManager",
 ]
 
-# Sprint F13: Explicit containment seal
-# This module is a SECONDARY FACADE only.
-# It does NOT hold canonical implementation.
-# Production consumers should import from legacy/autonomous_orchestrator.py directly
-# once migration blockers (smoke_runner.py, research_manager, security_manager) are resolved.
+# Sprint F181A: Explicit containment seal — SECONDARY FACADE only.
+# This module does NOT hold canonical implementation.
+# Production consumers should import from legacy/autonomous_orchestrator.py directly.

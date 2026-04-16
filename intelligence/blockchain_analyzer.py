@@ -2,23 +2,44 @@
 Blockchain Forensics Module
 ===========================
 
+PROMOTION GATE — EXPERIMENTAL / HEAVY / NOT PROMOTED
+====================================================
 Advanced blockchain analysis and forensics for cryptocurrency investigations.
-M1 8GB optimized with async processing, caching, and streaming for large datasets.
 
-Features:
-- Multi-chain transaction tracing (Ethereum, Bitcoin, Litecoin, Bitcoin Cash)
-- Address clustering via heuristics (common input ownership, temporal correlation)
-- Pattern detection (peel chains, mixing, layering, round amounts)
-- Risk scoring and entity identification
-- Cross-chain analysis
-- Integration with Etherscan and Blockchair APIs
+STATUS: EXPERIMENTAL
+  - 1478 lines, 0 call sites outside tests (grep audit: žádné volání v production kódu)
+  - Etherscan API key a Blockchair API key vyžadovány, nejsou součástí config
+  - async HTTP client (httpx) s rate limiting — síťová závislost na třetích stranách
+  - KademliaNode používá tento modul? NE — dht/kademlia_node.py je SAMOSTATNÝ
 
-M1 Optimized:
-- Async API calls with connection pooling
-- LRU caching for API responses
-- Streaming processing for large transaction histories
-- Minimal memory footprint
-- No heavy computation or ML models
+M1 8GB MEMORY CEILING:
+  - httpx.AsyncClient: max_connections=10, max_keepalive=5
+  - In-memory cache: _cache dict, TTL=300s, NEBOUNDED (uloží unlimited API responses)
+  - Transaction tracing: depth-first, max 100 tx, visited set pro dedup
+  - clustering: načítá tx pro KAŽDOU adresu zvlášť (O(n) API calls)
+  - ŽÁDNÝ memory ceiling na response cache = potential unbounded growth
+  - Při cross_chain_analysis s 10 adresami = 10+ sequenciálních API calls
+
+ALLOWED PURPOSE: Offline blockchain forensics research tool
+  - Vyžaduje externí API keys (Etherscan/Blockchair)
+  - Primární use case: post-factum analýza známých adres
+  - NENÍ součástí real-time OSINT pipeline
+  - NENÍ integrován do autonomous_orchestrator.py
+
+PROMOTION ELIGIBILITY: NO
+  - Žádné production call sites
+  - Neintegrováno do canonical orchestrator path
+  - API-dependent (Etherscan rate limits, Blockchair paid tier)
+  - Unbounded cache = memory risk na M1 8GB
+
+SECURITY: API keys by byly v .env — tento modul sám o sobě žádné neukládá.
+STEALTH: Network traffic jde přímo na Etherscan/Blockchair — žádná anonymizace.
+  Toto je FORENZÍ nástroj, ne OSINT stealth tool.
+
+DŮLEŽITÉ POZNÁMKY K IMPLEMENTACI:
+- crawl_dht_for_keyword() v kademlia_node.py používá BlockchainForensics? NE
+- Tyto dva moduly jsou zcela nezávislé
+- BlockchainForensics má vlastní httpx klient, ne používá curl_cffi z fetch_coordinator
 """
 
 from __future__ import annotations

@@ -1,20 +1,17 @@
 """
-Orchestrator Integration Extension - Phase C Full Autonomy
-===========================================================
+Orchestrator Integration Extension
+===================================
 
-This module extends FullyAutonomousOrchestrator with:
-1. Connected coordinators (MetaReasoning, Memory, Security, Monitoring, Validation)
-2. Real data sources (ArXiv, GitHub APIs)
-3. AI-driven decision making
-4. Deep knowledge graph integration
-5. Self-monitoring and auto-recovery
+.. deprecated::
+    This module is DEPRECATED and DORMANT. It is not part of the canonical
+    production orchestration path. Do not use for new development.
 
-Usage:
-    from hledac.universal.orchestrator_integration import IntegratedOrchestrator
-    
-    orchestrator = IntegratedOrchestrator()
-    await orchestrator.initialize()
-    result = await orchestrator.research("your query", DiscoveryDepth.EXHAUSTIVE)
+Status: DORMANT - Not on main execution path
+Role: Legacy backward-compatibility stub only
+Authority: NONE - This module makes no production claims
+
+Migration:
+    Use FullyAutonomousOrchestrator directly for production work.
 """
 
 from __future__ import annotations

@@ -2,13 +2,15 @@
 KnowledgeGraphBuilder - Memory-Safe Graph Builder for M1 Silicon
 ================================================================
 
-Lightweight knowledge graph builder optimized for M1 MacBook Air (8GB RAM).
-Uses regex patterns and heuristics instead of heavy NLP models.
+HELPER / EXTRACTOR ROLE (NOT backend owner)
+============================================
+This module is a helper/extractor that processes content and feeds results
+into the authoritative graph backend (IOCGraph via KuzuDB).
+It does NOT own storage — it transforms and forwards data.
 
-Key Features:
+Features:
     - Regex-based fact extraction (no spacy/transformers overhead)
     - Metadata-driven fact generation from crawled content
-    - Direct KuzuDB integration for disk-based storage
 """
 
 import hashlib

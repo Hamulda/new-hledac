@@ -1,10 +1,14 @@
 """
-KnowledgeGraphLayer - KuzuDB-based knowledge graph pro UniversalResearchOrchestrator
+KnowledgeGraphLayer - COMPOSER/ORCHESTRATOR role
+================================================
 
-Integruje:
-- PersistentKnowledgeLayer (KuzuDB)
-- GraphRAGOrchestrator (multi-hop reasoning)
-- KnowledgeGraphBuilder
+DEPRECATED MODULE: This module orchestrates graph components but is NOT a truth store.
+
+For authoritative storage use:
+- IOCGraph (KuzuDB) for IOC entity truth store
+- DuckPGQGraph (DuckDB) for analytics donor backend
+
+This module may be removed in a future sprint.
 """
 
 from __future__ import annotations
@@ -18,12 +22,15 @@ logger = logging.getLogger(__name__)
 
 class KnowledgeGraphLayer:
     """
-    Knowledge graph vrstva s KuzuDB backendem.
-    
-    Features:
-    - Persistentní storage (KuzuDB)
-    - GraphRAG pro multi-hop reasoning
-    - Entity a relation extraction
+    Knowledge graph vrstva — COMPOSER/ORCHESTRATOR role.
+
+    NENÍ truth store — pouze orchestruje komponenty:
+    - PersistentKnowledgeLayer (deprecated, use IOCGraph for truth)
+    - GraphRAGOrchestrator (consumer, not owner)
+    - KnowledgeGraphBuilder (helper/extractor)
+
+    Pro truth storage použij: IOCGraph (KuzuDB)
+    Pro analytics použij: DuckPGQGraph (DuckDB)
     """
     
     def __init__(self, db_path: str = None):

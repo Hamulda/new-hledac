@@ -1,3 +1,16 @@
+"""
+ContextGraph - Lightweight In-Memory Context Tracker
+====================================================
+
+DEPRECATED: This module is a simple in-memory context tracker.
+It is NOT a storage backend and does NOT persist data.
+Do NOT use as authoritative graph storage.
+
+For persistent knowledge graph storage, use:
+- IOCGraph (KuzuDB) for IOC entity truth store
+- DuckPGQGraph (DuckDB) for analytics donor backend
+"""
+
 from __future__ import annotations
 
 import json
@@ -5,7 +18,12 @@ from typing import Any, Dict, List, Optional
 
 
 class ContextGraph:
-    """A simple in-memory context graph."""
+    """
+    DEPRECATED: Simple in-memory context graph.
+
+    NOT a storage backend — data is not persisted.
+    Use IOCGraph (KuzuDB) for authoritative IOC storage.
+    """
 
     def __init__(self) -> None:
         self.nodes: List[Dict[str, Any]] = []

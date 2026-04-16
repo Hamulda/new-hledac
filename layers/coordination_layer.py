@@ -1,26 +1,18 @@
 """
-Coordination Layer v2 - Integrated with Universal Coordinators
-================================================================
+Coordination Layer v2
+====================
 
-Integrated coordination layer using new Universal Coordinators:
-- UniversalResearchCoordinator (from DeepSeek R1)
-- UniversalExecutionCoordinator (from DeepSeek R1)
-- UniversalSecurityCoordinator (from DeepSeek R1)
-- UniversalMonitoringCoordinator (from DeepSeek R1)
-- CoordinatorRegistry (central management)
+.. deprecated::
+    This module is DEPRECATED and DORMANT. The Universal Coordinators
+    world is not part of the canonical production orchestration path.
 
-Manages coordination between:
-- Hermes-3 Commander (decision making)
-- Universal Coordinators (operations)
-- ContextManager (decision context tracking)
-- CoordinatorRegistry (routing and load balancing)
+Status: DORMANT - Not on main execution path
+Role: Legacy coordinator seam only (maps to coordination_layer.py)
+Authority: NONE - This module makes no production claims
 
-Features:
-- Multi-strategy routing (auto, priority, load, weighted)
-- Health monitoring of coordinators
-- Load balancing across coordinators
-- Statistics aggregation
-- Graceful fallback to local implementations
+Canonical Path:
+    Use CoordinationLayer from this same file for production work.
+    Universal Coordinators are an alternate experimental world only.
 """
 
 from __future__ import annotations
@@ -64,23 +56,49 @@ except ImportError:
     ProcessingMetrics = None
     ProcessingStatus = None
 
-# Import Universal Coordinators
-try:
-    from ..coordinators import (
-        UniversalResearchCoordinator,
-        UniversalExecutionCoordinator,
-        UniversalSecurityCoordinator,
-        UniversalMonitoringCoordinator,
-        UniversalMemoryCoordinator,
-        CoordinatorRegistry,
-        OperationType as CoordinatorOperationType,
-        DecisionResponse as CoordinatorDecisionResponse,
-        MemoryZone,
-    )
-    UNIVERSAL_COORDINATORS_AVAILABLE = True
-except ImportError as e:
-    UNIVERSAL_COORDINATORS_AVAILABLE = False
-    logging.warning(f"Universal coordinators not available: {e}")
+# Universal Coordinators - LAZY import only when needed
+# NOT imported at module level to avoid eager heavyweight imports
+_UNIVERSAL_COORDINATORS_AVAILABLE = False
+_UNIVERSAL_COORDINATOR_IMPORTS = None
+
+def _get_universal_coordinator_imports():
+    """
+    Lazy import of Universal Coordinators.
+    Only loads when CoordinationLayer.initialize() is called.
+    """
+    global _UNIVERSAL_COORDINATOR_IMPORTS, _UNIVERSAL_COORDINATORS_AVAILABLE
+    if _UNIVERSAL_COORDINATOR_IMPORTS is not None:
+        return _UNIVERSAL_COORDINATOR_IMPORTS
+
+    try:
+        from ..coordinators import (
+            UniversalResearchCoordinator,
+            UniversalExecutionCoordinator,
+            UniversalSecurityCoordinator,
+            UniversalMonitoringCoordinator,
+            UniversalMemoryCoordinator,
+            CoordinatorRegistry,
+            OperationType as CoordinatorOperationType,
+            DecisionResponse as CoordinatorDecisionResponse,
+            MemoryZone,
+        )
+        _UNIVERSAL_COORDINATOR_IMPORTS = {
+            'UniversalResearchCoordinator': UniversalResearchCoordinator,
+            'UniversalExecutionCoordinator': UniversalExecutionCoordinator,
+            'UniversalSecurityCoordinator': UniversalSecurityCoordinator,
+            'UniversalMonitoringCoordinator': UniversalMonitoringCoordinator,
+            'UniversalMemoryCoordinator': UniversalMemoryCoordinator,
+            'CoordinatorRegistry': CoordinatorRegistry,
+            'OperationType': CoordinatorOperationType,
+            'DecisionResponse': CoordinatorDecisionResponse,
+            'MemoryZone': MemoryZone,
+        }
+        _UNIVERSAL_COORDINATORS_AVAILABLE = True
+    except ImportError:
+        _UNIVERSAL_COORDINATOR_IMPORTS = {}
+        _UNIVERSAL_COORDINATORS_AVAILABLE = False
+
+    return _UNIVERSAL_COORDINATOR_IMPORTS
 
 logger = logging.getLogger(__name__)
 
@@ -573,15 +591,15 @@ class CoordinationLayer:
         self.config = config or CoordinationConfig()
 
         # Core components
-        self._coordinator_registry: Optional[CoordinatorRegistry] = None
+        self._coordinator_registry: Optional[Any] = None
         self._context_manager = None
 
-        # Universal Coordinators
-        self._research_coordinator: Optional[UniversalResearchCoordinator] = None
-        self._execution_coordinator: Optional[UniversalExecutionCoordinator] = None
-        self._security_coordinator: Optional[UniversalSecurityCoordinator] = None
-        self._monitoring_coordinator: Optional[UniversalMonitoringCoordinator] = None
-        self._memory_coordinator: Optional[UniversalMemoryCoordinator] = None
+        # Universal Coordinators - lazy loaded via _get_universal_coordinator_imports()
+        self._research_coordinator: Optional[Any] = None
+        self._execution_coordinator: Optional[Any] = None
+        self._security_coordinator: Optional[Any] = None
+        self._monitoring_coordinator: Optional[Any] = None
+        self._memory_coordinator: Optional[Any] = None
 
         # Event-Driven Processor (neuromorphic)
         self._event_processor: Optional[EventDrivenProcessor] = None
@@ -605,12 +623,17 @@ class CoordinationLayer:
         """
         try:
             logger.info("🚀 Initializing CoordinationLayer v2...")
-            
-            if not UNIVERSAL_COORDINATORS_AVAILABLE:
+
+            # Lazy check for Universal Coordinators
+            if not _check_universal_coordinators():
                 logger.warning("⚠️ Universal coordinators not available, using fallbacks")
                 await self._init_fallbacks()
                 return True
-            
+
+            # Get coordinator classes via lazy import
+            imports = _get_universal_coordinator_imports()
+            CoordinatorRegistry = imports.get('CoordinatorRegistry')
+
             # Initialize CoordinatorRegistry
             self._coordinator_registry = CoordinatorRegistry()
             
@@ -686,75 +709,95 @@ class CoordinationLayer:
             await asyncio.gather(*coordinator_tasks, return_exceptions=True)
     
     async def _init_research_coordinator(self) -> None:
-        """Initialize UniversalResearchCoordinator"""
+        """Initialize UniversalResearchCoordinator via lazy import"""
         try:
-            self._research_coordinator = UniversalResearchCoordinator(max_concurrent=5)
+            imports = _get_universal_coordinator_imports()
+            cls = imports.get('UniversalResearchCoordinator')
+            if cls is None:
+                raise ImportError("UniversalResearchCoordinator not available")
+            self._research_coordinator = cls(max_concurrent=5)
             await self._research_coordinator.initialize()
-            
+
             if self._research_coordinator.is_available():
                 logger.info("✅ UniversalResearchCoordinator initialized")
             else:
                 logger.warning("⚠️ UniversalResearchCoordinator initialized with limited functionality")
-                
+
         except Exception as e:
             logger.warning(f"⚠️ UniversalResearchCoordinator failed: {e}, using fallback")
             self._research_coordinator = _LocalResearchCoordinator()
             await self._research_coordinator.initialize()
-    
+
     async def _init_execution_coordinator(self) -> None:
-        """Initialize UniversalExecutionCoordinator"""
+        """Initialize UniversalExecutionCoordinator via lazy import"""
         try:
-            self._execution_coordinator = UniversalExecutionCoordinator(max_concurrent=10)
+            imports = _get_universal_coordinator_imports()
+            cls = imports.get('UniversalExecutionCoordinator')
+            if cls is None:
+                raise ImportError("UniversalExecutionCoordinator not available")
+            self._execution_coordinator = cls(max_concurrent=10)
             await self._execution_coordinator.initialize()
-            
+
             if self._execution_coordinator.is_available():
                 logger.info("✅ UniversalExecutionCoordinator initialized")
             else:
                 logger.warning("⚠️ UniversalExecutionCoordinator initialized with limited functionality")
-                
+
         except Exception as e:
             logger.warning(f"⚠️ UniversalExecutionCoordinator failed: {e}, using fallback")
             self._execution_coordinator = _LocalExecutionCoordinator()
             await self._execution_coordinator.initialize()
-    
+
     async def _init_security_coordinator(self) -> None:
-        """Initialize UniversalSecurityCoordinator"""
+        """Initialize UniversalSecurityCoordinator via lazy import"""
         try:
-            self._security_coordinator = UniversalSecurityCoordinator(max_concurrent=5)
+            imports = _get_universal_coordinator_imports()
+            cls = imports.get('UniversalSecurityCoordinator')
+            if cls is None:
+                raise ImportError("UniversalSecurityCoordinator not available")
+            self._security_coordinator = cls(max_concurrent=5)
             await self._security_coordinator.initialize()
-            
+
             if self._security_coordinator.is_available():
                 logger.info("✅ UniversalSecurityCoordinator initialized")
             else:
                 logger.warning("⚠️ UniversalSecurityCoordinator initialized with limited functionality")
-                
+
         except Exception as e:
             logger.warning(f"⚠️ UniversalSecurityCoordinator failed: {e}, using fallback")
             self._security_coordinator = _LocalSecurityCoordinator()
             await self._security_coordinator.initialize()
-    
+
     async def _init_monitoring_coordinator(self) -> None:
-        """Initialize UniversalMonitoringCoordinator"""
+        """Initialize UniversalMonitoringCoordinator via lazy import"""
         try:
-            self._monitoring_coordinator = UniversalMonitoringCoordinator(max_concurrent=10)
+            imports = _get_universal_coordinator_imports()
+            cls = imports.get('UniversalMonitoringCoordinator')
+            if cls is None:
+                raise ImportError("UniversalMonitoringCoordinator not available")
+            self._monitoring_coordinator = cls(max_concurrent=10)
             await self._monitoring_coordinator.initialize()
-            
+
             if self._monitoring_coordinator.is_available():
                 logger.info("✅ UniversalMonitoringCoordinator initialized")
             else:
                 logger.warning("⚠️ UniversalMonitoringCoordinator initialized with limited functionality")
-                
+
         except Exception as e:
             logger.warning(f"⚠️ UniversalMonitoringCoordinator failed: {e}")
-    
+
     async def _init_memory_coordinator(self) -> None:
-        """Initialize UniversalMemoryCoordinator"""
+        """Initialize UniversalMemoryCoordinator via lazy import"""
         try:
-            self._memory_coordinator = UniversalMemoryCoordinator(memory_limit_mb=5500)
+            imports = _get_universal_coordinator_imports()
+            cls = imports.get('UniversalMemoryCoordinator')
+            if cls is None:
+                raise ImportError("UniversalMemoryCoordinator not available")
+            self._memory_coordinator = cls(memory_limit_mb=5500)
             # Memory coordinator doesn't need explicit initialization
-            
+
             logger.info("✅ UniversalMemoryCoordinator initialized (5.5GB limit)")
-                
+
         except Exception as e:
             logger.warning(f"⚠️ UniversalMemoryCoordinator failed: {e}")
             self._memory_coordinator = None
@@ -1053,14 +1096,15 @@ class CoordinationLayer:
         if self._coordinator_registry is None:
             logger.warning("⚠️ CoordinatorRegistry not available")
             return
-        
-        # Map OperationType to CoordinatorOperationType
-        op_type_map = {
-            OperationType.RESEARCH: CoordinatorOperationType.RESEARCH,
-            OperationType.SECURITY: CoordinatorOperationType.SECURITY,
-            OperationType.EXECUTION: CoordinatorOperationType.EXECUTION,
-        }
-        
+
+        # Map OperationType to CoordinatorOperationType via lazy import
+        imports = _get_universal_coordinator_imports()
+        CoordOpType = imports.get('OperationType')
+
+        if not CoordOpType:
+            logger.warning("⚠️ CoordinatorOperationType not available")
+            return
+
         # Note: This is a simplified registration - full integration would require
         # adapter pattern to bridge between universal and legacy types
         logger.info(f"✅ Registered coordinator for {operation_type.value}")
@@ -1094,7 +1138,7 @@ class CoordinationLayer:
                 self._context_manager.store_decision_request(request, decision_id)
             
             # Route via CoordinatorRegistry if available
-            if self._coordinator_registry and UNIVERSAL_COORDINATORS_AVAILABLE:
+            if self._coordinator_registry and _check_universal_coordinators():
                 response = await self._delegate_via_registry(request, decision_id)
             else:
                 # Direct delegation to specific coordinator
@@ -1127,20 +1171,28 @@ class CoordinationLayer:
         decision_id: str
     ) -> DecisionResponse:
         """Delegate operation via CoordinatorRegistry with load balancing."""
+        # Get lazy imports
+        imports = _get_universal_coordinator_imports()
+        CoordOpType = imports.get('OperationType')
+
         # Map operation type
-        op_type_map = {
-            OperationType.RESEARCH: CoordinatorOperationType.RESEARCH,
-            OperationType.SECURITY: CoordinatorOperationType.SECURITY,
-            OperationType.EXECUTION: CoordinatorOperationType.EXECUTION,
-        }
-        
+        op_type_map = {}
+        if CoordOpType:
+            op_type_map = {
+                OperationType.RESEARCH: CoordOpType.RESEARCH,
+                OperationType.SECURITY: CoordOpType.SECURITY,
+                OperationType.EXECUTION: CoordOpType.EXECUTION,
+            }
+
         coordinator_op_type = op_type_map.get(request.operation_type)
         if not coordinator_op_type:
             # Fallback to direct delegation
             return await self._delegate_direct(request, decision_id)
-        
+
         # Create coordinator decision response
-        from ..coordinators import DecisionResponse as CoordDecisionResponse
+        CoordDecisionResponse = imports.get('DecisionResponse')
+        if CoordDecisionResponse is None:
+            return await self._delegate_direct(request, decision_id)
         
         coord_decision = CoordDecisionResponse(
             decision_id=decision_id,
@@ -1387,7 +1439,7 @@ class CoordinationLayer:
             "operations_delegated": self._delegation_count,
             "coordinator_stats": self._coordinator_stats,
             "available_coordinators": list(self._coordinator_stats.keys()),
-            "universal_coordinators": UNIVERSAL_COORDINATORS_AVAILABLE,
+            "universal_coordinators": _check_universal_coordinators(),
         }
 
         # Add registry stats if available

@@ -2031,7 +2031,7 @@ async def async_run_live_feed_pipeline(
         # each other and preserved across exceptions (fail-soft semantics).
         # accepted_findings = quality-gated count (from async_ingest_findings_batch results)
         # stored_findings = actual storage success count (from lmdb_success field)
-        accepted_findings = 0
+        accepted_findings = len(findings)  # pre-set: quality gate pass = all findings
         stored_findings = 0
         _entry_store_error: str | None = None
 

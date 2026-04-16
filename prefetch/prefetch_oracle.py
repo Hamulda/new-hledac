@@ -1,9 +1,43 @@
 """
 PrefetchOracle – rozhoduje, které URL se mají načítat na pozadí.
+
+PROMOTION GATE — EXPERIMENTAL / HEAVY / NOT PROMOTED
+=====================================================
 Používá dvoustupňový výběr:
 1. Stage A: ultralehké kandidáty (common neighbors, PQIndex, sketchy)
 2. Stage B: ML reranker (SSM) pro top‑K kandidátů (jako sekvence).
 Online učení pomocí contextual banditu (LinUCB) s UCB selection.
+
+STATUS: EXPERIMENTAL
+  - SSMReranker (řádek 99): placeholder impl, žádné reálné trained weights
+  - on_new_candidates() je voláno? GREP: žádné production call site
+  - scheduler.schedule_prefetch() — existuje v ParallelResearchScheduler? ANO, ale unused
+  - Bandit arms: unbounded dict (bandit_arms arm_id → {A, b, A_inv}), nikdy nemazáno
+  - LRU caches: _seen_fingerprints (100k), _scheduled (100k), _url_to_id (100k) — bounded
+  - _id_to_url list: unbounded (roste bez limitu při register_node_url)
+
+M1 8GB MEMORY CEILING:
+  - SSMReranker: mlx.nn.Sequential + linear layers (neznámá velikost bez váhy)
+  - BANDIT_DIM = 131 (64+3+64) — 131-dim vectors pro každý arm
+  - bandit_arms: pokud 10k unique domains → 10k * 131 * 8 bytes * 3 arrays ≈ 30MB+
+  - entity embeddings: mx.random.normal(64) fallback, žádný real embedding store
+  - _neighbors_limit adaptivní (2-20), _pq_k adaptivní (1-10)
+  - Celkový memory footprint: těžko odhadnutelný bez reálných váh
+
+ALLOWED PURPOSE: Spekulativní prefetch pro URL discovery
+  - NENÍ součástí canonical fetch_coordinator path
+  - Nemá žádnou proof-of-value v produkčním OSINT kontextu
+  - LinUCB cold-start: lambda_prior=1.0, alpha=0.5 — empiricky neurčené
+
+PROMOTION ELIGIBILITY: NO
+  - Žádné production call sites
+  - Reranker je pure placeholder — "Zde by se načetly váhy z disku" (komentář v kódu)
+  - _fetch_for_prefetch vrací {'success': False, 'reason': 'not_implemented'}
+  - Bandit arms unbounded = memory leak na M1 8GB při dlouhém běhu
+  - Adaptivní limity Stage A (1.5ms budget) jsou příliš agresivní pro M1 MLX overhead
+
+SECURITY: Žádná.
+STEALTH: Prefetch generuje síťový traffic — žádná stealth vrstva.
 """
 
 import asyncio

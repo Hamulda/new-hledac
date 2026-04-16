@@ -156,11 +156,20 @@ class QuantumPathConfig:
 
 
 class QuantumInspiredPathFinder:
-    """Quantum-inspired pathfinder for knowledge graphs using MLX.
+    """
+    Quantum-inspired pathfinder for knowledge graphs using MLX.
 
-    This class implements quantum random walks and Grover-style amplitude
-    amplification to find hidden paths in knowledge graphs. It is optimized
-    for M1 MacBook with 8GB RAM using MLX for acceleration.
+    ML OVERLAY ROLE — NOT a storage backend
+    =======================================
+    This class is an ML overlay that provides quantum-inspired algorithms
+    (random walks, Grover amplification) for pathfinding in knowledge graphs.
+    It does NOT own storage — it operates on data provided by the analytics
+    donor backend (DuckPGQGraph) or truth store (IOCGraph).
+
+    Features:
+    - Quantum random walks and Grover-style amplitude amplification
+    - M1 8GB RAM optimized with MLX acceleration and NumPy fallback
+    - Lazy-first import discipline (heavy deps loaded on-demand)
 
     Attributes:
         config: QuantumPathConfig instance with pathfinding parameters.
@@ -1084,6 +1093,12 @@ def _stable_node_id(value: str) -> int:
 class DuckPGQGraph:
     """
     SQL/PGQ graph backend pres DuckDB.
+
+    GRAPH ANALYTICS PROVIDER / DONOR BACKEND
+    ==========================================
+    Owns: stats(), get_top_nodes_by_degree(), export_edge_list(), find_connected().
+    NOT truth store — IOCGraph (Kuzu) serves that role for buffered writes and STIX.
+
     SQL:2023 MATCH clause pro path queries.
     Fallback: recursive CTE pokud duckpgq extension nedostupná.
     Výhody: vectorized Arrow IPC, zero-copy, zvládne 10M+ hran.

@@ -114,9 +114,9 @@ class IOCGraph:
     """
     Kuzu-backed IOC entity graph with async-safe operations.
 
-    Single-thread Kuzu executor ensures thread safety.
-    Idempotent upsert via MATCH→CREATE/SET (Kuzu has no MERGE).
-    Fail-open: any Kuzu error logs a warning and returns None/empty.
+    GRAPH TRUTH STORE — owns authoritative IOC entity storage.
+    - buffer_ioc(), flush_buffers(), upsert_ioc_batch(), export_stix_bundle(), pivot()
+    - NOT analytics backend — DuckPGQGraph serves that role.
     """
 
     def __init__(self, db_path: Optional[Path] = None) -> None:

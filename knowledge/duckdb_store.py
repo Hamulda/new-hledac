@@ -1,12 +1,34 @@
 """
-DuckDB Shadow Analytics Sidecar
-================================
+DuckDB Shadow Analytics Sidecar — CANONICAL SPRINT FACTS STORE
+===============================================================
 
-Sprint 8AO + 8AS: DuckDB shadow-mode analytical sidecar with async safety.
+ROLE: Canonical store for sprint-level facts and derived analytics.
 
-DESIGN PRINCIPLES
------------------
-- This is a SIDE CAR, not a replacement for SQLite/Kuzu/LanceDB
+⚠️  "Shadow" in the class name refers to historical naming (Sprint 8AO/8AS).
+    This store is NOT a shadow of anything — it IS the canonical sprint facts
+    authority for the analytics subsystem.
+
+FACTS HIERARCHY (3 tiers):
+--------------------------
+TIER 1 — SPRINT FACTS (DuckDB, durable):
+    sprint_delta       — per-sprint metrics: query, duration, new_findings, dedup_hits, ioc_nodes
+    sprint_scorecard   — per-sprint aggregated scores: fpm, ioc_density, synthesis_confidence
+    source_hit_log     — per-sprint source attribution: source_type, hit_rate
+
+TIER 2 — SHADOW FINDINGS (DuckDB, durable):
+    shadow_findings    — finding-level records forwarded from EvidenceLog.append()
+    shadow_runs        — run-level metadata
+
+TIER 3 — GRAPH (Kuzu/LanceDB, injected):
+    IOCGraph           — truth graph for IOC storage (buffered writes)
+    SemanticStore      — FastEmbed+ LanceDB for ANN semantic search
+
+LEDGER vs FACTS boundary:
+    EvidenceLog (ledger)  →  analytics_hook (shadow path)  →  DuckDBShadowStore (sprint facts)
+    ResearchContext (carrier)  →  ContextHandoffMetadata (handoff descriptor)
+
+DESIGN PRINCIPLES:
+------------------
 - DuckDB is NOT imported at module level of any boot-path file
 - DuckDB import is deferred to first actual use inside initialize()
 - When RAMDISK_ACTIVE=True: persistent DB under DB_ROOT, temp under RAMDISK_ROOT
@@ -18,10 +40,10 @@ DESIGN PRINCIPLES
 - Batch methods enforce chunking: max_batch_size=500
 - aclose() is idempotent with _closed flag
 
-SCHEMA
-------
-shadow_findings:  id, query, source_type, confidence, ts
-shadow_runs:      run_id, started_at, ended_at, total_fds, rss_mb
+SCHEMA (per tier):
+------------------
+Tier 1:  sprint_delta, sprint_scorecard, source_hit_log
+Tier 2:  shadow_findings, shadow_runs
 
 ASYNC API SURFACE
 ----------------
@@ -32,16 +54,6 @@ ASYNC API SURFACE
 - async_query_recent_findings(limit=10)  — query findings
 - async_healthcheck()      — returns True if healthy
 - aclose()            — async idempotent shutdown
-
-USAGE (async)
-------------
-from hledac.universal.knowledge.duckdb_store import DuckDBShadowStore
-
-store = DuckDBShadowStore()
-await store.async_initialize()
-await store.async_record_shadow_run("run1", time.time(), None, 50, 512)
-await store.async_record_shadow_findings_batch([...], max_batch_size=500)
-await store.aclose()
 """
 
 from __future__ import annotations

@@ -1,3 +1,47 @@
+"""
+Kademlia DHT Node pro distributed storage a lookup.
+
+PROMOTION GATE — EXPERIMENTAL / SIMULATED / NOT PROMOTED
+==========================================================
+Kademlia-based distributed hash table node s BEP-9/BEP-10 extension support.
+
+STATUS: EXPERIMENTAL / SIMULATED
+  - crawl_dht_for_keyword(): "Simulovaný crawl" — reálný DHT vyžaduje BEP-10/BEP-9 implementaci
+  - BEP-9 metadata extension (ut_metadata) NENÍ IMPLEMENTOVÁNA — pouze comments
+  - Transport layer: register_handler / send_message API existuje, ale _transport je vždy None
+  - find_value(): lokální data_store + simulované RPC — žádný reálný síťový provoz
+  - BOOTSTRAP_PEERS: 4 public BT DHT routery, ale pouze socket.connect() test (ping bez Kademlia ping)
+
+M1 8GB MEMORY CEILING:
+  - data_store: OrderedDict, max 10_000 položek, TTL 3600s — BOUNDED ✓
+  - routing_table: Dict[bucket_index → list of peers], k=20 peers per bucket
+  - _pending_rpcs: Dict[rpc_id → Future], cleanup po timeout (3s)
+  - MAX_ITEM_BYTES = 256KB hard cap na store — BOUNDED ✓
+  - Žádné MLX/alokace mimo síťové operace
+
+ALLOWED PURPOSE: BT DHT crawler pro info_hash discovery
+  - Primární use case: hledání torrent content přes DHT síť
+  - NENÍ součástí OSINT canonical pipeline (web fetching, RSS, feed discovery)
+  - Koreluje s blockchain_analyzer? NE — zcela nezávislé moduly
+
+PROMOTION ELIGIBILITY: NO
+  - SIMULATED label = not production-ready
+  - Žádné production call sites (grep: 0 volání crawl_dht_for_keyword/lookup_info_hash_metadata)
+  - Transport layer je stub — _transport je vždy None → _ping/_send_* jsou no-ops
+  - BEP-9/BEP-10 neimplementováno = reálný BT content discovery nefunguje
+  - Problém: autrual DHT crawler by generoval M1 síťovou stopu bez užitku pro OSINT
+
+SECURITY: Žádná.
+  - socket.AF_INET pouze (IPv4-only bootstrap)
+  - Žádná autentifikace v DHT zprávách
+STEALTH: Žádná.
+  - DHT provoz je plně identifikovatelný jako BitTorrent traffic
+  - Není to "stealth" — DHT routery vědí že jsme BT klient
+
+DŮLEŽITÉ: Tento modul je paper-compliant Kademlia implementation,
+ALE bez reálného síťového transportu je to pouze local DHT simulation.
+"""
+
 import asyncio
 import hashlib
 import logging

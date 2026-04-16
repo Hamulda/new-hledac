@@ -1,14 +1,30 @@
 """
 Brain komponenty pro UniversalResearchOrchestrator.
 
-Obsahuje:
-- Hermes3Engine: Hlavní LLM engine s Hermes-3
-- DecisionEngine: Rozhodovací logika
-- InsightEngine: Pokročilá generace insightů (z deep_research)
-- InferenceEngine: Inferenční engine pro OSINT analýzu
-- HypothesisEngine: Automatizovaná generace a testování hypotéz
-- MoERouter: Mixture-of-Experts routing pro M1 8GB
-- DistillationEngine: MLX-based reasoning chain quality scoring
+PROMOTION GATE — FACADE MODULE
+================================
+brain/__init__.py je čistý FACADE / re-export modul.
+Neinstantiuje žádné těžké enginy přímo — pouze zpřístupňuje symboly.
+
+STATUS: FACADE (export-only, no active promotion path)
+M1 8GB MEMORY CEILING: N/A — facade nealokuje žádné zdroje
+ALLOWED PURPOSE: Re-export dostupných brain submodulů přes _AVAILABLE flagy
+PROMOTION ELIGIBILITY: NO — žádný brain engine není canonical-surface
+
+Submoduly a jejich status (viz každý modul):
+- Hermes3Engine: L1 canonical (samostatný soubor)
+- DecisionEngine: L1 canonical (samostatný soubor)
+- InsightEngine: EXPERIMENTAL — importuj z insight_engine.py
+- InferenceEngine: EXPERIMENTAL — importuj z inference_engine.py
+- HypothesisEngine: EXPERIMENTAL — importuj z hypothesis_engine.py
+- MoERouter: DORMANT — mlx_nn-none guard, žádné aktivní volání
+- DistillationEngine: DORMANT — nn=None guard, žádné aktivní volání
+- ModelManager: L1 canonical (samostatný soubor, M1 lifecycle management)
+- NEREngine: EXPERIMENTAL — GLiNER-X model, velká RAM stopa
+
+DŮLEŽITÉ: Brain facade NEPROMPTUJE žádné heavy enginy do aktivního runtime.
+Přidání nového importu sem neznamená, že je "podporováno" nebo "production-ready".
+Vždy kontroluj _AVAILABLE flag a přítomnost SKUTEČNÝCH call sites v kódu.
 """
 
 from .hermes3_engine import Hermes3Engine

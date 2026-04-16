@@ -1,5 +1,27 @@
 """
 LMDB-backed model store pro federated learning.
+
+PROMOTION GATE — DONOR ONLY / DORMANT
+======================================
+Tento modul je určen POUZE jako datová vrstva (donor) pro federated learning,
+ALE samotný federated learning workflow v tomto projektu NENÍ IMPLEMENTOVÁN.
+
+STATUS: DORMANT — není aktivní federated learning koordinace
+M1 8GB MEMORY CEILING: MAX_PAYLOAD_BYTES = 256KB per model write
+  - 100MB LMDB map_size
+  - 2x ThreadPoolExecutor workers
+  - Model váhy se serializují přes numpy hex → float16 → float32 roundtrip
+ALLOWED PURPOSE: LMDB persistence layer pro model checkpointing (donor only)
+PROMOTION ELIGIBILITY: NO — žádný FL coordinator neexistuje, rl/marl_coordinator.py je DORMANT
+
+CALL-SITE AUDIT: 0 skutečných volání async_save_model / async_load_model
+  v projektu mimo testy. Model federation je paper-compliant storage bez FL algoritmu.
+
+SECURITY: _try_encrypt / _try_decrypt s AES-GCM fallback na plaintext —
+  toto je záměrné (security je out-of-scope pro donor-only store)
+
+AUTHORITY: Tento soubor NEOPRAVŇUJE žádné federated learning operace.
+Je to čistě LMDB wrapper kolem numpy serializace.
 """
 
 import asyncio
