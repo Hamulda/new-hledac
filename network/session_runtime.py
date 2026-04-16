@@ -37,7 +37,10 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# Timeout Constants Surface — use with asyncio.timeout()
+# =============================================================================
+# =============================================================================
+# Timeout Constants Surface — canonical timeouts for session consumers
+# Use with asyncio.timeout() — NOT with ClientSession timeout= parameter
 # =============================================================================
 # API calls: fast, short timeouts
 API_CONNECT_TIMEOUT_S: float = 10.0
@@ -46,6 +49,10 @@ API_READ_TIMEOUT_S: float = 20.0
 # HTML/fetch: moderate timeouts for larger payloads
 HTML_CONNECT_TIMEOUT_S: float = 15.0
 HTML_READ_TIMEOUT_S: float = 35.0
+
+# CT/cert transparency: lightweight JSON, bounded response
+CT_CONNECT_TIMEOUT_S: float = 10.0
+CT_READ_TIMEOUT_S: float = 15.0
 
 # Tor/low-priority: generous timeouts
 TOR_CONNECT_TIMEOUT_S: float = 45.0

@@ -933,12 +933,13 @@ async def _fetch_and_process_page(
                 redirect_target=fetched_redirect_target,
             )
 
-        # ---- Per-page dedup: (value, label, pattern) exact dedup -----------
+        # ---- Per-page dedup: (label, pattern, value) exact dedup -----------
+        # F182D: Order changed from (value,label,pattern) to match feed pipeline (label,pattern,value)
         seen: set[tuple[str, str, str]] = set()
         unique_findings: list = []
 
         for hit in hits:
-            key = (hit.value, hit.label if hit.label else "", hit.pattern)
+            key = (hit.label or "", hit.pattern, hit.value)
             if key in seen:
                 continue
             seen.add(key)
@@ -958,7 +959,7 @@ async def _fetch_and_process_page(
         # F180B FIX: accepted_count = quality-gated count (before storage)
         # stored_count = actual storage success (lmdb_success)
         # These are SEPARATE — accepted does NOT imply stored (DuckDB may fail)
-        accepted_count = len(unique_findings)
+        accepted_count = 0
         stored_count = 0
 
         # ---- Storage ---------------------------------------------------------

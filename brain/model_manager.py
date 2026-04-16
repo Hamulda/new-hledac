@@ -131,12 +131,19 @@ class ModelManager:
     # It is NOT the same as the coarse-grained phase system in
     # capabilities.ModelLifecycleManager (BRAIN/TOOLS/SYNTHESIS/CLEANUP).
     #
-    # OWNERSHIP DECLARATION (F6.5):
-    #   - Acquire/load owner:       THIS CLASS (ModelManager singleton)
-    #   - Unload/cleanup owner:     THIS CLASS._release_current_async()
-    #                               + brain.model_lifecycle.unload_model() (7K SSOT)
-    #   - Phase enforcer:           capabilities.ModelLifecycleManager (FACADE only)
-    #   - Capability layer:         NOT a load owner — NEVER call this map directly
+    # OWNERSHIP DECLARATION (F6.5) — F182B CORRECTED:
+    #   - Acquire/load owner:        THIS CLASS (ModelManager singleton) — canonical
+    #   - Unload helper (7K SSOT):  ENGINE.unload() — Hermes3Engine.unload() for Hermes
+    #                                brain.model_lifecycle.unload_model() delegates to engine.unload()
+    #   - Unload cleanup owner:     THIS CLASS._cleanup_memory_async() — MLX cache + gc
+    #   - Emergency seam:           brain.model_lifecycle request_emergency_unload() + flag
+    #   - Windup-local sidecar:      class ModelLifecycle (windup_engine.SynthesisRunner)
+    #   - Compat wrapper:            root model_lifecycle.py (COMPAT_BACKWARD, star-export only)
+    #
+    # F182B CLARIFICATION:
+    #   - "unload" means engine.unload() with 7K order (batch shutdown → cache evict → GC → mx.clear)
+    #   - model_lifecycle.unload_model() is a SHADOW-STATE HELPER, NOT a separate unload authority
+    #   - Both _release_model_async and _release_current_async delegate to engine.unload()
     #
     # LAYER MAPPING (F6.5) — MUST NOT BE CONFLATED:
     #   Layer 1 (workflow-level, this map):
@@ -514,7 +521,7 @@ class ModelManager:
                     pass
 
             # Sprint F150H: Hard fail-fast memory admission gate
-            # Runs BEFORE factory() — prevents OOM on heavy model load
+            # F182B FIX: Must run BEFORE factory() — prevents OOM on heavy model load
             self._check_memory_admission()
 
             # Načteme nový model
@@ -596,8 +603,9 @@ class ModelManager:
                 logger.error(f"Failed to release model {model_name}: {e}")
                 # F166E: Exception swallowed — model already removed from registry
 
-        # Memory cleanup regardless of unload outcome
-        await self._cleanup_memory_async(model_type)
+        # F182B: Pass captured model reference — registry already cleared,
+        # _cleanup_memory_async cannot look it up again
+        await self._cleanup_memory_async(model_type, engine=model)
 
     async def release_current(self) -> None:
         """Async uvolnění aktuálně načteného modelu."""
@@ -639,25 +647,29 @@ class ModelManager:
                 # F168E: Exception swallowed — model already removed from registry
 
         # Memory cleanup regardless of unload outcome
-        await self._cleanup_memory_async(model_type)
+        # F182B: Pass captured model reference — registry already cleared
+        await self._cleanup_memory_async(model_type, engine=model)
 
-    async def _cleanup_memory_async(self, model_type: Optional[ModelType] = None) -> None:
+    async def _cleanup_memory_async(
+        self,
+        model_type: Optional[ModelType] = None,
+        engine: Optional[Any] = None
+    ) -> None:
         """Agresivní async čištění paměti po uvolnění modelu.
 
         Args:
             model_type: ModelType being released. If None, uses self._current_model.
+            engine: Pre-captured model/engine instance (F182B: required when registry already cleared).
         """
         # =========================================================================
         # Sprint 30: KV Cache Compression - apply before cleanup
         # =========================================================================
         # Invariant 3: Quantization in cleanup() - no inference impact
-        # FIX: Use passed model_type since _current_model is None at call time
+        # F182B: Use passed engine reference — registry cleared BEFORE this call
         target_model = model_type if model_type is not None else self._current_model
-        if target_model and target_model.name == "HERMES":
+        if target_model and target_model.name == "HERMES" and engine is not None:
             try:
-                from .hermes3_engine import Hermes3Engine
-                engine = self._loaded_models.get(target_model)
-                if engine and hasattr(engine, '_prompt_cache') and engine._prompt_cache:
+                if hasattr(engine, '_prompt_cache') and engine._prompt_cache:
                     context_len = self._estimate_context_length(engine._prompt_cache)
                     if context_len > 1024:
                         # Invariant 1: Only compress if context > 1024 tokens
@@ -788,11 +800,13 @@ class ModelManager:
 
         async with self._lock:
             last_released: Optional[ModelType] = None
+            last_engine: Optional[Any] = None
             for model_type in list(self._loaded_models.keys()):
                 model_name = model_type.name.lower()
                 last_released = model_type
                 try:
                     model = self._loaded_models[model_type]
+                    last_engine = model
                     if hasattr(model, 'unload'):
                         logger.info(f"[MODEL RELEASE] {model_name} start")
                         if inspect.iscoroutinefunction(model.unload):
@@ -807,7 +821,8 @@ class ModelManager:
                     logger.error(f"Failed to release {model_name}: {e}")
 
             self._current_model = None
-            await self._cleanup_memory_async(last_released)
+            # F182B: Pass last engine reference for KV cache compress
+            await self._cleanup_memory_async(last_released, engine=last_engine)
             logger.info("✓ All models released")
 
     async def with_phase(self, phase_name: str):

@@ -8,6 +8,10 @@ from typing import List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
+# Canonical timeout constants for CT scan — use with asyncio.timeout()
+_CT_CONNECT_TIMEOUT_S: float = 10.0
+_CT_READ_TIMEOUT_S: float = 15.0
+
 try:
     import aiohttp
     AIOHTTP_AVAILABLE = True
@@ -17,7 +21,11 @@ except ImportError:
 
 
 class _CTLogScanner:
-    """Scan crt.sh for subdomains and certificates, with local SQLite cache."""
+    """Scan crt.sh for subdomains and certificates, with local SQLite cache.
+
+    NON-HOT-PATH surface — owns its session lifecycle when used standalone.
+    Supports shared-session injection for connection pooling when called from
+    a coordinator that manages session lifetime externally."""
 
     CACHE_DIR = Path.home() / ".hledac" / "ct_cache"
     CACHE_DB = CACHE_DIR / "ct_logs.db"
@@ -74,7 +82,13 @@ class _CTLogScanner:
 
         async def _fetch_with_session(session: _aiohttp.ClientSession) -> List[str]:
             url = f"https://crt.sh/?q=%.{domain}&output=json"
-            async with session.get(url, timeout=_aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(
+                url,
+                timeout=_aiohttp.ClientTimeout(
+                    connect=_CT_CONNECT_TIMEOUT_S,
+                    sock_read=_CT_READ_TIMEOUT_S,
+                ),
+            ) as resp:
                 if resp.status != 200:
                     return []
                 data = await resp.json()

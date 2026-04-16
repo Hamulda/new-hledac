@@ -1591,11 +1591,13 @@ async def _entry_to_pattern_findings(
     matched_patterns = len(hits)
 
     if not hits:
+        # F182D: matched_patterns=0 is the canonical post-scan truth.
+        # post_fallback_hits_count is stale here (pre-scan value).
         return (
             [], patterns_configured, matched_patterns, assembled_text_len,
             scan_text, enrichment_phase, article_fallback_used, article_fallback_attempted,
             quality_signal, fallback_decision, assembly_tier,
-            pre_fallback_hits_count, post_fallback_hits_count, 0,
+            pre_fallback_hits_count, matched_patterns, 0,
         )
 
     # Per-entry dedup by (label, pattern, value)
@@ -1618,7 +1620,7 @@ async def _entry_to_pattern_findings(
         findings, patterns_configured, matched_patterns, assembled_text_len,
         scan_text, enrichment_phase, article_fallback_used, article_fallback_attempted,
         quality_signal, fallback_decision, assembly_tier,
-        pre_fallback_hits_count, post_fallback_hits_count, findings_lost_to_dedup,
+        pre_fallback_hits_count, matched_patterns, findings_lost_to_dedup,
     )
 
 

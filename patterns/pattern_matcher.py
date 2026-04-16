@@ -9,7 +9,6 @@ No AO imports, no transport imports, no network access.
 from __future__ import annotations
 
 import logging
-import logging
 import re
 import sys
 import time
