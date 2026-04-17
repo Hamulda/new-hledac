@@ -6,8 +6,12 @@ SMOKE RUNNER — DIAGNOSTIC ONLY, NOT CANONICAL SPRINT PATH
 .. role::
     DIAGNOSTIC_TOOL: Tento modul je DIAGNOSTICKÝ nástroj, NENÍ production sprint owner.
 
-.. canonical_owner::
-    core.__main__:run_sprint() — SOLE canonical sprint owner.
+.. canonical_path::
+    Canonical sprint owner: ``core.__main__:run_sprint()``
+    smoke_runner uses ``_run_sprint_mode()`` — an ALTERNATE/DIAGNOSTIC entrypoint
+    (defined in ``hledac.universal.__main__._run_sprint_mode``), not the canonical owner.
+    This is intentional: smoke tests use lightweight alternate paths to avoid
+    the full canonical lifecycle overhead.
 
 .. authority_statement::
     Tento modul NEPRODUKUJE canonical sprint truth. Používá canonical path
@@ -56,18 +60,19 @@ async def main() -> int:
     ram_before = proc_before.memory_info().rss / 1024**2
     log.info(f"RAM před startem: {ram_before:.0f} MB")
 
-    # CANONICAL PATH: Import sprint entry point from canonical owner
-    # DIAGNOSTIC ONLY: This smoke runner uses canonical path, does NOT own sprint truth
+    # _run_sprint_mode lives in hledac.universal.__main__ (root __main__.py), NOT core.__main__.
+    # It is an ALTERNATE entrypoint, not the canonical sprint owner.
+    # primary import (works when smoke_runner is imported as a module):
     try:
-        from hledac.universal.core.__main__ import _run_sprint_mode
+        from hledac.universal.__main__ import _run_sprint_mode
     except ImportError:
-        log.error("Nelze importovat _run_sprint_mode z core.__main__ (canonical owner)")
+        # Intra-repo fallback: allow __main__ for testing within repo (script mode only)
+        log.error("Nelze importovat _run_sprint_mode z hledac.universal.__main__")
         log.info("Zkusím __main__ fallback pro intra-repo testing...")
         try:
-            # Intra-repo fallback: allow __main__ for testing within repo
             from __main__ import _run_sprint_mode
         except ImportError:
-            log.error("Nelze importovat _run_sprint_mode — canonical path unavailable")
+            log.error("Nelze importovat _run_sprint_mode — root __main__ unavailable")
             return 1
 
     start = time.monotonic()

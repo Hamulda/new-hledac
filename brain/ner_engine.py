@@ -1525,6 +1525,25 @@ class FeedbackPack:
         shortlist.sort(key=lambda x: x.get("priority", 0), reverse=True)
         return shortlist[:max_items]
 
+    @property
+    def operator_shortlist(self) -> list:
+        """Bounded operator shortlist (max 3) in scheduler-consumable shape.
+
+        Returns items: {action: query, target: rationale[:80], rationale: pivot_type}
+
+        This mirrors HypothesisPack.operator_shortlist for shape consistency
+        across correlation/hypothesis/NER-augmented paths.
+        """
+        raw = self.actionable_shortlist(max_items=3)
+        return [
+            {
+                "action": item.get("query", ""),
+                "target": item.get("rationale", "")[:80],
+                "rationale": item.get("pivot_type", ""),
+            }
+            for item in raw
+        ]
+
 
 def feedback_compact(
     findings: list,

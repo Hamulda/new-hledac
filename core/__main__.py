@@ -735,7 +735,7 @@ async def run_sprint(
             runtime_truth_level,
         )
 
-        # CHECKPOINT-0 taxonomy (Sprint F155 + E0-T4 + F163C + F164D + F169F)
+        # CHECKPOINT-0 taxonomy (Sprint F155 + E0-T4 + F163C + F164D + F169F + F189A)
         # Disjoint machine-readable buckets — report layer must not conflate these.
         # Bucket set:
         #   signal_reaches_findings           — findings accepted
@@ -743,12 +743,22 @@ async def run_sprint(
         #   survival_active_minimal           — F176A: bounded ACTIVE work under memory pressure
         #   hardware_limited_smoke           — F176A: zero cycles + swap/pressure (hardware, not query failure)
         #   public_backend_degraded           — F169F: public branch backend error (NetworkProxyError, HTTP errors)
-        #   feed_source_inaccessible    — F169F: all feed sources returned zero signal, public may have none
-        #   cross_branch_source_inaccessible — F169F: cross-branch sources failed, feed/public accessible
-        #   true_depleted_query         — F169F: query vocabulary exhaustively checked, no signal anywhere
-        #   degraded_public_blocker     — public branch error (legacy, non-backend errors)
-        #   windup_export_fail_soft     — windup fired on zero-findings run
-        # Priority: findings > survival > hardware_limited > pre_active_mem > public_backend > feed_ingress > true_depleted > cross_branch > degraded > short_signal > meaningful_empty > windup > depleted
+        #   degraded_public_blocker           — public branch error (legacy, non-backend errors)
+        #   meaningful_empty_run              — F169F+F189A: meaningful query, zero pattern hits, no findings
+        #   feed_ingress_blocker              — F169F: feed zero AND public discovered some signal
+        #   feed_source_inaccessible          — F169F: feed failed AND total hits=0 AND no infra error
+        #   true_depleted_query               — F169F: query vocabulary matched but nothing accepted
+        #   short_signal                      — F189A: meaningful query with hits but no accepted findings
+        #   cross_branch_source_inaccessible  — F169F: cross-branch sources failed, feed/public accessible
+        #   windup_export_fail_soft           — windup fired on zero-findings run
+        # Priority: findings > survival > hardware_limited > pre_active_mem > public_backend >
+        #   degraded > meaningful_empty > feed_ingress > feed_source_inaccessible >
+        #   true_depleted > short_signal > cross_branch > windup > depleted
+        # NOTE (F189A): meaningful_empty_run moved BEFORE _feed_zero guards because it requires
+        #   is_meaningful=True (query had runtime/hits evidence) while feed_source_inaccessible
+        #   describes a feed infrastructure failure. short_signal moved BEFORE true_depleted_query
+        #   because it requires is_meaningful=True (distinct from true_depleted_query's zero-findings
+        #   verdict which doesn't distinguish meaningful vs non-meaningful query execution).
         _public_backend_degraded = bool(
             result.public_error
             and (
@@ -774,42 +784,41 @@ async def run_sprint(
             "signal_reaches_findings"
             if result.accepted_findings > 0
             # F176A: Pre-active memory starvation — entered ACTIVE but zero cycles started
-            # under memory pressure. MUST come before survival_active_minimal (entered active
-            # with cycles started under memory pressure). More specific than hardware_limited_smoke
-            # because it requires entered_active_at_monotonic set (we reached loop guard).
+            # under memory pressure. MUST come before survival_active_minimal.
             else "pre_active_memory_starvation"
             if _is_pre_active_mem_starved
             # F176A: Survival minimal active — bounded work under memory pressure
-            # (entered ACTIVE, cycles started, but reduced config active)
             else "survival_active_minimal"
             if is_meaningful and _uma_state_pre in ("warn", "critical", "emergency")
             # F176A: Hardware-limited smoke — zero cycles, hardware pressure
-            # (never entered active OR entered but cycles_started still 0)
             else "hardware_limited_smoke"
             if _is_hardware_limited
             # F169F: explicit backend degraded first (httpx/network errors)
             else "public_backend_degraded"
             if _public_backend_degraded
-            # F169F: degraded_public_blocker BEFORE meaningful_empty_run
+            # F169F: degraded_public_blocker (non-backend public errors)
             else "degraded_public_blocker"
             if result.public_error
-            # F169F: feed_ingress_blocker before meaningful_empty_run
+            # F189A: meaningful_empty_run BEFORE _feed_zero guards — meaningful query with zero hits
+            # is a distinct bucket from feed_source_inaccessible (feed infrastructure failure).
+            else "meaningful_empty_run"
+            if is_meaningful and result.total_pattern_hits == 0 and result.accepted_findings == 0
+            # F169F: feed_ingress_blocker — feed zero but public found signal
             else "feed_ingress_blocker"
             if _feed_zero and result.public_discovered > 0
             # F169F: feed source inaccessible — feed failed AND total hits=0 AND no infra error
             else "feed_source_inaccessible"
             if _feed_zero and result.total_pattern_hits == 0 and not result.public_error
-            # F169F: meaningful_empty_run after feed_source_inaccessible
-            else "meaningful_empty_run"
-            if is_meaningful and result.total_pattern_hits == 0 and result.accepted_findings == 0
-            # F169F: query depleted — hits exist but pattern matched nothing accepted
+            # F189A: short_signal BEFORE true_depleted_query — short_signal requires is_meaningful=True
+            # (query had real runtime/hits evidence) while true_depleted_query is broader.
+            else "short_signal"
+            if is_meaningful and result.total_pattern_hits > 0 and result.accepted_findings == 0
+            # F169F: true depleted query — hits seen but pattern matched nothing accepted
             else "true_depleted_query"
             if result.accepted_findings == 0 and result.total_pattern_hits > 0 and not _public_backend_degraded
             # F169F: cross-branch source inaccessible — hits seen but blocked by source-level failure
             else "cross_branch_source_inaccessible"
             if _cross_branch_fail
-            else "short_signal"
-            if is_meaningful and result.total_pattern_hits > 0
             else "windup_export_fail_soft"
             if result.accepted_findings == 0 and _phase_times.get("WINDUP", 0) > 0 and is_meaningful
             else "depleted"

@@ -88,11 +88,14 @@ async def export_sprint(
       - ExportHandoff.scorecard — kanonický zdroj pro JSON report
 
     ACCEPTED COMPAT SEAM — store-facing fallback:
-      - Pokud top_nodes prázdné (windup běžel ale neplnil ExportHandoff.top_nodes),
-        zkusí store.get_top_seed_nodes(n=5) — store-facing seam (post-8VX).
-      - REMOVAL CONDITION: ExportHandoff.top_nodes always populated in ALL windup paths.
-      - Future owner: duckdb_store.get_top_seed_nodes() — already implemented, this
-        fallback is the compat bridge pending windup engine producing typed ExportHandoff.
+      - Pokud top_nodes prázdné (non-main caller passoval prázdný seznam),
+        zkusí store.get_top_seed_nodes(n=5) — store-facing seam.
+      - REMOVAL CONDITION: žádný — oba kanoničtí producenti (__main__._print_scorecard_report
+        i core.__main__.run_sprint) vždy plní top_nodes z store.get_top_seed_nodes() PŘED
+        konstrukcí ExportHandoff. Tento fallback je legacy defense pro ne-kanonické volající.
+      - OBRAZ: __main__ řádek 2576: _top_nodes = store.get_top_seed_nodes(n=10)
+        core.__main__ řádek 969: top_seed_nodes = store.get_top_seed_nodes(n=5)
+        → oba canonical producers už volaj store PŘED export_sprint(), fallback se nikdy netrefí.
     """
     from hledac.universal.paths import get_sprint_json_report_path
     from hledac.universal.export.COMPAT_HANDOFF import ensure_export_handoff

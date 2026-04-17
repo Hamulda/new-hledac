@@ -1,6 +1,17 @@
 """
-Universal Intelligence Module
-==============================
+Universal Intelligence Module — CAPABILITY FOREST, NOT PRODUCTION OWNER
+======================================================================
+
+.. availability_flags::
+    ``_AVAILABLE`` flags in this module indicate import success, NOT production
+    readiness or canonical wiring. A ``_AVAILABLE = True`` flag means the module
+    was successfully imported. It does NOT mean the capability is:
+      - production-wired into the canonical sprint path
+      - recommended for new development
+      - free of import-time side-effects (torch, sklearn, networkx may load)
+
+    Production sprint path: ``core.__main__:run_sprint()``
+    Canonical orchestrator: ``runtime.sprint_scheduler:SprintScheduler``
 
 Integrated from deep_research:
 - Archive Discovery (Wayback, Archive.today, IPFS, GitHub)

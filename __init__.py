@@ -46,12 +46,19 @@ Universal Package — COMPAT_EXPORT Surface (Sprint F181A)
     NEW (canonical path):
         from hledac.universal.core.__main__ import run_sprint
 
-Universal Orchestrator Package v5.0 - Autonomous
-===============================================
+Universal Package v5.0 — COMPATIBILITY EXPORT SURFACE
+=====================================================
 
-Consolidated autonomous orchestrator combining all capabilities:
+.. note::
+    This is NOT a production entrypoint. This package re-exports symbols
+    from legacy/autonomous_orchestrator.py (via autonomous_orchestrator facade)
+    and other subpackages for backward compatibility.
 
-Main exports:
+    **Production entrypoint:** ``python -m hledac.universal.core --sprint``
+    **Canonical sprint owner:** ``core.__main__:run_sprint()``
+    **Canonical orchestrator:** ``runtime.sprint_scheduler:SprintScheduler``
+
+Compatibility exports (do not imply production readiness):
 - AutonomousOrchestrator: Fully autonomous orchestrator (v5.0)
 - create_autonomous_orchestrator: Factory function
 - UniversalConfig: Configuration class
@@ -390,61 +397,6 @@ if UNIFIED_RESEARCH_AVAILABLE:
         "create_unified_research_engine",
         "UNIFIED_RESEARCH_AVAILABLE",
     ])
-
-# =============================================================================
-# ENHANCED FULLY AUTONOMOUS ORCHESTRATOR v6.0 - COMPLETE INTEGRATION
-# =============================================================================
-# Nový plně autonomní orchestrátor integrující ABSOLUTNĚ VŠE:
-# - Deep Research (archives, dark web, steganography)
-# - Temporal Analysis
-# - OSINT Intelligence
-# - Self-Healing & Recovery
-# - AI-Powered Synthesis
-
-try:
-    from .autonomous_orchestrator_enhanced import (
-        FullyAutonomousOrchestrator,
-        SourceType,
-        AutonomousStrategy,
-        ResearchFinding,
-        ResearchSource,
-        ComprehensiveResearchResult,
-        autonomous_research,
-        ResilientExecutionManager,
-    )
-    
-    # Alias pro jednodušší použití
-    UltimateOrchestrator = FullyAutonomousOrchestrator
-    
-    ENHANCED_ORCHESTRATOR_AVAILABLE = True
-    
-except ImportError as e:
-    ENHANCED_ORCHESTRATOR_AVAILABLE = False
-    import logging
-    logging.getLogger(__name__).debug(
-        f"Enhanced orchestrator not available (some dependencies missing): {e}"
-    )
-
-# Update __all__ pro enhanced orchestrator
-if ENHANCED_ORCHESTRATOR_AVAILABLE:
-    __all__.extend([
-        # Enhanced Orchestrator
-        "FullyAutonomousOrchestrator",
-        "UltimateOrchestrator",
-        "ENHANCED_ORCHESTRATOR_AVAILABLE",
-        
-        # Enhanced Types
-        "SourceType",
-        "AutonomousStrategy",
-        "ResearchFinding",
-        "ResearchSource",
-        "ComprehensiveResearchResult",
-        
-        # Convenience Functions
-        "autonomous_research",
-        "ResilientExecutionManager",
-    ])
-
 
 # =============================================================================
 # SUPREME INTEGRATION EXPORTS — NOW LAZY (F12C normalization)
