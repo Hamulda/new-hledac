@@ -11,12 +11,22 @@ Advanced pattern detection and analysis system for:
 - Sequential pattern mining (order of events)
 - Anomaly detection within patterns
 
-M1 8GB Optimized:
-- Streaming algorithms for large datasets
-- Efficient sliding window implementations
-- Memory-efficient frequency counting
-- Incremental pattern updates
-- MLX-accelerated correlation and FFT computations
+STATUS: DORMANT
+  - Zero production call sites (grep audit: legacy autonomous_orchestrator.py only)
+  - Re-exported via intelligence/__init__.py (lazy try/except)
+  - NOT on canonical sprint/autonomous_orchestrator.py hot path
+  - No call sites in prefetch_oracle.py or knowledge/ cluster
+  - Retention: pattern-matching algorithms may be useful later
+
+M1 8GB CEILING (ADVISORY):
+  - max_memory_mb=512 recommended for M1 8GB UMA
+  - _top_patterns bounded to MAX_TOP_PATTERNS=200 entries
+  - SlidingWindowCounter has max_unique=10000 hard limit
+  - FFT binned to 256 max bins
+  - MLX FFT: limited to 16+ element series before using it
+  - optimize_memory() clears caches on demand
+
+PROMOTION GATE: requires production call site evidence before activating.
 """
 
 from __future__ import annotations
@@ -562,7 +572,8 @@ class PatternMiningEngine:
         Initialize pattern mining engine.
 
         Args:
-            max_memory_mb: Maximum memory usage in MB
+            max_memory_mb: ADVISORY ceiling in MB for M1 8GB UMA (512 recommended).
+                           Not hard-enforced — rely on specific bounded structures.
             use_mlx: Whether to use MLX acceleration on M1
             min_support: Minimum support threshold for patterns (0-1)
             min_confidence: Minimum confidence threshold for patterns (0-1)

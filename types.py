@@ -1692,6 +1692,17 @@ class ExportHandoff:
             "sprint_verdict": self.sprint_verdict,
         }
 
+    def __repr__(self) -> str:
+        """Stable debug repr — shows key fields without eval risk."""
+        rn = len(self.top_nodes) if self.top_nodes else 0
+        sc_keys = len(self.scorecard) if self.scorecard else 0
+        rt = "yes" if self.runtime_truth else "no"
+        return (
+            f"ExportHandoff(sprint_id={self.sprint_id!r}, "
+            f"top_nodes={rn}, scorecard_keys={sc_keys}, "
+            f"runtime_truth={rt})"
+        )
+
 
 # =============================================================================
 # CANONICAL GROUNDING HINTS — Sprint F11b: Minimal Grounding Bridge

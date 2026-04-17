@@ -73,6 +73,14 @@ _PRE_FETCH_TEXT_MIN_CHARS: int = 150
 # Sprint F163B: low-entropy gate — detect repetitive placeholder noise
 _LOW_ENTROPY_UNIQUE_WORD_RATIO: float = 0.25
 
+# Sprint F188B: CT winner slice — bounded CT subdomain injection
+_CT_SUBDOMAIN_BOUND: int = 10
+"""Max CT subdomains to inject as synthetic discovery hits."""
+_CT_SUBDOMAIN_SCORE: float = 0.85
+"""Discovery score assigned to CT-synthesized hits (high confidence)."""
+_CT_QUERY_IS_DOMAIN_RE: re.Pattern = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.\-*[a-zA-Z0-9\]]+\.[a-zA-Z]{2,}$")
+"""Regex to detect domain-like query strings suitable for CT subdomain lookup."""
+
 # Sprint F161B: discovery false-positive band — legitimate signal but no conversion
 _DISCOVERY_FALSE_POSITIVE_THRESHOLD: float = 0.5
 """Discovery score above this with zero patterns = false positive, not waste."""
@@ -171,6 +179,8 @@ class PipelineRunResult(msgspec.Struct, frozen=True, gc=False):
     # zero_hit_accessible_fetch_count: pages that were fetched (fetched=True) with 0 pattern matches
     # (distinct from discovery_strong_content_weak which includes SKIP-tier pages)
     zero_hit_accessible_fetch_count: int = 0
+    # Sprint F188B: CT winner slice — bounded CT-discovered subdomain count (additive)
+    ct_subdomain_injected: int = 0
     # zero_hit_quality_reason_counts: breakdown of WHY zero-hit pages failed
     # keys are the specific quality_reason values from PipelinePageResult
     zero_hit_quality_reason_counts: dict = {}
@@ -1054,6 +1064,108 @@ def _ensure_patched() -> None:
 # -----------------------------------------------------------------------------
 
 
+def _query_looks_like_domain(query: str) -> bool:
+    """
+    Sprint F188B: Detect if query is a domain name suitable for CT subdomain lookup.
+
+    Returns True for "example.com", "api.example.com", "*.example.com".
+    Returns False for "apple inc", "what is DNS", "site:example.com".
+    """
+    q = query.strip()
+    if not q or len(q) > 253:
+        return False
+    return bool(_CT_QUERY_IS_DOMAIN_RE.match(q))
+
+
+def _extract_base_domain(domain: str) -> str:
+    """
+    Sprint F188B: Extract base domain from a domain string for CT scanner input.
+
+    "www.example.com" -> "example.com"
+    "api.example.com" -> "example.com"
+    "example.com"     -> "example.com"
+    "*.example.com"   -> "example.com"
+
+    Returns the input unchanged if it can't be parsed.
+    """
+    # Remove wildcard prefix
+    if domain.startswith("*."):
+        domain = domain[2:]
+    parts = domain.split(".")
+    if len(parts) >= 3:
+        # Heuristic: last two parts are the registered domain
+        return ".".join(parts[-2:])
+    return domain
+
+
+async def _inject_ct_subdomain_hits(
+    hits: tuple,
+    query: str,
+) -> tuple:
+    """
+    Sprint F188B: Thin CT winner-slice adapter.
+
+    If query looks like a domain, call the CT scanner to get subdomains,
+    synthesize them as high-confidence discovery hits, and prepend to the
+    existing hits tuple.
+
+    Fail-soft: scanner errors or non-domain queries return hits unchanged.
+    Bounded: at most _CT_SUBDOMAIN_BOUND subdomains injected.
+    M1-safe: CT scanner owns its cache; shared session reuse via async_session.
+
+    This is NOT a new discovery world — it augments existing discovery hits
+    with CT-sourced subdomains within the same fetch batch.
+    """
+    global _CT_SCANNER_GET_SUBDOMAINS
+
+    if not hits or not _query_looks_like_domain(query):
+        return hits
+
+    _ensure_ct_scanner_patched()
+    if _CT_SCANNER_GET_SUBDOMAINS is None:
+        return hits
+
+    base_domain = _extract_base_domain(query)
+
+    # Sprint F188B: use shared aiohttp session for connection pooling
+    shared_session = None
+    try:
+        from hledac.universal.network.session_runtime import async_get_aiohttp_session
+        shared_session = await async_get_aiohttp_session()
+    except Exception:
+        pass
+
+    try:
+        subdomains: list[str] = await _CT_SCANNER_GET_SUBDOMAINS(
+            base_domain, async_session=shared_session
+        )
+    except Exception:
+        subdomains = []
+
+    if not subdomains:
+        return hits
+
+    subdomains = subdomains[:_CT_SUBDOMAIN_BOUND]
+
+    # Sprint F188B: synthesize CT hits as simple structs with the same
+    # attribute interface that _fetch_and_process_page expects.
+    # Attribute-based access: hit.url, hit.title, hit.snippet, hit.rank, hit.score, hit.reason
+    class _CTHit:
+        __slots__ = ("url", "title", "snippet", "rank", "score", "reason")
+        def __init__(self, url: str, rank: int):
+            self.url = url
+            self.title = f"[CT] {url}"
+            self.snippet = f"Certificate Transparency subdomain of {base_domain}"
+            self.rank = rank
+            self.score = _CT_SUBDOMAIN_SCORE
+            self.reason = "ct_subdomain"
+
+    ct_hits = tuple(
+        _CTHit(f"https://{subdomain}", idx) for idx, subdomain in enumerate(subdomains)
+    )
+    return ct_hits + hits
+
+
 async def async_run_live_public_pipeline(
     query: str,
     store: "DuckDBShadowStore | None" = None,
@@ -1166,6 +1278,13 @@ async def async_run_live_public_pipeline(
             public_discovery_fallback_state="primary_failed_fallback_failed" if discovery_error else None,
             dominant_public_failure_mode=discovery_error if discovery_error else "no_discovery",
         )
+
+    # Sprint F188B: CT winner-slice injection — augment discovery with CT subdomains
+    # One bounded adapter: _inject_ct_subdomain_hits. Fail-soft, shared session reuse.
+    # NOT a new discovery world — same fetch batch processes both DDG and CT hits.
+    original_hit_count = len(hits)
+    hits = await _inject_ct_subdomain_hits(hits, query)
+    ct_injected = len(hits) - original_hit_count
 
     # ---- Fetch batch ---------------------------------------------------------
     # Per-call semaphore, no global batch timeout
@@ -1572,11 +1691,16 @@ async def async_run_live_public_pipeline(
         zero_hit_quality_reason_counts=zero_hit_quality_reason_counts,
         zero_hit_title_samples=zero_hit_title_samples,
         public_zero_hit_summary=public_zero_hit_summary,
+        # Sprint F188B: CT winner-slice telemetry
+        ct_subdomain_injected=ct_injected,
     )
 
 
 # Placeholder for discovery (patched in tests)
 _ASYNC_DISCOVERY_SEARCH: Any = None
+
+# Sprint F188B: CT winner slice — optional scanner seam (patched in tests)
+_CT_SCANNER_GET_SUBDOMAINS: Any = None
 
 
 def _patch_discovery(search_fn: Any) -> None:
@@ -1595,3 +1719,30 @@ def _ensure_discovery_patched() -> None:
 
 # Ensure discovery is patched on module import
 _ensure_discovery_patched()
+
+
+def _patch_ct_scanner(get_subdomains_fn: Any) -> None:
+    """Patch in a CT scanner get_subdomains(domain, async_session) -> List[str]."""
+    global _CT_SCANNER_GET_SUBDOMAINS
+    _CT_SCANNER_GET_SUBDOMAINS = get_subdomains_fn
+
+
+def _ensure_ct_scanner_patched() -> None:
+    """Lazily patch the CT scanner from network.ct_log_scanner."""
+    global _CT_SCANNER_GET_SUBDOMAINS
+    if _CT_SCANNER_GET_SUBDOMAINS is not None:
+        return
+    try:
+        from hledac.universal.network.ct_log_scanner import _CTLogScanner
+
+        _scanner = _CTLogScanner(allow_external=True, cache_ttl_days=30)
+
+        async def _get_subdomains(
+            domain: str, async_session: Any = None
+        ) -> list[str]:
+            return await _scanner.get_subdomains(domain, async_session=async_session)
+
+        _CT_SCANNER_GET_SUBDOMAINS = _get_subdomains
+    except Exception:
+        # Fail-soft: CT scanner unavailable
+        _CT_SCANNER_GET_SUBDOMAINS = None

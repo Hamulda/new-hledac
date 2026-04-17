@@ -176,18 +176,17 @@ async def close_aiohttp_session_async() -> None:
             sess = _session_instance
             _session_instance = None
             _session_closed = True
-            try:
-                # Capture the close task so we can await it before returning
-                # This prevents a race where the caller sees _session_instance=None
-                # while the close coroutine is still running
-                close_coro = sess.close()
-                await close_coro
-                logger.debug("[SESSION] aiohttp.ClientSession closed async")
-            except Exception as e:
-                logger.warning(f"[SESSION] async close error: {e}")
-                _last_error = str(e)
         else:
             _session_closed = True
+            return  # No session to close
+
+    # await OUTSIDE lock — close() is fast but we must not hold the lock during await
+    try:
+        await sess.close()
+        logger.debug("[SESSION] aiohttp.ClientSession closed async")
+    except Exception as e:
+        logger.warning(f"[SESSION] async close error: {e}")
+        _last_error = str(e)
 
 
 def get_session_runtime_status() -> dict:

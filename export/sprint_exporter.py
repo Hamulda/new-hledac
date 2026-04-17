@@ -52,7 +52,7 @@ import asyncio
 import json
 import logging
 import pathlib
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from hledac.universal.types import ExportHandoff
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 
 async def export_sprint(
     store: Any,
-    handoff: Union["ExportHandoff", dict, None],  # type: ignore[name-defined]
+    handoff: "ExportHandoff",  # type: ignore[name-defined]
     sprint_id: str | None = None,
 ) -> dict:
     """
@@ -71,7 +71,11 @@ async def export_sprint(
     Voláno z _print_scorecard_report() v __main__.py EXPORT fázi.
     Nikdy nevyhodí výjimku.
 
-    Accepts typed ExportHandoff OR raw dict (backward compat via ensure_export_handoff).
+    Canonical input: typed ExportHandoff from __main__._print_scorecard_report().
+    The handoff parameter is declared as ExportHandoff — the canonical producer
+    always passes typed ExportHandoff. The dict/None compat paths in
+    ensure_export_handoff() are preserved for backward compat but are NOT
+    exercised by the canonical producer path.
 
     Součásti:
       1. JSON report do ~/.hledac/reports/{sprint_id}_report.json
@@ -93,8 +97,11 @@ async def export_sprint(
     from hledac.universal.paths import get_sprint_json_report_path
     from hledac.universal.export.COMPAT_HANDOFF import ensure_export_handoff
 
-    # Sprint 8VJ §C: Normalize ExportHandoff | dict | None → typed ExportHandoff
-    # Maintains backward compat: dict input → from_windup() extraction
+    # Sprint F186C: Tighten typed contract.
+    # Canonical producer (__main__) always passes typed ExportHandoff.
+    # ensure_export_handoff() normalizes typed/non-typed at consumer boundary —
+    # dict/None compat preserved but NOT exercised by canonical producer.
+    from hledac.universal.types import ExportHandoff as TypesExportHandoff
     eh = ensure_export_handoff(handoff, default_sprint_id=sprint_id or "unknown")
 
     # Resolve sprint_id — prefer from handoff (typed path)

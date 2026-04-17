@@ -57,10 +57,10 @@ except ImportError:
 #   residual   — shared helper path. Owned by multiple callers. Not a sprint owner.
 #   diagnostic — probe/benchmark only. Not for production sprints.
 #
-# F177D sharpening:
-#   - "canonical" is now the ONLY production sprint owner role
+# F186A sharpening:
+#   - "canonical" is the ONLY production sprint owner role
 #   - root main() is shell_only (never sprint owner, only dispatcher)
-#   - _run_sprint_mode is confirmed alternate (NOT canonical)
+#   - _run_sprint_mode is DEPRECATED / UNREACHABLE (never called from active main() path)
 #   - run_warmup is confirmed residual (shared helper, NOT lifecycle owner)
 #   - _run_public_passive_once is confirmed alternate (NOT canonical)
 #   - _run_observed_default_feed_batch_once is confirmed diagnostic (probe only)
@@ -73,19 +73,26 @@ ENTRYPOINT_AUTHORITY = {
     "canonical_sprint_owner": "hledac.universal.core.__main__.run_sprint",
     # Root role: shell/dispatcher — main() reads args, delegates to canonical or alternate.
     # main() is NEVER a sprint owner. It only dispatches.
+    # IMPORTANT: root main() --sprint delegates to core.__main__.run_sprint() (canonical path).
+    # There are TWO entrypoints that call run_sprint():
+    #   1. python -m hledac.universal --sprint "query" 1800  [canonical operator path]
+    #   2. python -m hledac.universal.core --sprint ...    [alternate entrypoint]
+    # Both invoke run_sprint() as canonical owner; root main() is the canonical CLI.
     "root_role": "shell/dispatcher surface — main() dispatches, never owns sprint state",
     "alternate_paths": {
         "_run_sprint_mode": {
             "location": "hledac.universal.__main__._run_sprint_mode",
             "role": "alternate",
             "non_canonical": True,
+            "DEPRECATED": True,
+            "UNREACHABLE": True,
             "allowed_purpose": (
                 "F162C legacy sprint hot-path. "
-                "Owns full lifecycle state locally. "
-                "Canonical owner is core.__main__.run_sprint(). "
-                "Use only during migration; do not add new call-sites."
+                "DEPRECATED — UNREACHABLE from active main() CLI path. "
+                "main() --sprint delegates to core.__main__.run_sprint() (canonical). "
+                "This function is kept for backward compatibility but is effectively dead code."
             ),
-            "owner_status": "not_canonical — owns lifecycle state but NOT the canonical report boundary",
+            "owner_status": "deprecated/unreachable — not called from active CLI path",
         },
         "_run_public_passive_once": {
             "location": "hledac.universal.__main__._run_public_passive_once",
@@ -117,10 +124,10 @@ ENTRYPOINT_AUTHORITY = {
             "owner_status": "diagnostic — probe only, no sprint ownership",
         },
     },
-    # F177D: authority census — summary of who calls what
+    # F186A: authority census — summary of who calls what
     "_authority_census": {
         "canonical_sprint_calls": ["main() --sprint → core.__main__.run_sprint()"],
-        "alternate_production_paths": ["_run_sprint_mode (owns lifecycle, NOT canonical report)", "_run_public_passive_once (no lifecycle, no report boundary)"],
+        "alternate_production_paths": ["_run_sprint_mode (DEPRECATED/UNREACHABLE)", "_run_public_passive_once (no lifecycle, no report boundary)"],
         "residual_helper_paths": ["run_warmup (shared WARMUP helper, called by both canonical and alternate)"],
         "diagnostic_paths": ["_run_observed_default_feed_batch_once (probe only)"],
         # Shell-only: main() and pure utility functions. Never sprint owners.
@@ -136,19 +143,19 @@ ENTRYPOINT_AUTHORITY = {
             "main() --pivot — semantic pivot, no sprint ownership (alternate)",
         ],
     },
-    # F177D: role summary — quick lookup table
+    # F186A: role summary — quick lookup table
     "_role_summary": {
         "canonical_sprint_owner": "canonical",
         "main()": "shell",
         "main() --sprint": "shell (delegates to canonical)",
         "main() --ct-pivot": "alternate",
         "main() --pivot": "alternate",
-        "_run_sprint_mode()": "alternate",
+        "_run_sprint_mode()": "alternate/deprecated/unreachable",
         "_run_public_passive_once()": "alternate",
         "run_warmup()": "residual",
         "_run_observed_default_feed_batch_once()": "diagnostic",
     },
-    # F177D: key invariant — no confusion between canonical and observed/diagnostic
+    # F186A: key invariant — no confusion between canonical and observed/diagnostic
     "_non_confusion_invariant": (
         "Canonical path (core.__main__.run_sprint) produces canonical_run_summary with "
         "canonical_sprint_owner='core.__main__.run_sprint'. "
@@ -2590,14 +2597,20 @@ async def _run_sprint_mode(
     install_signal_handlers: bool = False,
 ) -> None:
     """
-    F162C NON-CANONICAL ALTERNATE: This is NOT the canonical sprint owner.
+    F162C NON-CANONICAL ALTERNATE — DEPRECATED / UNREACHABLE IN ACTIVE PATH.
+
+    This is NOT the canonical sprint owner.
+    Canonical sprint owner is core.__main__.run_sprint().
+    This function is a legacy alternate path — prefer canonical owner.
+
+    IMPORTANT: This function is NEVER called from main() (the active CLI entry point).
+    main() --sprint delegates to core.__main__.run_sprint() (canonical path).
+    This function is kept for backward compatibility but is effectively dead code.
+
     Sprint 8PC: 30-minute autonomous sprint cycle entrypoint.
 
     BOOT → WARMUP (5s) → ACTIVE (parallel pipeline runs)
            → WINDUP (T-3min) → EXPORT → TEARDOWN
-
-    Canonical sprint owner is core.__main__.run_sprint().
-    This function is a residual/alternate path — prefer canonical owner.
 
     In ACTIVE:
         - Runs live_feed_pipeline.async_run_default_feed_batch() every 60s

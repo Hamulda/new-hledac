@@ -1,4 +1,4 @@
-"""Intelligent Input Detector for OSINT analysis.
+"""HELPER — Intelligent Input Detector for OSINT analysis.
 
 Detects and analyzes input types for the universal processing pipeline.
 Supports file type detection via magic bytes, content analysis, pattern

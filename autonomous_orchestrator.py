@@ -122,8 +122,9 @@ _for_export = [
     "UnifiedToolRegistry",
     "ToolCategory",
     "ToolCapability",
-    "deep_research",
-    "create",
+    # "deep_research" — REMOVED F187A: does NOT exist as top-level in legacy module
+    # (UnifiedResearchEngine.deep_research() lives in enhanced_research.py, not here)
+    # "create" — REMOVED F187A: class method, not a top-level factory
     "AdmissionResult",
     "BacklogCandidate",
     "TokenBucket",

@@ -47,6 +47,13 @@ F6.5 structured-generation sidecar (class ModelLifecycle):
   - Qwen/SmolLM model (separate from Hermes/ModernBERT/GLiNER)
   - NOT part of the runtime-wide model plane
   - Consumers needing phase facts should use brain.model_phase_facts.is_same_layer()
+
+F186D CONTRACT HARDENING:
+  - unload_model() is a SHADOW-STATE HELPER — never the primary unload authority
+  - engine.unload() (via Hermes3Engine) is the ONLY canonical 7K unload authority
+  - This module must NEVER call get_model_manager() — no cross-plane coupling
+  - class ModelLifecycle (windup-local) must NEVER be loaded in the runtime-wide plane
+  - load_model() / unload_model() are IDEMPOTENT HELPERS, not load/unload owners
 """
 
 # Transitional Czech prose follows after blank line below.

@@ -1,68 +1,29 @@
 # hledac/universal/export/COMPAT_HANDOFF.py
-# Sprint 8VX §C: ExportHandoff producer convergence audit
-# Sprint 8VY §A: Updated — removal conditions tightened, compat scope explicit
-# Sprint 8VZ §B: Updated — from_windup() is now explicitly compat-only
 # ⚠️  DEPRECATED THIN ADAPTER — DO NOT EXTEND
+# Sprint F186C: Header shrunk; module is a compat seam, not a factory.
 """
-Canonical producer-side handoff truth (Sprint 8VZ):
+Thin adapter: normalize any handoff input to typed ExportHandoff at the
+export_sprint() consumer boundary.
 
-  PRIMARY PATH (canonical post-8VZ): __main__._print_scorecard_report() builds
-    ExportHandoff(...) directly, sourcing top_nodes from store.get_top_seed_nodes().
-    This is the canonical producer construction point — no dict intermediary.
+Canonical producer: __main__._print_scorecard_report() constructs
+ExportHandoff(...) directly — this module is NOT the producer construction point.
 
-  COMPAT SEAM (post-8VZ): from_windup(scorecard) is kept only for legacy
-    call-sites that pass raw scorecard dicts. It is NO LONGER the canonical
-    path in __main__.py.
+Compat seams preserved for backward compat (NOT exercised by canonical producer):
+  A. dict → via from_windup(scorecard) — for legacy callers passing scorecard dicts
+  B. None → empty ExportHandoff — defensive boundary for missing handoff
 
-  SCORECARD ROLE (post-8VZ): scorecard_data dict is retained for:
-    - DuckDB persistence (upsert_scorecard)
-    - Markdown export (_export_markdown_report)
-    - JSON report serialization (export_sprint → eh.scorecard)
-    It is NOT the canonical source for top_nodes in the export handoff.
-
-  FUTURE TARGET (post-full-cutover): windup_engine returns typed ExportHandoff
-    directly; from_windup(scorecard) disappears entirely;
-    ensure_export_handoff() shrinks to None-only path.
-
-  REMOVAL CONDITIONS (updated post-8VZ):
-    1. ensure_export_handoff() for dict → SHORTER: only for non-main call-sites
-    2. ensure_export_handoff() for None → removal when all callers pass typed ExportHandoff
-    3. from_windup(scorecard) → REMOVED from __main__ canonical path (8VZ)
-    4. scorecard["top_graph_nodes"] as top_nodes source → REMOVED from canonical path (8VZ)
-    5. store.get_top_seed_nodes() fallback → removal when windup always populates top_nodes
-
-  WHAT THIS MODULE IS NOT:
-    - NOT a new DTO system — ExportHandoff (types.py) is the only typed handoff
-    - NOT an export framework — export plane is sprint_exporter.py
-    - NOT a producer factory — __main__ constructs via direct ExportHandoff(), not via this module
-    - NOT growing — new features go to windup_engine or types.py, not here
+ensure_export_handoff() is a consumer-side normalization seam, NOT a factory.
+New features go to windup_engine or types.py, not here.
 """
 
-# =============================================================================
-# Sprint 8VY §A: ExportHandoff producer convergence
-# =============================================================================
-# Thin adapter: ExportHandoff | dict | None → ExportHandoff
-# PRIMARY role: ensure export_sprint() always receives typed ExportHandoff.
-#
-# Two compat seams remaining:
-#   A. dict → ExportHandoff: via from_windup(scorecard) extracting scorecard["top_graph_nodes"]
-#      REMOVAL: when windup_engine returns typed ExportHandoff directly
-#   B. None → empty ExportHandoff: for defensive None handling
-#      REMOVAL: when __main__ always passes typed ExportHandoff (never None)
-#
-# Producer side: __main__._print_scorecard_report() → ExportHandoff(...) direct constructor
-#                 top_nodes sourced from store.get_top_seed_nodes() (no from_windup in __main__)
-# Consumer side: export_sprint() — receives typed ExportHandoff
-# =============================================================================
-
-from typing import TYPE_CHECKING, Any, Dict, Union
+from typing import TYPE_CHECKING, Any, Dict
 
 if TYPE_CHECKING:
     from hledac.universal.types import ExportHandoff  # noqa: F401
 
 
 def ensure_export_handoff(
-    handoff: Union["ExportHandoff", Dict[str, Any], None],  # type: ignore[name-defined]
+    handoff: "ExportHandoff | Dict[str, Any] | None",  # type: ignore[name-defined]
     default_sprint_id: str = "unknown",
 ) -> "ExportHandoff":  # type: ignore[name-defined]
     """

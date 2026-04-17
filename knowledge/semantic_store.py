@@ -3,8 +3,14 @@ Sprint 8SB — SemanticStore: FastEmbed + LanceDB Semantic IOC Search
 ===================================================================
 Singleton lifecycle — initialize() v BOOT, close() v TEARDOWN.
 
+ROLE: Consumer/Enrichment (NOT backend owner, NOT grounding authority)
+======================================================================
 FastEmbed BAAI/bge-small-en-v1.5 ONNX model (dim=384, ~33MB, CoreML-friendly).
 LanceDB ANN index pod ~/.hledac/lancedb/ — append mode, nikdy drop+recreate.
+
+NENÍ owner backend storage → persistent_layer (deprecated!)
+NENÍ owner embedding computation → MLXEmbeddingManager singleton
+NENÍ owner primary retrieval → rag_engine
 
 B.1: Singleton TextEmbedding instance — NIKDY re-init per-request.
 B.2: LanceDB path = PATHS.hledac_home / "lancedb"

@@ -206,6 +206,9 @@ class FeedPipelineEntryResult(msgspec.Struct, frozen=True, gc=False):
     accepted_findings: int
     stored_findings: int
     error: str | None = None
+    # F188D: assembly quality transparency for zero-finding diagnosis
+    assembly_tier: str = ""           # "no_content" | "title_only" | "summary_only" | "rich_content"
+    quality_reason_tag: str = ""      # comma-separated: "author_present" | "feed_title_context" | "language_match" | "title_only" | etc.
 
 
 class FeedPipelineRunResult(msgspec.Struct, frozen=True, gc=False):
@@ -2135,6 +2138,8 @@ async def async_run_live_feed_pipeline(
                 accepted_findings=0,
                 stored_findings=0,
                 error=None,
+                assembly_tier=assembly_tier,
+                quality_reason_tag=quality_signal.quality_reason_tag if quality_signal else "",
             ))
             continue
 
@@ -2193,6 +2198,8 @@ async def async_run_live_feed_pipeline(
             accepted_findings=accepted_findings,
             stored_findings=stored_findings,
             error=_entry_store_error,
+            assembly_tier=assembly_tier,
+            quality_reason_tag=quality_signal.quality_reason_tag if quality_signal else "",
         ))
 
     # Sprint 8AU + F160A: compute signal stage diagnosis with findings_build_loss tracking

@@ -326,22 +326,21 @@ except ImportError:
     BLOCKCHAIN_FORENSICS_AVAILABLE = False
 
 # Phase 11: Decision Engine
+# WARNING: The imported classes below do NOT exist in decision_engine.py.
+# intelligence.decision_engine is a DEPRECATED re-export shim (from brain.decision_engine).
+# It does NOT contain IntelligentDecisionEngine, ModuleDecision, WorkflowPlan,
+# ResourceEstimate, or create_decision_engine.
+# DECISION_ENGINE_AVAILABLE=True here reflects import success, NOT functionality.
 try:
     from .decision_engine import (
-        IntelligentDecisionEngine,
-        ModuleDecision,
-        WorkflowPlan,
-        ResourceEstimate,
-        create_decision_engine,
+        DecisionEngine,  # from brain.decision_engine re-export
+        DecisionType,
     )
     DECISION_ENGINE_AVAILABLE = True
 except ImportError:
     DECISION_ENGINE_AVAILABLE = False
-    IntelligentDecisionEngine = None  # type: ignore
-    ModuleDecision = None  # type: ignore
-    WorkflowPlan = None  # type: ignore
-    ResourceEstimate = None  # type: ignore
-    create_decision_engine = None  # type: ignore
+    DecisionEngine = None  # type: ignore
+    DecisionType = None  # type: ignore
 
 # Phase 11: Input Detector
 try:
@@ -351,6 +350,7 @@ try:
         Pattern,
         ComplexityScore,
         create_input_detector,
+        IntelligenceConfig,
     )
     INPUT_DETECTOR_AVAILABLE = True
 except ImportError:
@@ -608,18 +608,19 @@ __all__ = [
     "analyze_blockchain_address",
     "detect_transaction_patterns",
     "get_blockchain_forensics",
-    # Decision Engine
-    "IntelligentDecisionEngine",
-    "ModuleDecision",
-    "WorkflowPlan",
-    "ResourceEstimate",
-    "create_decision_engine",
+    # Decision Engine (DEPRECATED shim — re-exports from brain.decision_engine)
+    # IntelligentDecisionEngine, ModuleDecision, WorkflowPlan, ResourceEstimate,
+    # create_decision_engine do NOT exist in this module
+    "DecisionEngine",
+    "DecisionType",
+    # NOTE: create_decision_engine intentionally omitted — does not exist
     # Input Detector
     "IntelligentInputDetector",
     "InputAnalysis",
     "Pattern",
     "ComplexityScore",
     "create_input_detector",
+    "IntelligenceConfig",  # config class used by IntelligentInputDetector
     # Workflow Orchestrator
     "WorkflowOrchestrator",
     "ComprehensiveReport",

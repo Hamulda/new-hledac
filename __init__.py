@@ -114,7 +114,8 @@ from .autonomous_orchestrator import (
     ToolCapability,
     AutonomousWorkflowEngine,
     WorkflowState,
-    deep_research,
+    # deep_research — REMOVED F187A: does not exist in legacy/autonomous_orchestrator.py
+    # Use enhanced_research.deep_research() or deep_research_provider_seam() instead
 )
 
 # Legacy compatibility aliases
@@ -377,12 +378,13 @@ __all__ = [
 # Update __all__ for unified research engine
 if UNIFIED_RESEARCH_AVAILABLE:
     __all__.extend([
-        # Unified Research Engine
+        # Unified Research Engine (UnifiedResearchEngine is dormant canonical provider candidate)
         "UnifiedResearchEngine",
         "UnifiedResearchConfig",
         "ResearchDepth",
         "QueryType",
-        "ResearchFinding",
+        # ResearchFinding — REMOVED F187A: COLLISION with legacy/autonomous_orchestrator.py
+        # Use legacy ResearchFinding from autonomous_orchestrator facade for compatibility.
         "UnifiedResearchResult",
         "deep_research",
         "create_unified_research_engine",
@@ -472,10 +474,9 @@ if ENHANCED_ORCHESTRATOR_AVAILABLE:
 #       (facade loads legacy/autonomous_orchestrator.py at import time)
 #     - Enhanced conditional: only if UNIFIED_RESEARCH_AVAILABLE=True,
 #       via conditional eager import of enhanced_research.py (NOT lazy)
-#   ResearchFinding is NOT in _LAZY_SUBPACKAGES — no lazy resolution applies.
 #   Collision is contained: neither definition overwrites the other in __all__.
 
-SUPREME_INTEGRATION_AVAILABLE = False
+SUPREME_INTEGRATION_AVAILABLE = False  # REMOVED F187A: dead attribution, keep for test compatibility only
 
 # =============================================================================
 # PEP 562 LAZY EXPORTS - Defer heavy subpackage imports
@@ -517,19 +518,20 @@ _LAZY_SUBPACKAGES = {
 }
 
 # Also lazily export non-existent symbols that were previously in __all__ but not defined
-# NOTE: SUPREME_INTEGRATION_AVAILABLE intentionally omitted from fallback attrs.
-# Actual load state is tracked by the try/except block below (always False currently).
-# Adding it back here with False would be a duplicate of the runtime truth.
 _FALLBACK_ATTRS = {
-    # Availability flags — truthful state after F12G reconciliation
+    # Availability flags — truthful state after F187A reconciliation
     # ENHANCED: autonomous_orchestrator_enhanced.py does NOT exist → False
     "ENHANCED_ORCHESTRATOR_AVAILABLE": False,
-    # INTEGRATED: orchestrator_integration.py EXISTS → True
+    # INTEGRATED: orchestrator_integration.py EXISTS → True (but DORMANT, not canonical)
     "INTEGRATED_ORCHESTRATOR_AVAILABLE": True,
+    # DEPRECATED: IntegratedOrchestrator is dormant residue, not canonical orchestrator
+    "DEPRECATED_ORCHESTRATOR_INTEGRATION": True,
     # BUDGET: budget_manager.py only at cache/ not root → False
     "BUDGET_MANAGER_AVAILABLE": False,
     # UNIFIED: enhanced_research.py exists → set by try/except below
     "UNIFIED_RESEARCH_AVAILABLE": False,
+    # SUPREME: dead attribution, kept for test compatibility
+    "SUPREME_INTEGRATION_AVAILABLE": False,
 }
 
 
@@ -556,7 +558,9 @@ def __dir__():
     return list(__all__) + list(_LAZY_SUBPACKAGES.keys()) + list(_FALLBACK_ATTRS.keys())
 
 # =============================================================================
-# PHASE C INTEGRATION - Full Autonomy with Connected Coordinators
+# ORCHESTRATOR INTEGRATION — DORMANT COMPATIBILITY STUB (F187A)
+# IntegratedOrchestrator is DEPRECATED/DORMANT — NOT canonical orchestrator.
+# Canonical path: core.__main__::run_sprint() → runtime.sprint_scheduler::SprintScheduler
 # =============================================================================
 
 # Pre-initialize so assignment is single in __all__ extend below
@@ -568,8 +572,9 @@ try:
     )
     INTEGRATED_ORCHESTRATOR_AVAILABLE = True
 
-    # Make IntegratedOrchestrator the default for advanced usage
-    AdvancedOrchestrator = IntegratedOrchestrator
+    # DEPRECATED F187A: AdvancedOrchestrator alias REMOVED
+    # IntegratedOrchestrator is DORMANT, not "advanced" canonical path.
+    # Use SprintScheduler for canonical orchestrator.
 
 except ImportError as e:
     import logging
@@ -580,11 +585,11 @@ except ImportError as e:
 # Update __all__ for integrated orchestrator
 if INTEGRATED_ORCHESTRATOR_AVAILABLE:
     __all__.extend([
-        # Phase C Integration
+        # IntegratedOrchestrator is DEPRECATED/DORMANT — not canonical orchestrator
         "IntegratedOrchestrator",
-        "AdvancedOrchestrator",
         "integrated_research",
         "INTEGRATED_ORCHESTRATOR_AVAILABLE",
+        "DEPRECATED_ORCHESTRATOR_INTEGRATION",
     ])
 
 # =============================================================================

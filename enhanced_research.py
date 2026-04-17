@@ -3001,52 +3001,34 @@ __all__ = [
     #   6. Minimal grounding seam (ProviderRequest/ProviderResult): exists, not wired to DeepResearch
     #
     # USAGE: Only via deep_research_provider_seam() after F11 activation.
-    #        Direct instantiation is NON-CANONICAL.
     'UnifiedResearchEngine',
-
-    # Result class for provider candidate
     'UnifiedResearchResult',
+    'deep_research_provider_seam',
 
     # ========================================================================
-    # ORCHESTRATOR RESIDUE - EnhancedResearchOrchestrator (DEPRECATED)
+    # ORCHESTRATOR RESIDUE - EnhancedResearchOrchestrator (DEPRECATED F187A)
     # ========================================================================
-    # EnhancedResearchOrchestrator is a workflow orchestrator, NOT a provider.
-    # It extends UniversalResearchOrchestrator with:
-    #   - DAG-based workflow execution
-    #   - Speculative execution
-    #   - Performance monitoring
-    #   - Query expansion, RRF fusion, RAG, stealth simulation
-    #
-    # This is backward-compat ONLY. Do NOT use for new runtime.
-    # All public methods are helper/non-canonical surfaces.
+    # DEPRECATED: backward-compat only, NOT canonical orchestrator.
+    # Do NOT use for new runtime — use SprintScheduler instead.
     'EnhancedResearchOrchestrator',
-
-    # Configuration for orchestrator residue
     'EnhancedResearchConfig',
+    'DEPRECATED_ENHANCED_ORCHESTRATOR_RESIDUE',
 
     # ========================================================================
     # LOCAL TYPED SEAM (Sprint F11 - Pre-activation bridge)
     # ========================================================================
-    # DeepResearchRequest/Response are LOCAL typed seams - NOT canonical.
     # NON-CANONICAL LOCAL SEAM: pre-activation bridge for F11.
     # types.py ProviderRequest/ProviderResult are LLM-centric DTOs that
     # don't semantically fit OSINT search provider output structures.
-    #
-    # Migration: Replace with canonical ProviderRequest/ProviderResult
-    #            from types.py AFTER F11 activation when triad is ready.
-    #
-    # NOTE: These are internal seams, NOT public API.
     'DeepResearchRequest',
     'DeepResearchResponse',
     'DeepResearchGroundingShim',
-    'deep_research_provider_seam',
 
     # ========================================================================
     # CONVENIENCE FUNCTIONS (NON-CANONICAL HELPERS)
     # ========================================================================
-    # These are backward-compat helpers, NOT canonical runtime entrypoints.
+    # DEPRECATED F187A: backward-compat helpers only.
     # For new code, use deep_research_provider_seam() after F11 activation.
-    # These surfaces have authority confusion risk - prefer seam usage.
     'enhanced_research',
     'deep_research',
     'create_unified_research_engine',
@@ -3056,23 +3038,21 @@ __all__ = [
     # ========================================================================
     'ResearchDepth',
     'QueryType',
-    'ResearchFinding',
+    # ResearchFinding — REMOVED F187A: COLLISION with legacy/autonomous_orchestrator.py
+    # Use ResearchFinding from autonomous_orchestrator facade for compatibility.
 
     # ========================================================================
     # TRIAD ADMISSION SEAM (Sprint F11 - Read-Only Descriptor)
     # ========================================================================
-    # Read-only admission metadata for DeepResearch provider candidate.
-    # NOT runtime activation — this is a declaration of intent + readiness.
     'TriadAdmissionDescriptor',
     'DEEP_RESEARCH_ADMISSION',
 
     # ========================================================================
     # LOCAL CORPUS CONSUMER SEAM (Sprint F8/F11 - Read-Only Descriptor)
     # ========================================================================
-    # Read-only consumer declaration: DeepResearch WOULD consume local corpus
-    # search plane if it existed. NOT runtime activation, NOT retrieval authority.
-    # RAGEngine = RAG grounding authority; LocalSearchSeam = search plane owner.
-    # DeepResearch = consumer of LocalSearchSeam output (F8 invariant).
     'LocalCorpusConsumerDescriptor',
     'LOCAL_CORPUS_CONSUMER',
 ]
+
+# DEPRECATED F187A: flag for orchestrator residue detection
+DEPRECATED_ENHANCED_ORCHESTRATOR_RESIDUE = True

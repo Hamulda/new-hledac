@@ -13,17 +13,23 @@ Features:
 - Network overlap analysis (shared connections)
 - Identity graph construction and analysis
 
-M1 8GB Optimization:
-- Uses rapidfuzz for fast C-based string matching
-- No heavy ML models - lightweight computation only
-- Memory-efficient graph operations with NetworkX
-- Streaming processing for large datasets
-- Lazy evaluation for expensive operations
+STATUS: DORMANT + HELPER
+  - Zero production call sites (grep audit: legacy autonomous_orchestrator.py only)
+  - Imports Entity/Relationship from relationship_discovery.py (helper dependency)
+  - identity_stitching.py is called BY relationship_discovery via to_entities_and_relationships()
+  - NOT on canonical sprint/autonomous_orchestrator.py hot path
+  - Re-exported via intelligence/__init__.py (lazy try/except)
 
-Integration:
-- Works with RelationshipDiscoveryEngine (Entity/Relationship)
-- Compatible with autonomous_orchestrator.py lazy loading
-- Exports through intelligence/__init__.py
+ROLE: HELPER-ONLY — provides conversion method to RelationshipDiscoveryEngine
+  but is not called in production paths itself.
+
+M1 8GB CEILING (ADVISORY):
+  - max_memory_mb=512 recommended for M1 8GB UMA; default is correct
+  - _similarity_cache: unbounded Dict — call optimize_memory() after large batches
+  - _match_cache: unbounded Dict — call optimize_memory() after large batches
+  - optimize_memory() clears both caches and forces gc.collect()
+
+PROMOTION GATE: requires production call site evidence beyond legacy path.
 """
 
 from __future__ import annotations
@@ -322,7 +328,8 @@ class IdentityStitchingEngine:
         Args:
             similarity_threshold: Minimum similarity score for matching
             signal_weights: Custom weights for match signals (uses defaults if None)
-            max_memory_mb: Maximum memory budget in MB
+            max_memory_mb: ADVISORY ceiling in MB — not hard-enforced.
+                           Default 512MB is appropriate for M1 8GB UMA.
             enable_fuzzy: Enable fuzzy string matching (requires rapidfuzz)
         """
         self.similarity_threshold = similarity_threshold

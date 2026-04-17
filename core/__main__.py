@@ -1,11 +1,11 @@
 """
-Sprint 8RA — CLI Entry Point: python -m hledac.universal.core
+F186A CANONICAL SPRINT TRUTH CLOSURE — CLI Entry Point: python -m hledac.universal.core
 
 Pre-sprint checks, UMA wiring, sprint_delta reporting.
 Wires UMAAlarmDispatcher → SprintScheduler wind-down callbacks.
 
 ================================================================
-F177D CANONICAL OWNER VERDICT — ROLE TABLE
+F186A CANONICAL SPRINT TRUTH — ROLE TABLE
 ================================================================
 Role        | Function                        | Owner | Notes
 ----------- | ------------------------------- | ----- | ----
@@ -13,11 +13,18 @@ canonical   | run_sprint()                    | YES   | SOLE canonical sprint ow
 canonical   | _runtime_truth()                | YES   | part of canonical run boundary
 canonical   | _is_meaningful_run()            | YES   | part of canonical run boundary
 canonical   | run_pre_sprint_checks()          | YES   | part of canonical pre-flight
-canonical   | write_sprint_delta()             | YES   | part of canonical teardown
-alternate   | main() --sprint path            | NO    | calls run_sprint(), shell only
+canonical   | write_sprint_delta()            | YES   | part of canonical teardown
+shell       | main() --sprint path            | NO    | delegates to run_sprint(), owns no sprint state
 alternate   | main() --ct-pivot path          | NO    | CT log tool, no sprint
 alternate   | main() --pivot path             | NO    | semantic pivot, no sprint
 residual    | _get_live_feed_urls()           | NO    | shared helper, called by canonical
+
+Canonical path: `python -m hledac.universal --sprint` → root main() --sprint
+  → core.__main__.run_sprint() [sole canonical sprint owner]
+
+  Note: `python -m hledac.universal.core --sprint` is an ALTERNATE entrypoint
+  that also calls run_sprint() directly, but the canonical operator path
+  is through root __main__.py (python -m hledac.universal).
 
 Canonical sprint owner: run_sprint()
 All report truth (canonical_run_summary, runtime_truth, timing_truth,
@@ -731,16 +738,11 @@ async def run_sprint(
         # CHECKPOINT-0 taxonomy (Sprint F155 + E0-T4 + F163C + F164D + F169F)
         # Disjoint machine-readable buckets — report layer must not conflate these.
         # Bucket set:
-        #   signal_reaches_findings      — findings accepted
-        #   short_signal                — meaningful, hits>0, no findings
-        #   meaningful_empty_run        — F164D: meaningful, no hits, no findings (active window ran)
-        #   hardware_limited_smoke     — F176A: zero cycles + swap/pressure (hardware, not query failure)
-        #   pre_active_memory_starvation — F176A: entered ACTIVE but cycles started=0/completed=0 with memory pressure
-        #   survival_active_minimal     — F176A: bounded ACTIVE work under memory pressure
-        #   signal_reaches_findings     — findings accepted
-        #   short_signal                — meaningful, hits>0, no findings
-        #   meaningful_empty_run        — F164D: meaningful, no hits, no findings (active window ran)
-        #   public_backend_degraded     — F169F: public branch backend error (NetworkProxyError, HTTP errors)
+        #   signal_reaches_findings           — findings accepted
+        #   pre_active_memory_starvation      — F176A: entered ACTIVE but zero cycles with memory pressure
+        #   survival_active_minimal           — F176A: bounded ACTIVE work under memory pressure
+        #   hardware_limited_smoke           — F176A: zero cycles + swap/pressure (hardware, not query failure)
+        #   public_backend_degraded           — F169F: public branch backend error (NetworkProxyError, HTTP errors)
         #   feed_source_inaccessible    — F169F: all feed sources returned zero signal, public may have none
         #   cross_branch_source_inaccessible — F169F: cross-branch sources failed, feed/public accessible
         #   true_depleted_query         — F169F: query vocabulary exhaustively checked, no signal anywhere

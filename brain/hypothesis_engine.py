@@ -31,6 +31,7 @@ M1 8GB Optimizations:
 from __future__ import annotations
 
 import asyncio
+import functools
 import gc
 import hashlib
 import logging
@@ -1422,6 +1423,81 @@ class HypothesisPack:
     source_hints: List[Any] = field(default_factory=list)
     provenance: str = "heuristic"  # "heuristic" or "model-assisted"
 
+    # -------------------------------------------------------------------------
+    # Sprint F187E: Derived fields — scheduler-facing shape (lazy computed)
+    # -------------------------------------------------------------------------
+
+    @functools.cached_property
+    def signal_quality(self) -> str:
+        """Classify signal as strong/mixed/weak for scheduler filtering.
+
+        Derived from pack content — no model required.
+        """
+        strong_indicators = (
+            len(self.hypotheses) >= 3 and
+            len(self.suggested_queries) >= 2 and
+            len(self.ioc_follow_ups) >= 1
+        )
+        weak_indicators = (
+            not self.hypotheses and
+            not self.suggested_queries and
+            not self.ioc_follow_ups
+        )
+        if strong_indicators:
+            return "strong"
+        elif weak_indicators:
+            return "weak"
+        return "mixed"
+
+    @functools.cached_property
+    def confidence_note(self) -> str:
+        """Human-readable confidence explanation for operator."""
+        total = len(self.hypotheses) + len(self.suggested_queries) + len(self.ioc_follow_ups)
+        if total >= 8:
+            abundance = "rich pack"
+        elif total >= 4:
+            abundance = "moderate pack"
+        elif total >= 1:
+            abundance = "thin pack"
+        else:
+            abundance = "empty pack"
+        return f"{abundance} | provenance={self.provenance} | {len(self.source_hints)} source hints"
+
+    @functools.cached_property
+    def what_matters_first(self) -> str:
+        """Single primary action/takeaway for operator."""
+        if self.ioc_follow_ups:
+            top_ioc = self.ioc_follow_ups[0]
+            return f"Pivot on IOC: {top_ioc.get('from', '?')} → {top_ioc.get('to', '?')}"
+        if self.suggested_queries:
+            top_q = self.suggested_queries[0]
+            return f"Investigate: {top_q.get('query', '')[:80]}"
+        if self.hypotheses:
+            top_h = self.hypotheses[0]
+            return f"Verify: {top_h.get('hypothesis', '')[:80]}"
+        return "No immediate action — empty hypothesis pack"
+
+    # -------------------------------------------------------------------------
+    # Sprint F187E: operator_shortlist — scheduler-consumable shape
+    # Returns items with: action=query, target=rationale[:80], rationale=pivot_type
+    # -------------------------------------------------------------------------
+
+    @property
+    def operator_shortlist(self) -> List[Dict[str, Any]]:
+        """Bounded operator shortlist (max 3) in scheduler-consumable shape.
+
+        Returns items: {action: query, target: rationale[:80], rationale: pivot_type}
+        """
+        raw = self.actionable_shortlist(max_items=3)
+        return [
+            {
+                "action": item.get("query", ""),
+                "target": item.get("rationale", "")[:80],
+                "rationale": item.get("pivot_type", ""),
+            }
+            for item in raw
+        ]
+
     def is_empty(self) -> bool:
         """Check if pack has any actionable content."""
         return (
@@ -2024,17 +2100,6 @@ class HypothesisPack:
                     return shortlist
 
         return shortlist
-
-    @property
-    def operator_shortlist(self) -> List[Dict[str, Any]]:
-        """
-        Bounded operator shortlist (max 3 items) for scheduler consumption.
-
-        Alias for actionable_shortlist(max_items=3) — exists because
-        sprint_scheduler.py accesses this as a field via getattr().
-        The 3-item cap matches CorrelationResult.operator_shortlist cap.
-        """
-        return self.actionable_shortlist(max_items=3)
 
 
 class HypothesisEngine:

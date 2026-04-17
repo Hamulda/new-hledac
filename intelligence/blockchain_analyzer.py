@@ -2,44 +2,46 @@
 Blockchain Forensics Module
 ===========================
 
-PROMOTION GATE — EXPERIMENTAL / HEAVY / NOT PROMOTED
-====================================================
+PROMOTION GATE — EXPERIMENTAL / HEAVY / HARD CONTAINMENT
+==========================================================
 Advanced blockchain analysis and forensics for cryptocurrency investigations.
 
-STATUS: EXPERIMENTAL
-  - 1478 lines, 0 call sites outside tests (grep audit: žádné volání v production kódu)
-  - Etherscan API key a Blockchair API key vyžadovány, nejsou součástí config
-  - async HTTP client (httpx) s rate limiting — síťová závislost na třetích stranách
-  - KademliaNode používá tento modul? NE — dht/kademlia_node.py je SAMOSTATNÝ
+STATUS: EXPERIMENTAL-HARD / NOT PROMOTED
+  - 1513 lines, 0 call sites in production code (grep audit: legacy only)
+  - Etherscan API key a Blockchair API key required, not in standard config
+  - httpx.AsyncClient with rate limiting — third-party network dependency
+  - KademliaNode uses this module? NO — dht/kademlia_node.py is fully independent
+  - crawl_dht_for_keyword() does NOT call BlockchainForensics — confirmed by grep
 
 M1 8GB MEMORY CEILING:
   - httpx.AsyncClient: max_connections=10, max_keepalive=5
-  - In-memory cache: _cache dict, TTL=300s, NEBOUNDED (uloží unlimited API responses)
-  - Transaction tracing: depth-first, max 100 tx, visited set pro dedup
-  - clustering: načítá tx pro KAŽDOU adresu zvlášť (O(n) API calls)
-  - ŽÁDNÝ memory ceiling na response cache = potential unbounded growth
-  - Při cross_chain_analysis s 10 adresami = 10+ sequenciálních API calls
+  - _cache: MAX_CACHE_SIZE=1000 hard upper bound (F184F fix — OrderedDict LRU eviction)
+  - Transaction tracing: depth-first, max 100 tx, visited set for dedup
+  - clustering: O(n) API calls — one call per address (bounded by semaphore)
+  - NO unbounded in-memory growth after F184F MAX_CACHE_SIZE fix
 
 ALLOWED PURPOSE: Offline blockchain forensics research tool
-  - Vyžaduje externí API keys (Etherscan/Blockchair)
-  - Primární use case: post-factum analýza známých adres
-  - NENÍ součástí real-time OSINT pipeline
-  - NENÍ integrován do autonomous_orchestrator.py
+  - Requires external API keys (Etherscan/Blockchair)
+  - Primary use case: post-factum analysis of known addresses
+  - NOT part of real-time OSINT pipeline
+  - NOT integrated into autonomous_orchestrator.py canonical path
 
 PROMOTION ELIGIBILITY: NO
-  - Žádné production call sites
-  - Neintegrováno do canonical orchestrator path
+  - Zero production call sites (legacy autonomous_orchestrator.py only)
+  - Not integrated into canonical orchestrator path
   - API-dependent (Etherscan rate limits, Blockchair paid tier)
-  - Unbounded cache = memory risk na M1 8GB
+  - httpx client (not curl_cffi from fetch_coordinator) — separate transport
+  - Dedicated httpx client = separate connection pool from main HTTP transport
 
-SECURITY: API keys by byly v .env — tento modul sám o sobě žádné neukládá.
-STEALTH: Network traffic jde přímo na Etherscan/Blockchair — žádná anonymizace.
-  Toto je FORENZÍ nástroj, ne OSINT stealth tool.
+SECURITY NOTES:
+  - This module does NOT store API keys — caller provides them
+  - Network traffic goes directly to Etherscan/Blockchair — no anonymization
+  - This is a FORENSICS tool, not an OSINT stealth tool
 
-DŮLEŽITÉ POZNÁMKY K IMPLEMENTACI:
-- crawl_dht_for_keyword() v kademlia_node.py používá BlockchainForensics? NE
-- Tyto dva moduly jsou zcela nezávislé
-- BlockchainForensics má vlastní httpx klient, ne používá curl_cffi z fetch_coordinator
+HARD CONTAINMENT:
+  - Do NOT import into canonical sprint/knowledge/prefetch paths
+  - Do NOT wire into autonomous_orchestrator.py active pipeline
+  - May only be used in explicit research/demo contexts with user-provided API keys
 """
 
 from __future__ import annotations

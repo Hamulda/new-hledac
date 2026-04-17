@@ -13,7 +13,7 @@ PROMOTION ELIGIBILITY: NO — žádný brain engine není canonical-surface
 
 Submoduly a jejich status (viz každý modul):
 - Hermes3Engine: L1 canonical (samostatný soubor)
-- DecisionEngine: L1 canonical (samostatný soubor)
+- DecisionEngine: L1 HELPER-only (brain/decision_engine.py) — DEPRECATED shim, canonical owner is Hermes3Engine
 - InsightEngine: EXPERIMENTAL — importuj z insight_engine.py
 - InferenceEngine: EXPERIMENTAL — importuj z inference_engine.py
 - HypothesisEngine: EXPERIMENTAL — importuj z hypothesis_engine.py

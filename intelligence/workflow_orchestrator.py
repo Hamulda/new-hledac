@@ -1735,17 +1735,18 @@ def _build_operator_shortlist(
 ) -> List[Dict[str, Any]]:
     """Build max-3 bounded prioritised shortlist for scheduler/export.
 
-    Returns items with: pivot_type, value, reason, priority
+    Returns items with: action, target, rationale (scheduler-consumable shape).
+
+    Scheduler transformation: action=query, target=rationale[:80], rationale=pivot_type
     """
     shortlist: List[Dict[str, Any]] = []
 
     # 1. Dominant cluster (always first if present)
     if dominant_cluster:
         shortlist.append({
-            "pivot_type": "dominant_cluster",
-            "value": dominant_cluster,
-            "reason": "highest-risk theme with most critical findings",
-            "priority": 1,
+            "action": dominant_cluster,
+            "target": "highest-risk theme with most critical findings",
+            "rationale": "dominant_cluster",
         })
 
     # 2. Top corroborated IOC (infra signal with multi-source evidence)
@@ -1753,10 +1754,9 @@ def _build_operator_shortlist(
         if len(shortlist) >= 3:
             break
         shortlist.append({
-            "pivot_type": "corroborated_ioc",
-            "value": ioc.get("value", ""),
-            "reason": f"{ioc.get('type')} seen across {ioc.get('source_count',1)} sources (conf={ioc.get('confidence',0):.2f})",
-            "priority": 2,
+            "action": ioc.get("value", ""),
+            "target": f"{ioc.get('type')} seen across {ioc.get('source_count',1)} sources",
+            "rationale": "corroborated_ioc",
         })
 
     # 3. High-risk with infra
@@ -1764,10 +1764,9 @@ def _build_operator_shortlist(
         if len(shortlist) >= 3:
             break
         shortlist.append({
-            "pivot_type": "high_risk_infra",
-            "value": _extract_primary_entity(f),
-            "reason": f["severity"].upper() + " + infra hint",
-            "priority": 3,
+            "action": _extract_primary_entity(f),
+            "target": f["severity"].upper() + " + infra hint",
+            "rationale": "high_risk_infra",
         })
 
     return shortlist[:3]

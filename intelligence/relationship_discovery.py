@@ -13,11 +13,18 @@ Features:
 - Affinity analysis
 - Influence propagation modeling
 
-M1 8GB Optimization:
-- Uses scipy.sparse for large graphs
-- Streaming graph construction
-- Memory-efficient algorithms
-- Lazy evaluation for expensive operations
+ROLE: HELPER-ONLY
+  - Primary production caller: prefetch_oracle.py (RELATIONSHIP_DISCOVERY_AVAILABLE path)
+  - NOT on canonical sprint/autonomous_orchestrator.py hot path
+  - Re-exported via intelligence/__init__.py (lazy, try/except)
+  - identity_stitching.py uses Entity/Relationship from this module
+
+M1 8GB CEILING (ADVISORY — not hard-enforced):
+  - max_memory_mb=512 recommended; default 1024 is OVERSTATED for 8GB UMA
+  - scipy sparse adjacency: O(n²) float32 — large graphs exceed budget fast
+  - igraph graph: edges/vertices both count against RAM
+  - centrality cache: unbounded Dict[str, Dict] — clear after large computations
+  - USE bounded collections, call optimize_memory() after graph builds
 
 MLX Integration:
 - MLX-accelerated similarity matrix computation
@@ -548,7 +555,7 @@ class RelationshipDiscoveryEngine:
     def __init__(
         self,
         use_sparse: bool = True,
-        max_memory_mb: int = 1024,
+        max_memory_mb: int = 512,
         enable_mlx: bool = True,
         lazy_evaluation: bool = True,
     ):
@@ -557,7 +564,8 @@ class RelationshipDiscoveryEngine:
 
         Args:
             use_sparse: Use scipy.sparse for large graphs (memory efficient)
-            max_memory_mb: Maximum memory budget in MB
+            max_memory_mb: ADVISORY ceiling in MB — not hard-enforced.
+                           512MB recommended for M1 8GB UMA; 1024 is too aggressive.
             enable_mlx: Enable MLX acceleration where available
             lazy_evaluation: Defer expensive computations until needed
         """
@@ -2202,10 +2210,15 @@ class RelationshipDiscoveryEngine:
 # Factory function
 def create_relationship_engine(
     use_sparse: bool = True,
-    max_memory_mb: int = 1024,
+    max_memory_mb: int = 512,
     enable_mlx: bool = True,
 ) -> RelationshipDiscoveryEngine:
-    """Factory function to create a RelationshipDiscoveryEngine."""
+    """Factory function to create a RelationshipDiscoveryEngine.
+
+    Note:
+        max_memory_mb=512 is the recommended ceiling for M1 8GB UMA.
+        The parameter is advisory — not hard-enforced.
+    """
     return RelationshipDiscoveryEngine(
         use_sparse=use_sparse,
         max_memory_mb=max_memory_mb,

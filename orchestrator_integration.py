@@ -87,6 +87,15 @@ except ImportError:
     UniversalQuantumCoordinator = None
     QUANTUM_AVAILABLE = False
 
+import warnings
+warnings.warn(
+    "orchestrator_integration is DEPRECATED and DORMANT. "
+    "Do not use for new development. "
+    "Canonical path: core.__main__::run_sprint() → runtime.sprint_scheduler::SprintScheduler",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 logger = logging.getLogger(__name__)
 
 

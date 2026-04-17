@@ -2485,8 +2485,8 @@ class SprintScheduler:
                 "so_what": getattr(corr, 'so_what', ""),
                 "what_matters_first": getattr(corr, 'what_matters_first', ""),
                 "operator_shortlist": [
-                    {"action": item.get("action", ""), "target": item.get("target", ""),
-                     "rationale": item.get("rationale", "")[:80]}
+                    {"action": item.get("action", ""), "target": item.get("target", "")[:80],
+                     "rationale": item.get("rationale", "")}
                     for item in (getattr(corr, 'operator_shortlist', None) or [])[:3]
                     if isinstance(item, dict)
                 ],
@@ -2522,9 +2522,12 @@ class SprintScheduler:
                         for q in (pack.suggested_queries or [])[:5]
                         if isinstance(q, dict)
                     ],
+                    # Sprint F187E: operator_shortlist is now a @property on HypothesisPack
+                    # returning scheduler-consumable shape directly: action, target, rationale
                     "operator_shortlist": [
-                        {"action": item.get("action", ""), "target": item.get("target", ""),
-                         "rationale": item.get("rationale", "")[:80]}
+                        {"action": item.get("action", ""),
+                         "target": item.get("target", "")[:80],
+                         "rationale": item.get("rationale", "")}
                         for item in (getattr(pack, 'operator_shortlist', None) or [])[:3]
                         if isinstance(item, dict)
                     ],
@@ -2705,6 +2708,8 @@ class SprintScheduler:
             feed_avg_qual = feed_v.get("avg_quality", 0.0)
             risk_score = corr.get("risk_score", 0.0)
             hyp_count = hyp.get("hypothesis_count", 0)
+            # Sprint F186F: hypothesis fallback for what_matters_first when correlation is absent
+            what_matters = corr.get("what_matters_first") or hyp.get("what_matters_first") or ""
             op_shortlist = corr.get("operator_shortlist", []) or hyp.get("operator_shortlist", [])
             first_action = op_shortlist[0].get("action", "") if op_shortlist else ""
             backup_action = op_shortlist[1].get("action", "") if len(op_shortlist) > 1 else ""
@@ -2769,6 +2774,7 @@ class SprintScheduler:
                 "dominant_action": dominant_action,
                 "first_action": first_action,
                 "backup_action": backup_action,
+                "intel_what_matters": what_matters,  # Sprint F186F: corr → hyp fallback
                 "confidence": dominant_conf,
                 "feed_tag": feed_tag,
                 "feed_avg_quality": feed_avg_qual,
