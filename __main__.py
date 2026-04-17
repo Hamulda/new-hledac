@@ -107,14 +107,30 @@ ENTRYPOINT_AUTHORITY = {
         },
         "run_warmup": {
             "location": "hledac.universal.__main__.run_warmup",
-            "role": "residual",
+            "role": "residual/dormant",
             "non_canonical": True,
+            "DEPRECATED": True,
+            "UNREACHABLE": True,
             "allowed_purpose": (
-                "WARMUP orchestration shared by _run_sprint_mode and canonical path. "
-                "Isolates pre-ACTIVE setup (DuckPGQ, IOCScorer, ring buffers, ANE warmup). "
-                "NOT a sprint owner — called by both canonical and alternate paths."
+                "WARMUP orchestration helper. "
+                "Only called by _run_sprint_mode() (DEPRECATED/UNREACHABLE). "
+                "NOT called by canonical path (core.__main__.run_sprint() uses its own WARMUP). "
+                "NOT a sprint owner — effectively dormant since _run_sprint_mode is dead."
             ),
-            "owner_status": "residual — shared helper, called by both canonical and alternate",
+            "owner_status": "residual/dormant — called only by dead _run_sprint_mode",
+        },
+        "_run_async_main": {
+            "location": "hledac.universal.__main__._run_async_main",
+            "role": "dead/scaffolding",
+            "non_canonical": True,
+            "DEPRECATED": True,
+            "UNREACHABLE": True,
+            "allowed_purpose": (
+                "Sprint 8AI async shell scaffolding. "
+                "UNREACHABLE from main() — main() delegates to core.__main__.run_sprint() (canonical) "
+                "or _run_public_passive_once (alternate). This function is dead scaffolding."
+            ),
+            "owner_status": "dead/unreachable — never called from active main() CLI path",
         },
         "_run_observed_default_feed_batch_once": {
             "location": "hledac.universal.__main__._run_observed_default_feed_batch_once",
@@ -127,9 +143,11 @@ ENTRYPOINT_AUTHORITY = {
     # F186A: authority census — summary of who calls what
     "_authority_census": {
         "canonical_sprint_calls": ["main() --sprint → core.__main__.run_sprint()"],
-        "alternate_production_paths": ["_run_sprint_mode (DEPRECATED/UNREACHABLE)", "_run_public_passive_once (no lifecycle, no report boundary)"],
-        "residual_helper_paths": ["run_warmup (shared WARMUP helper, called by both canonical and alternate)"],
+        "alternate_production_paths": ["_run_sprint_mode (DEPRECATED/UNREACHABLE)", "_run_public_passive_once (active alternate, no lifecycle, no report boundary)"],
+        "residual_helper_paths": ["run_warmup (dormant, only called by dead _run_sprint_mode)"],
         "diagnostic_paths": ["_run_observed_default_feed_batch_once (probe only)"],
+        # F191B: dead scaffolding — unreachable from active main() CLI path
+        "dead_scaffolding_paths": ["_run_async_main (dead/unreachable — zero active callers)"],
         # Shell-only: main() and pure utility functions. Never sprint owners.
         "shell_only": [
             "main() — CLI dispatcher, reads args, calls canonical or alternate",
@@ -152,7 +170,8 @@ ENTRYPOINT_AUTHORITY = {
         "main() --pivot": "alternate",
         "_run_sprint_mode()": "alternate/deprecated/unreachable",
         "_run_public_passive_once()": "alternate",
-        "run_warmup()": "residual",
+        "run_warmup()": "residual/dormant (dead caller)",
+        "_run_async_main()": "dead/unreachable scaffolding",
         "_run_observed_default_feed_batch_once()": "diagnostic",
     },
     # F186A: key invariant — no confusion between canonical and observed/diagnostic
@@ -380,7 +399,11 @@ class BootGuardError(Exception):
 
 async def _run_async_main(stop_flag: Callable[[], bool]) -> None:
     """
-    Main async entry point with AsyncExitStack-backed teardown.
+    DEAD/UNREACHABLE scaffolding — never called from main().
+
+    main() delegates to core.__main__.run_sprint() (canonical) or
+    _run_public_passive_once() (alternate). This function is defined
+    but never invoked — kept for source-pattern completeness only.
 
     Sprint 8AI:
     - Boot guard is called BEFORE this coroutine starts (in main())
@@ -432,14 +455,11 @@ async def _run_async_main(stop_flag: Callable[[], bool]) -> None:
 
         _boot_record("async_exit_stack_entered", "ok")
 
-        # Sprint 8AI: Register teardown callbacks in acquisition order
-        # LIFO order: last registered → first cleaned up
-        # Order: duckdb_close → atomic_flush → persistent_close → sprint_lifecycle
-        # (surfaces that don't exist are N/A — no mock registration)
-
-        # TODO [8AI]: Register duckdb_store.close() if/when duckdb is acquired in main.py
-        # TODO [8AI]: Register atomic_storage.flush() if/when atomic storage is acquired
-        # TODO [8AI]: Register persistent_layer.close() if/when persistent layer is acquired
+        # NOTE: This path is DEAD/UNREACHABLE scaffolding (main() never calls _run_async_main).
+        # The surfaces below are documented here for source-pattern completeness only.
+        # duckdb_store.close() — owned via _run_public_passive_once AsyncExitStack
+        # atomic_storage.flush() — N/A (atomic_storage is AO-owned surface)
+        # persistent_layer.close() — N/A (persistent_layer is AO-owned surface)
 
         # Normal operation - import and run the main orchestrator
         # Note: This path is reserved for future Sprint 1+ implementation
@@ -3098,13 +3118,12 @@ async def run_warmup(
     do_ane_warmup: bool = False,
 ) -> dict:
     """
-    F162C NON-CANONICAL RESIDUAL: This function lives in root __main__.py
-    (residual/alternate entrypoint) but claims to be the "canonical WARMUP
-    orchestration truth" — that claim is misleading. Canonical WARMUP truth
-    lives in core.__main__.run_sprint() lifecycle, not here.
+    DEPRECATED/UNREACHABLE: This function is called only by _run_sprint_mode()
+    which is itself DEPRECATED and UNREACHABLE from main(). Canonical WARMUP
+    orchestration lives in core.__main__.run_sprint() lifecycle, not here.
 
-    This is a SHARED utility called from:
-      - _run_sprint_mode() (alternate sprint hot-path)
+    This is a DORMANT utility called from:
+      - _run_sprint_mode() (dead/unreachable)
       - test_e2e_dry_run.py (test, without lifecycle)
     Prefer the canonical WARMUP orchestration in core lifecycle.
 

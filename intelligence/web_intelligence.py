@@ -284,7 +284,11 @@ class UnifiedWebIntelligence:
         Eviction policy: oldest (first-inserted) entries are removed
         when the limit is exceeded.
         """
-        # Evict oldest if at limit
+        # F191C: dedup guard — update-existing must NOT trigger FIFO eviction
+        if operation_id in self._completed_operations:
+            self._completed_operations[operation_id] = result
+            return
+        # Evict oldest if at limit (only for NEW entries)
         if len(self._completed_operations) >= self._completed_operations_limit:
             evicted_id, _ = self._completed_operations.popitem(last=False)
             logger.debug(
@@ -480,15 +484,16 @@ class UnifiedWebIntelligence:
             # Prune orphan from heap — already popped but not in _queued_ops
             return
         target, op_types, result = self._queued_ops.pop(operation_id)
-        # Proactive stale eviction: keep _queued_ops bounded at all times
+        # Proactive stale eviction: keep _queued_ops bounded at all times.
+        # Exclude operation_id (just dequeued) so it is never flagged as stale.
         # Only run when dict is getting large to avoid O(n) on every dequeue
         if len(self._queued_ops) > self._MAX_QUEUED_OPS // 2:
             queued_ids = {oid for _, _, oid in self.operation_queue}
-            stale = [k for k in self._queued_ops if k not in queued_ids]
+            stale = [k for k in self._queued_ops if k not in queued_ids and k != operation_id]
             for k in stale:
                 self._queued_ops.pop(k, None)
                 self._queued_op_times.pop(k, None)
-        # Remove enqueue time
+        # Remove enqueue time for the dequeued op
         self._queued_op_times.pop(operation_id, None)
         # Place result where _execute_operation_async expects it
         self.active_operations[operation_id] = result
@@ -976,6 +981,13 @@ class UnifiedWebIntelligence:
                 self._add_completed_operation(operation_id, operation)
 
             self.active_operations.clear()
+
+            # F191C: cleanup must drain ALL transient structures
+            self._completed_operations.clear()
+            self._queued_ops.clear()
+            self._queued_op_times.clear()
+            while self.operation_queue:
+                heapq.heappop(self.operation_queue)
 
             # Drain owned operation tasks — fail-soft, symmetric with _track_task
             for task in list(self._active_tasks):
