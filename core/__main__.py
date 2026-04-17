@@ -823,8 +823,10 @@ async def run_sprint(
             if result.accepted_findings == 0 and _phase_times.get("WINDUP", 0) > 0 and is_meaningful
             else "depleted"
         )
-        # F176A+F169F reason chain — machine-readable, mutually exclusive.
-        # Covers all F176A+F169F buckets with explicit reason per bucket.
+        # F176A+F169F+F190A reason chain — machine-readable, mutually exclusive.
+        # F190A: chain order aligned with _ckpt_category (F189A fixes propagated to reason chain):
+        #   1. meaningful_empty_run BEFORE feed_ingress_blocker/feed_source_inaccessible
+        #   2. short_signal_no_findings BEFORE true_depleted_query:hits_without_acceptance
         _checkpoint_zero_reason = (
             # F176A: Hardware-limited smoke — evidence_note already has hardware_limited_smoke text
             evidence_note
@@ -841,21 +843,23 @@ async def run_sprint(
             if _public_backend_degraded
             else f"degraded_public_branch_blocked:{result.public_error}"
             if result.public_error
-            # F169F: feed_ingress_blocker before meaningful_empty_run
-            else f"feed_ingress_blocker:{result.public_discovered}"
-            if result.accepted_findings == 0 and feed_fnd == 0 and result.public_discovered > 0
-            # F169F: feed source inaccessible before meaningful_empty_run
-            else "feed_source_inaccessible"
-            if result.accepted_findings == 0 and result.total_pattern_hits == 0 and not result.public_error
+            # F190A: meaningful_empty_run BEFORE feed guards (aligns with _ckpt_category F189A order)
             else "meaningful_empty_run"
             if is_meaningful and result.total_pattern_hits == 0 and result.accepted_findings == 0
+            # F169F: feed_ingress_blocker (meaningful=False, public found signal)
+            else f"feed_ingress_blocker:{result.public_discovered}"
+            if result.accepted_findings == 0 and feed_fnd == 0 and result.public_discovered > 0
+            # F169F: feed source inaccessible
+            else "feed_source_inaccessible"
+            if result.accepted_findings == 0 and result.total_pattern_hits == 0 and not result.public_error
+            # F190A: short_signal_no_findings BEFORE true_depleted_query (aligns with _ckpt_category F189A order)
+            else "short_signal_no_findings"
+            if is_meaningful and result.total_pattern_hits > 0
             # F169F: true depleted query — hits seen but nothing accepted, no infra error
             else "true_depleted_query:hits_without_acceptance"
             if result.accepted_findings == 0 and result.total_pattern_hits > 0 and not _public_backend_degraded
             else "cross_branch_source_inaccessible"
             if _cross_branch_fail
-            else "short_signal_no_findings"
-            if is_meaningful and result.total_pattern_hits > 0
             else "depleted_no_pattern_hits"
         )
         _export_finish_status = (

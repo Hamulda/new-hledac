@@ -874,17 +874,21 @@ class AcademicSearchEngine:
         query: str,
         max_results: int = 20,
         enable_expansion: Optional[bool] = None,
-        sources: Optional[List[str]] = None
+        sources: Optional[List[str]] = None,
+        async_session: Optional[aiohttp.ClientSession] = None,
     ) -> AcademicSearchResult:
         """
         Execute multi-source academic search.
-        
+
         Args:
             query: Original search query
             max_results: Maximum total results to return
             enable_expansion: Whether to expand the query (overrides default)
             sources: List of source names to use (default: all)
-            
+            async_session: Optional shared aiohttp session for connection pooling.
+                         If provided, adapters reuse this session instead of
+                         creating per-call sessions (reduces connection overhead).
+
         Returns:
             Academic search result
         """
@@ -912,7 +916,7 @@ class AcademicSearchEngine:
             
             # Phase 3: Execute searches across sources
             all_source_results = await self._execute_searches(
-                query_variations, analysis, sources
+                query_variations, analysis, sources, async_session=async_session
             )
             
             # Collect all results
@@ -979,11 +983,12 @@ class AcademicSearchEngine:
         self,
         queries: List[str],
         analysis: QueryAnalysis,
-        sources: Optional[List[str]] = None
+        sources: Optional[List[str]] = None,
+        async_session: Optional[aiohttp.ClientSession] = None,
     ) -> Dict[str, SourceResult]:
         """Execute searches across all sources."""
         source_results = {}
-        
+
         # Filter sources if specified
         adapters_to_use = self.source_adapters
         if sources:
@@ -991,10 +996,10 @@ class AcademicSearchEngine:
                 name: adapter for name, adapter in self.source_adapters.items()
                 if name in sources
             }
-        
+
         # Create semaphore to limit concurrency
         semaphore = asyncio.Semaphore(5)
-        
+
         async def search_with_limit(
             source_name: str,
             adapter: BaseSourceAdapter,
@@ -1004,7 +1009,8 @@ class AcademicSearchEngine:
                 return await adapter.execute_search(
                     query,
                     max_results=adapter.config.max_results,
-                    analysis=analysis
+                    analysis=analysis,
+                    async_session=async_session,
                 )
         
         # Execute all searches
@@ -1242,6 +1248,16 @@ class SemanticScholarClient:
     def __init__(self, cache_dir: str | Path) -> None:
         self._cache_dir = Path(cache_dir)
         self._last_req = 0.0
+
+    async def __aenter__(self) -> "SemanticScholarClient":
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        await self.cleanup()
+
+    async def cleanup(self) -> None:
+        """Cleanup resources (placeholder for future connection/state cleanup)."""
+        self._last_req = 0.0  # reset throttle state on exit
 
     async def search_ss(
         self,

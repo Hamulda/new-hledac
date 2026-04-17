@@ -329,9 +329,11 @@ class TestStoreNone:
                 feed_url="https://feed.test/",
                 store=None,
             )
+            # F180B: store=None means count-only mode — both accepted and stored
+            # equal the number of findings that passed quality gate
             assert result.error is None
             assert result.accepted_findings == 1
-            assert result.stored_findings == 0
+            assert result.stored_findings == 1
 
 
 # ---------------------------------------------------------------------------

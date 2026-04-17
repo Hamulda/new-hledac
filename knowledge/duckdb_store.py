@@ -3991,12 +3991,9 @@ class DuckDBShadowStore:
 
         if accepted_findings:
             storage_results = await self.async_record_canonical_findings_batch(accepted_findings)
-            # Count accepted (lmdb_success) findings from the batch storage results
-            accepted_from_batch = sum(
-                1 for sr in storage_results
-                if (sr.get("lmdb_success") if isinstance(sr, dict) else getattr(sr, "lmdb_success", False))
-            )
-            self._accepted_count += accepted_from_batch
+            # NOTE: _accepted_count is incremented INSIDE async_record_canonical_findings_batch
+            # (line ~3454) — NOT here. Incrementing here would double-count because
+            # async_record_canonical_findings_batch already increments for lmdb_success results.
             for idx, sr in zip(accepted_indices, storage_results):
                 results[idx] = sr
 

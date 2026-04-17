@@ -1,58 +1,58 @@
 {
   "classification": "BLOCKED_BY_TOOLCHAIN",
   "baseline_interpreter": {
-    "path": "/Users/vojtechhamada/.pyenv/versions/3.12.12/bin/python3",
-    "version": "3.12.12 (main, Jan 27 2026, 14:47:29) [Clang 17.0.0 (clang-1700.3.19.1)]",
+    "path": "/Users/vojtechhamada/PycharmProjects/Hledac/.venv/bin/python",
+    "version": "3.12.12 (main, Oct 31 2025, 23:21:56) [Clang 21.1.4 ]",
     "version_info": [
       3,
       12,
       12
     ],
-    "executable": "/Users/vojtechhamada/.pyenv/versions/3.12.12/bin/python3",
+    "executable": "/Users/vojtechhamada/PycharmProjects/Hledac/.venv/bin/python",
     "gil_enabled": "NOT_SUPPORTED",
     "Py_GIL_DISABLED": null,
     "has_free_threading": false,
     "orchestrator": {
       "success": true,
       "runs": [
-        2.534093,
-        1.998154,
-        2.125201,
-        2.557211,
-        2.196803
+        1.850988,
+        2.393133,
+        1.875913,
+        1.399216,
+        1.382331
       ],
-      "median": 2.196803,
-      "stdev": 0.25085082948198517,
-      "min": 1.998154,
-      "max": 2.557211,
+      "median": 1.850988,
+      "stdev": 0.4163253726674607,
+      "min": 1.382331,
+      "max": 2.393133,
       "rss_samples_mb": [
         [
-          16,
-          281
+          19,
+          144
         ],
         [
-          16,
-          300
+          19,
+          123
         ],
         [
-          16,
-          291
+          19,
+          151
         ],
         [
-          16,
-          258
+          18,
+          143
         ],
         [
-          16,
-          277
+          19,
+          148
         ]
       ],
       "all_stderr": [
-        "fast-langdetect not available, using fallback detection\nWARNING:hledac.universal.tools.reranker:FlashRank not installed. Install with: pip install flashrank\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.intelligence.relationship_discovery:[LSH] datasketch not installed, LSH prediction disabled\nmx.metal.set_cache_limit is deprecated and will be removed in a future version. Use mx.set_cache_limit instead.\nmx.metal.set_wired_limit is deprecated and will be removed in a future version. Use mx.set_wired_limit instead.\nINFO:hledac.universal.utils.mlx_cache:MLX buffers initialized: cache=2560MB, wired=2560MB\nWARNING:hledac.universal.knowledge.entity_linker:rapidfuzz not available. Install with: pip install rapidfuzz\nINFO:hledac.universal.autonomous_orchestrator:[Metal] Heap capped at 4.8GB",
-        "fast-langdetect not available, using fallback detection\nWARNING:hledac.universal.tools.reranker:FlashRank not installed. Install with: pip install flashrank\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.intelligence.relationship_discovery:[LSH] datasketch not installed, LSH prediction disabled\nmx.metal.set_cache_limit is deprecated and will be removed in a future version. Use mx.set_cache_limit instead.\nmx.metal.set_wired_limit is deprecated and will be removed in a future version. Use mx.set_wired_limit instead.\nINFO:hledac.universal.utils.mlx_cache:MLX buffers initialized: cache=2560MB, wired=2560MB\nWARNING:hledac.universal.knowledge.entity_linker:rapidfuzz not available. Install with: pip install rapidfuzz\nINFO:hledac.universal.autonomous_orchestrator:[Metal] Heap capped at 4.8GB",
-        "fast-langdetect not available, using fallback detection\nWARNING:hledac.universal.tools.reranker:FlashRank not installed. Install with: pip install flashrank\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.intelligence.relationship_discovery:[LSH] datasketch not installed, LSH prediction disabled\nmx.metal.set_cache_limit is deprecated and will be removed in a future version. Use mx.set_cache_limit instead.\nmx.metal.set_wired_limit is deprecated and will be removed in a future version. Use mx.set_wired_limit instead.\nINFO:hledac.universal.utils.mlx_cache:MLX buffers initialized: cache=2560MB, wired=2560MB\nWARNING:hledac.universal.knowledge.entity_linker:rapidfuzz not available. Install with: pip install rapidfuzz\nINFO:hledac.universal.autonomous_orchestrator:[Metal] Heap capped at 4.8GB",
-        "fast-langdetect not available, using fallback detection\nWARNING:hledac.universal.tools.reranker:FlashRank not installed. Install with: pip install flashrank\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.intelligence.relationship_discovery:[LSH] datasketch not installed, LSH prediction disabled\nmx.metal.set_cache_limit is deprecated and will be removed in a future version. Use mx.set_cache_limit instead.\nmx.metal.set_wired_limit is deprecated and will be removed in a future version. Use mx.set_wired_limit instead.\nINFO:hledac.universal.utils.mlx_cache:MLX buffers initialized: cache=2560MB, wired=2560MB\nWARNING:hledac.universal.knowledge.entity_linker:rapidfuzz not available. Install with: pip install rapidfuzz\nINFO:hledac.universal.autonomous_orchestrator:[Metal] Heap capped at 4.8GB",
-        "fast-langdetect not available, using fallback detection\nWARNING:hledac.universal.tools.reranker:FlashRank not installed. Install with: pip install flashrank\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.intelligence.relationship_discovery:[LSH] datasketch not installed, LSH prediction disabled\nmx.metal.set_cache_limit is deprecated and will be removed in a future version. Use mx.set_cache_limit instead.\nmx.metal.set_wired_limit is deprecated and will be removed in a future version. Use mx.set_wired_limit instead.\nINFO:hledac.universal.utils.mlx_cache:MLX buffers initialized: cache=2560MB, wired=2560MB\nWARNING:hledac.universal.knowledge.entity_linker:rapidfuzz not available. Install with: pip install rapidfuzz\nINFO:hledac.universal.autonomous_orchestrator:[Metal] Heap capped at 4.8GB"
+        "fast-langdetect not available, using fallback detection\nWARNING:hledac.universal.tools.reranker:FlashRank not installed. Install with: pip install flashrank\nWARNING:hledac.universal.intelligence.web_intelligence:intel.webintel: optional Hledac components unavailable \u2014 running in degraded mode. Error: No module named 'hledac.advanced_web.captcha_solver'\nWARNING:hledac.universal.intelligence.document_intelligence:PIL not available - image analysis disabled\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.tools.source_bandit:[MSGPACK] not available, using JSON\nINFO:legacy.autonomous_orchestrator:[Metal] Heap capped at 4.8GB",
+        "fast-langdetect not available, using fallback detection\nWARNING:hledac.universal.tools.reranker:FlashRank not installed. Install with: pip install flashrank\nWARNING:hledac.universal.intelligence.web_intelligence:intel.webintel: optional Hledac components unavailable \u2014 running in degraded mode. Error: No module named 'hledac.advanced_web.captcha_solver'\nWARNING:hledac.universal.intelligence.document_intelligence:PIL not available - image analysis disabled\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.tools.source_bandit:[MSGPACK] not available, using JSON\nINFO:legacy.autonomous_orchestrator:[Metal] Heap capped at 4.8GB",
+        "fast-langdetect not available, using fallback detection\nWARNING:hledac.universal.tools.reranker:FlashRank not installed. Install with: pip install flashrank\nWARNING:hledac.universal.intelligence.web_intelligence:intel.webintel: optional Hledac components unavailable \u2014 running in degraded mode. Error: No module named 'hledac.advanced_web.captcha_solver'\nWARNING:hledac.universal.intelligence.document_intelligence:PIL not available - image analysis disabled\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.tools.source_bandit:[MSGPACK] not available, using JSON\nINFO:legacy.autonomous_orchestrator:[Metal] Heap capped at 4.8GB",
+        "fast-langdetect not available, using fallback detection\nWARNING:hledac.universal.tools.reranker:FlashRank not installed. Install with: pip install flashrank\nWARNING:hledac.universal.intelligence.web_intelligence:intel.webintel: optional Hledac components unavailable \u2014 running in degraded mode. Error: No module named 'hledac.advanced_web.captcha_solver'\nWARNING:hledac.universal.intelligence.document_intelligence:PIL not available - image analysis disabled\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.tools.source_bandit:[MSGPACK] not available, using JSON\nINFO:legacy.autonomous_orchestrator:[Metal] Heap capped at 4.8GB",
+        "fast-langdetect not available, using fallback detection\nWARNING:hledac.universal.tools.reranker:FlashRank not installed. Install with: pip install flashrank\nWARNING:hledac.universal.intelligence.web_intelligence:intel.webintel: optional Hledac components unavailable \u2014 running in degraded mode. Error: No module named 'hledac.advanced_web.captcha_solver'\nWARNING:hledac.universal.intelligence.document_intelligence:PIL not available - image analysis disabled\nWARNING:hledac.universal.intelligence.document_intelligence:PyMuPDF not available - advanced PDF analysis disabled\nWARNING:hledac.universal.tools.source_bandit:[MSGPACK] not available, using JSON\nINFO:legacy.autonomous_orchestrator:[Metal] Heap capped at 4.8GB"
       ],
       "n_runs": 5
     }
@@ -68,69 +68,69 @@
     "msgspec": {
       "current": {
         "rc": 0,
-        "stdout": "{\"success\": false, \"dt\": 0.00023662500007048948, \"error\": \"ModuleNotFoundError(\\\"No module named 'msgspec'\\\")\", \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 17, \"rss_after\": 17}",
+        "stdout": "{\"success\": true, \"dt\": 0.016724291001082747, \"error\": null, \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 19, \"rss_after\": 22}",
         "stderr": "",
-        "success": false,
-        "dt": 0.00023662500007048948,
-        "error": "ModuleNotFoundError(\"No module named 'msgspec'\")",
+        "success": true,
+        "dt": 0.016724291001082747,
+        "error": null,
         "gil_before": "NOT_SUPPORTED",
         "gil_after": "NOT_SUPPORTED",
-        "rss_before": 17,
-        "rss_after": 17,
-        "classification": "NOT_INSTALLED",
+        "rss_before": 19,
+        "rss_after": 22,
+        "classification": "GIL_ALREADY_ON",
         "package": "msgspec",
-        "python": "/Users/vojtechhamada/.pyenv/versions/3.12.12/bin/python3"
+        "python": "/Users/vojtechhamada/PycharmProjects/Hledac/.venv/bin/python"
       }
     },
     "duckdb": {
       "current": {
         "rc": 0,
-        "stdout": "{\"success\": false, \"dt\": 0.00021908399958192604, \"error\": \"ModuleNotFoundError(\\\"No module named 'duckdb'\\\")\", \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 16, \"rss_after\": 16}",
+        "stdout": "{\"success\": true, \"dt\": 0.1281745830001455, \"error\": null, \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 19, \"rss_after\": 39}",
         "stderr": "",
-        "success": false,
-        "dt": 0.00021908399958192604,
-        "error": "ModuleNotFoundError(\"No module named 'duckdb'\")",
+        "success": true,
+        "dt": 0.1281745830001455,
+        "error": null,
         "gil_before": "NOT_SUPPORTED",
         "gil_after": "NOT_SUPPORTED",
-        "rss_before": 16,
-        "rss_after": 16,
-        "classification": "NOT_INSTALLED",
+        "rss_before": 19,
+        "rss_after": 39,
+        "classification": "GIL_ALREADY_ON",
         "package": "duckdb",
-        "python": "/Users/vojtechhamada/.pyenv/versions/3.12.12/bin/python3"
+        "python": "/Users/vojtechhamada/PycharmProjects/Hledac/.venv/bin/python"
       }
     },
     "pyahocorasick": {
       "current": {
         "rc": 0,
-        "stdout": "{\"success\": false, \"dt\": 0.00019379200057301205, \"error\": \"ModuleNotFoundError(\\\"No module named 'pyahocorasick'\\\")\", \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 17, \"rss_after\": 17}",
+        "stdout": "{\"success\": false, \"dt\": 0.00014083300084166694, \"error\": \"ModuleNotFoundError(\\\"No module named 'pyahocorasick'\\\")\", \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 19, \"rss_after\": 19}",
         "stderr": "",
         "success": false,
-        "dt": 0.00019379200057301205,
+        "dt": 0.00014083300084166694,
         "error": "ModuleNotFoundError(\"No module named 'pyahocorasick'\")",
         "gil_before": "NOT_SUPPORTED",
         "gil_after": "NOT_SUPPORTED",
-        "rss_before": 17,
-        "rss_after": 17,
+        "rss_before": 19,
+        "rss_after": 19,
         "classification": "NOT_INSTALLED",
         "package": "pyahocorasick",
-        "python": "/Users/vojtechhamada/.pyenv/versions/3.12.12/bin/python3"
+        "python": "/Users/vojtechhamada/PycharmProjects/Hledac/.venv/bin/python"
       }
     },
     "lmdb": {
       "current": {
         "rc": 0,
-        "stdout": "{\"success\": true, \"dt\": 0.0020921249997627456, \"error\": null, \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 16, \"rss_after\": 17}",
+        "stdout": "{\"success\": true, \"dt\": 0.0023557919994345866, \"error\": null, \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 19, \"rss_after\": 19}",
         "stderr": "",
         "success": true,
-        "dt": 0.0020921249997627456,
+        "dt": 0.0023557919994345866,
         "error": null,
         "gil_before": "NOT_SUPPORTED",
         "gil_after": "NOT_SUPPORTED",
-        "rss_before": 16,
-        "rss_after": 17,
+        "rss_before": 19,
+        "rss_after": 19,
         "classification": "GIL_ALREADY_ON",
         "package": "lmdb",
-        "python": "/Users/vojtechhamada/.pyenv/versions/3.12.12/bin/python3"
+        "python": "/Users/vojtechhamada/PycharmProjects/Hledac/.venv/bin/python"
       },
       "ft_op": {
         "success": false,
@@ -141,38 +141,38 @@
     "curl_cffi": {
       "current": {
         "rc": 0,
-        "stdout": "{\"success\": false, \"dt\": 0.00013241699980426347, \"error\": \"ModuleNotFoundError(\\\"No module named 'curl_cffi'\\\")\", \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 16, \"rss_after\": 16}",
+        "stdout": "{\"success\": true, \"dt\": 0.11498245799884899, \"error\": null, \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 19, \"rss_after\": 31}",
         "stderr": "",
-        "success": false,
-        "dt": 0.00013241699980426347,
-        "error": "ModuleNotFoundError(\"No module named 'curl_cffi'\")",
+        "success": true,
+        "dt": 0.11498245799884899,
+        "error": null,
         "gil_before": "NOT_SUPPORTED",
         "gil_after": "NOT_SUPPORTED",
-        "rss_before": 16,
-        "rss_after": 16,
-        "classification": "NOT_INSTALLED",
+        "rss_before": 19,
+        "rss_after": 31,
+        "classification": "GIL_ALREADY_ON",
         "package": "curl_cffi",
-        "python": "/Users/vojtechhamada/.pyenv/versions/3.12.12/bin/python3"
+        "python": "/Users/vojtechhamada/PycharmProjects/Hledac/.venv/bin/python"
       }
     },
     "mlx": {
       "current": {
         "rc": 0,
-        "stdout": "{\"success\": true, \"dt\": 0.00015012499989097705, \"error\": null, \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 16, \"rss_after\": 16}",
+        "stdout": "{\"success\": true, \"dt\": 0.00017674999980954453, \"error\": null, \"gil_before\": \"NOT_SUPPORTED\", \"gil_after\": \"NOT_SUPPORTED\", \"rss_before\": 19, \"rss_after\": 19}",
         "stderr": "",
         "success": true,
-        "dt": 0.00015012499989097705,
+        "dt": 0.00017674999980954453,
         "error": null,
         "gil_before": "NOT_SUPPORTED",
         "gil_after": "NOT_SUPPORTED",
-        "rss_before": 16,
-        "rss_after": 16,
+        "rss_before": 19,
+        "rss_after": 19,
         "classification": "GIL_ALREADY_ON",
         "package": "mlx",
-        "python": "/Users/vojtechhamada/.pyenv/versions/3.12.12/bin/python3"
+        "python": "/Users/vojtechhamada/PycharmProjects/Hledac/.venv/bin/python"
       }
     }
   },
-  "venv_size_mb": 805.9404907226562,
+  "venv_size_mb": 0.0,
   "perf_delta_s": null
 }

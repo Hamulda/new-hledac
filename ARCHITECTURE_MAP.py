@@ -1,8 +1,18 @@
 """
-ARCHITECTURE_MAP — Live Architecture Map for hledac/universal
-============================================================
+ARCHITECTURE_MAP — Architecture Donor Document for hledac/universal
+===================================================================
 
-This module is the single source of truth for architecture documentation.
+.. role::
+    DONOR: This module is an ARCHITECTURE DONOR document. It captures
+    architecture knowledge as of LAST_UPDATED but is NOT authoritative.
+    The executable code in hledac/universal/ is the authoritative source.
+    This document may contain stale, inaccurate, or outdated information.
+
+.. authority_note::
+    Code truth beats map truth. When this document conflicts with code,
+    the code is correct. This document serves as a historical reference
+    and knowledge preservation tool, NOT as implementation guidance.
+
 Each agent writes to their section using triple-quoted strings.
 
 FORMAT:

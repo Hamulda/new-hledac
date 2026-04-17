@@ -1,28 +1,15 @@
 """
-✅ CANONICAL - Hermes3Engine pro Decision Making
+✅ CANONICAL - Hermes3Engine for Decision Making
 =================================================
 
-Toto je CANONICAL implementace pro decision making a orchestraci.
+This is the CANONICAL implementation for decision making and orchestration.
+Uses Hermes-3-Llama-3.2-3B-4bit as the primary model.
+Supports ChatML formatting, AI-driven query analysis, and research synthesis.
 
-Používá Hermes-3-Llama-3.2-3B-4bit jako hlavní model.
-Používá Hermes-3-Llama-3.2-3B-4bit pro decision making.
-
-Helper moduly (pouze pomocné funkce):
-- brain/moe_router.py - Mixture of Experts routing
-- brain/decision_engine.py - Základní decision logika
-
-Pro decision making vždy používejte tento modul:
-    from hledac.universal.brain.hermes3_engine import Hermes3Engine
-
-Features:
-- ChatML formátování
-- AI-driven query analysis
-- Research synthesis
-
-NOTE (Sprint 8VH): brain/inference_engine.py je FUNKČNĚ ODLIŠNÝ:
+NOTE (Sprint 8VH): brain/inference_engine.py is FUNKČNĚ ODLIŠNÝ:
   - inference_engine: abductive reasoning, evidence chaining, entity resolution, inference rules
   - hermes3_engine: LLM-based decision making, ChatML, structured generation
-  Obě jsou kanonické pro své domain — žádná deduplikace není nutná.
+  Both are canonical for their domains — no deduplication needed.
 """
 
 from __future__ import annotations
