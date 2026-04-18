@@ -2531,6 +2531,18 @@ class SprintScheduler:
                         for item in (getattr(pack, 'operator_shortlist', None) or [])[:3]
                         if isinstance(item, dict)
                     ],
+                    # Sprint F191D: discarded_as_redundant — what was dropped and why
+                    # Bounded: max 3 items, fail-soft, memory-cheap
+                    "discarded_as_redundant": [
+                        {"action_type": item.get("action_type", ""),
+                         "query": item.get("query", "")[:120],
+                         "reason_discarded": item.get("reason_discarded", ""),
+                         "pivot_type": item.get("pivot_type", ""),
+                         "priority": item.get("priority", 0.0)}
+                        for item in (getattr(pack, 'discarded_as_redundant', lambda max_items=3: [])(
+                            max_items=3) or [])[:3]
+                        if isinstance(item, dict)
+                    ],
                 }
         except Exception:
             result["hypothesis_pack"] = None
